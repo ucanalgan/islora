@@ -4,9 +4,10 @@ dist/
 # Personal settings. The calendar address in them is a secret, so neither the
 # settings file nor a calendar export may ever enter the repository.
 config.toml
+!.cargo/config.toml
 *.ics
 .env
 .env.*
 
-# Working notes about one machine and its owner, kept on that machine only.
+# Local working notes.
 docs/PLAN.md
