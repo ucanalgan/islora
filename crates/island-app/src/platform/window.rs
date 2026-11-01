@@ -33,6 +33,14 @@ pub fn create_island(wnd_proc: WNDPROC) -> Result<HWND> {
     create(ISLAND_CLASS, style)
 }
 
+/// Leaves the island out of screenshots, recordings and shared screens, where
+/// it would only be in the way. What is behind it shows there instead.
+pub fn exclude_from_capture(hwnd: HWND) {
+    if let Err(error) = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } {
+        eprintln!("capture exclusion failed: {error}");
+    }
+}
+
 /// A one pixel strip along the top edge. Nearly transparent rather than fully,
 /// because a fully transparent layered window receives no mouse input.
 pub fn create_edge(wnd_proc: WNDPROC) -> Result<HWND> {

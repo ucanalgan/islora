@@ -5,7 +5,7 @@
 $TestPlayerExe = "$PSScriptRoot\..\spikes\test_player\target\release\test_player.exe"
 $TestSession = 'test_player.exe'
 # Follows nothing, so a real player cannot affect the result.
-$NoSession = @('--only-session', 'no-such-session')
+$NoSession = @('--only-session', 'no-such-session', '--capturable')
 
 function New-MediaFixture([string]$Directory) {
     New-Item -ItemType Directory -Force $Directory | Out-Null

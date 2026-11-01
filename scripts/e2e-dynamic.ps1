@@ -44,7 +44,7 @@ try {
     'Two activities'
     $player = Start-TestPlayer $fixture 120 $playerLog
     Start-Sleep -Milliseconds 1200
-    Start-Process -FilePath $Exe -ArgumentList '--only-session', $TestSession, '--calendar-file', "`"$calendar`"", '--local-timers'
+    Start-Process -FilePath $Exe -ArgumentList '--only-session', $TestSession, '--capturable', '--calendar-file', "`"$calendar`"", '--local-timers'
     Start-Sleep -Milliseconds 2200
     $hwnd = (Island).ToInt64()
     # The pill fits its content, so the bubble is found by looking along the top.

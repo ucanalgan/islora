@@ -67,9 +67,9 @@ const TIMER_LANGUAGE: usize = 11;
 
 /// When the pill looks settled. The compositor's own completion event only
 /// fires about 1.2 s after an animation starts, long after it visibly stopped.
-const SETTLE_MS: u32 = 420;
+const SETTLE_MS: u32 = 520;
 /// How long the pill takes to shrink away before the window hides.
-const HIDE_MS: u32 = 260;
+const HIDE_MS: u32 = 380;
 /// How long the pointer must rest on the top edge, so that passing over it to
 /// reach a browser tab does not open anything.
 const EDGE_DWELL_MS: u32 = 120;
@@ -177,6 +177,10 @@ pub fn run() -> Result<()> {
 
     let _dispatcher = render::create_dispatcher_queue()?;
     let island_window = window::create_island(Some(island_proc))?;
+    // Tests read the screen, and need to see what they are checking.
+    if !std::env::args().any(|a| a == "--capturable") {
+        window::exclude_from_capture(island_window);
+    }
     let edge_window = window::create_edge(Some(edge_proc))?;
     let placement = window::place(island_window, edge_window, stored_style())?;
     let wave_motion = match argument_after("--wave").as_deref() {
@@ -543,6 +547,9 @@ impl App {
                 }
                 OpenView::Other => {}
             }
+        }
+        if let Err(error) = self.renderer.press() {
+            eprintln!("press failed: {error}");
         }
         self.island.click(now);
         self.refresh();

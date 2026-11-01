@@ -106,7 +106,7 @@ function Click-Button([int]$Offset, [long]$Window) {
 }
 
 try {
-    Start-Process -FilePath $Exe -ArgumentList '--only-session', $Session
+    Start-Process -FilePath $Exe -ArgumentList '--only-session', $Session, '--capturable'
     Start-Sleep -Milliseconds 1800
     $island = [Win]::FindWindowW('IsloraWindow', [NullString]::Value)
     Check 'Spotify shows in the island by itself' ([Win]::IsWindowVisible($island))

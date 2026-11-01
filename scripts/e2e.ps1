@@ -132,7 +132,7 @@ try {
     $playerLog = Join-Path $Shots 'player.txt'
     $player = Start-TestPlayer $fixture 40 $playerLog
     Start-Sleep -Milliseconds 1200
-    Start-Process -FilePath $Exe -ArgumentList '--only-session', $TestSession
+    Start-Process -FilePath $Exe -ArgumentList '--only-session', $TestSession, '--capturable'
     Start-Sleep -Milliseconds 1500
     Check 'a playing session shows by itself' (Visible)
     Shot '6-media-compact'

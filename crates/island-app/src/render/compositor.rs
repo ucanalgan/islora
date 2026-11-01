@@ -21,12 +21,29 @@ use windows::core::{Interface, Result, h};
 use windows_numerics::{Vector2, Vector3};
 
 use super::scene::{ClockText, CompactFit, Scene, WAVE_RESERVED, bubble_painting};
-use super::spring::{CALM, LIVELY, Spring, fade, spring_scalar, spring_vector2};
+use super::spring::{
+    CALM, LIVELY, SOFT, Spring, fade, spring_scalar, spring_vector2, spring_vector3, trailing,
+};
 use super::text::Painter;
 
-const FADE_IN: Duration = Duration::from_millis(180);
-const FADE_OUT: Duration = Duration::from_millis(90);
-const FADE_IN_DELAY: Duration = Duration::from_millis(70);
+const FADE_IN: Duration = Duration::from_millis(240);
+const FADE_OUT: Duration = Duration::from_millis(130);
+const FADE_IN_DELAY: Duration = Duration::from_millis(50);
+/// New content starts this much smaller and grows with the pill, from its top
+/// edge, instead of waiting inside it to be revealed.
+const CONTENT_START_SCALE: f32 = 0.92;
+/// Old content sinks back as it fades, so the two do not sit on top of each other.
+const CONTENT_END_SCALE: f32 = 0.97;
+/// The island comes up out of nothing from a little smaller than it will be.
+const EMERGE_SCALE: f32 = 0.86;
+const EMERGE_FADE: Duration = Duration::from_millis(150);
+const LEAVE_FADE: Duration = Duration::from_millis(240);
+const LEAVE_DELAY: Duration = Duration::from_millis(60);
+const LEAVE_SCALE: f32 = 0.92;
+/// The dip the island gives under a click, as a pressed thing would.
+const PRESS_SCALE: f32 = 0.97;
+const PRESS_TIME: Duration = Duration::from_millis(280);
+const BUBBLE_START_SCALE: f32 = 0.6;
 
 const WAVE_BARS: usize = 4;
 const WAVE_BAR_WIDTH: f32 = 3.0;
@@ -107,7 +124,7 @@ struct Wave {
 impl Wave {
     fn new(compositor: &Compositor) -> Result<Self> {
         let container = compositor.CreateContainerVisual()?;
-        container.SetIsVisible(false)?;
+        container.SetOpacity(0.0)?;
         let white = compositor.CreateColorBrushWithColor(Color { A: 220, R: 255, G: 255, B: 255 })?;
         let mut bars = Vec::with_capacity(WAVE_BARS);
         for index in 0..WAVE_BARS {
@@ -120,15 +137,20 @@ impl Wave {
         Ok(Self { container, bars, visible: false, moving: false })
     }
 
-    fn place(&self, pill: Pill, origin: Vector2, scale: f32) -> Result<()> {
+    /// The right edge of a pill moves with its spring, so bars already on show
+    /// follow it rather than jump to where it will end up.
+    fn place(&self, compositor: &Compositor, pill: Pill, origin: Vector2, scale: f32) -> Result<()> {
         let total = WAVE_BAR_WIDTH * WAVE_BARS as f32 + WAVE_BAR_GAP * (WAVE_BARS - 1) as f32;
         let left = (WAVE_RESERVED - total) / 2.0 - 6.0;
         let top = (pill.height / scale - WAVE_BAR_HEIGHT) / 2.0;
-        self.container.SetOffset(Vector3 {
-            X: origin.X + pill.width - (WAVE_RESERVED - left) * scale,
-            Y: origin.Y + top * scale,
-            Z: 0.0,
-        })?;
+        let x = origin.X + pill.width - (WAVE_RESERVED - left) * scale;
+        let y = origin.Y + top * scale;
+        if self.visible {
+            spring_scalar(compositor, &self.container, h!("Offset.X"), x, LIVELY)?;
+        } else {
+            self.container.StopAnimation(h!("Offset.X"))?;
+            self.container.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
+        }
         for (index, bar) in self.bars.iter().enumerate() {
             let height = WAVE_BAR_HEIGHT * scale;
             bar.SetSize(Vector2 { X: WAVE_BAR_WIDTH * scale, Y: height })?;
@@ -142,10 +164,14 @@ impl Wave {
         Ok(())
     }
 
-    fn set_visible(&mut self, visible: bool) -> Result<()> {
+    fn set_visible(&mut self, compositor: &Compositor, visible: bool) -> Result<()> {
         if self.visible != visible {
             self.visible = visible;
-            self.container.SetIsVisible(visible)?;
+            let (opacity, duration, delay) = match visible {
+                true => (1.0, FADE_IN, FADE_IN_DELAY),
+                false => (0.0, FADE_OUT, Duration::ZERO),
+            };
+            fade(compositor, &self.container, opacity, duration, delay)?;
         }
         Ok(())
     }
@@ -157,8 +183,9 @@ impl Wave {
         self.moving = moving;
         for (index, bar) in self.bars.iter().enumerate() {
             if !moving {
+                // Stopping keeps the bar where it was, so it can sink from there.
                 bar.StopAnimation(h!("Scale.Y"))?;
-                bar.SetScale(rest_scale(index))?;
+                spring_scalar(compositor, bar, h!("Scale.Y"), rest_scale(index).Y, SOFT)?;
                 continue;
             }
             let animation = compositor.CreateScalarKeyFrameAnimation()?;
@@ -193,6 +220,8 @@ struct BubbleShape {
 pub struct Renderer {
     compositor: Compositor,
     _target: DesktopWindowTarget,
+    /// Holds everything, so the island can come and go as one.
+    root: ContainerVisual,
     geometry: CompositionRoundedRectangleGeometry,
     /// Left and right curve of a notch.
     shoulders: [SpriteVisual; 2],
@@ -283,6 +312,7 @@ impl Renderer {
         let mut renderer = Self {
             compositor,
             _target: target,
+            root,
             geometry,
             shoulders,
             moving,
@@ -344,9 +374,16 @@ impl Renderer {
     /// Jumps to the hidden sliver, ready to spring open.
     pub fn snap_to_hidden(&mut self) -> Result<()> {
         for property in [h!("Size"), h!("CornerRadius"), h!("Offset")] {
-            self.geometry.StopAnimation(property)?;
             self.bubble.geometry.StopAnimation(property)?;
         }
+        for property in [h!("Size.X"), h!("Size.Y"), h!("CornerRadius"), h!("Offset.X"), h!("Offset.Y")] {
+            self.geometry.StopAnimation(property)?;
+        }
+        self.root.StopAnimation(h!("Opacity"))?;
+        self.root.StopAnimation(h!("Scale"))?;
+        self.root.SetOpacity(0.0)?;
+        self.root.SetCenterPoint(Vector3 { X: self.window_width / 2.0, Y: 0.0, Z: 0.0 })?;
+        self.root.SetScale(Vector3 { X: EMERGE_SCALE, Y: EMERGE_SCALE, Z: 1.0 })?;
         self.moving.StopAnimation(h!("Offset.X"))?;
         self.moving.SetOffset(Vector3::default())?;
         self.bubble.geometry.SetSize(Vector2::default())?;
@@ -378,6 +415,17 @@ impl Renderer {
             other => Pill::for_presentation(other),
         };
         pill.scaled(self.scale)
+    }
+
+    /// Gives way a little under a click, which makes it feel like a real object.
+    pub fn press(&self) -> Result<()> {
+        let rest = Vector3 { X: 1.0, Y: 1.0, Z: 1.0 };
+        let animation = self.compositor.CreateVector3KeyFrameAnimation()?;
+        animation.InsertKeyFrame(0.0, rest)?;
+        animation.InsertKeyFrame(0.3, Vector3 { X: PRESS_SCALE, Y: PRESS_SCALE, Z: 1.0 })?;
+        animation.InsertKeyFrame(1.0, rest)?;
+        animation.SetDuration(TimeSpan::from(PRESS_TIME))?;
+        self.root.StartAnimation(h!("Scale"), &animation)
     }
 
     /// Fits the compact pill to the scene. Only measures when its text changed.
@@ -432,8 +480,22 @@ impl Renderer {
         let bubble = frame.secondary.as_ref().map(|activity| activity.bubble());
         let bubble_changed = self.bubble.shown.is_some() != bubble.is_some();
 
+        let was_gone = self.pill == Some(self.pill_for(Presentation::Hidden));
+        if !hidden && was_gone {
+            fade(&self.compositor, &self.root, 1.0, EMERGE_FADE, Duration::ZERO)?;
+            spring_vector3(&self.compositor, &self.root, h!("Scale"), (1.0, 1.0, 1.0), LIVELY)?;
+        } else if hidden && !was_gone {
+            fade(&self.compositor, &self.root, 0.0, LEAVE_FADE, LEAVE_DELAY)?;
+            spring_vector3(&self.compositor, &self.root, h!("Scale"), (LEAVE_SCALE, LEAVE_SCALE, 1.0), CALM)?;
+        }
+
         if resized || bubble_changed {
-            let spring = if hidden { CALM } else { LIVELY };
+            let shrinking = self.pill.is_some_and(|shown| pill.width * pill.height < shown.width * shown.height);
+            let spring = match (hidden, shrinking) {
+                (true, _) => CALM,
+                (false, true) => SOFT,
+                (false, false) => LIVELY,
+            };
             self.update_bubble(bubble, pill, spring)?;
             self.spring_pill(pill, spring)?;
             self.pill = Some(pill);
@@ -443,7 +505,7 @@ impl Renderer {
 
         if hidden {
             self.wave.set_moving(&self.compositor, false)?;
-            self.wave.set_visible(false)?;
+            self.wave.set_visible(&self.compositor, false)?;
             fade(&self.compositor, &self.layers[self.front].visual, 0.0, FADE_OUT, Duration::ZERO)?;
             self.scene = None;
             return Ok(resized);
@@ -456,11 +518,11 @@ impl Renderer {
         if in_place {
             self.repaint_front(&scene, pill)?;
         } else {
-            self.cross_fade(&scene, pill)?;
+            self.cross_fade(&scene, pill, resized)?;
         }
 
         let origin = self.pill_origin(pill);
-        self.wave.place(pill, origin, self.scale)?;
+        self.wave.place(&self.compositor, pill, origin, self.scale)?;
         self.update_wave(&scene)?;
         self.scene = Some(scene);
         Ok(resized)
@@ -468,7 +530,7 @@ impl Renderer {
 
     fn update_wave(&mut self, scene: &Scene) -> Result<()> {
         let shows = scene.shows_wave();
-        self.wave.set_visible(shows)?;
+        self.wave.set_visible(&self.compositor, shows)?;
         self.wave.set_moving(&self.compositor, shows && self.wave_motion == WaveMotion::Always)
     }
 
@@ -489,9 +551,12 @@ impl Renderer {
         let compositor = &self.compositor;
         let geometry = &self.geometry;
         let slide = if self.has_bubble() { -self.bubble_shift() } else { 0.0 };
-        spring_vector2(compositor, geometry, h!("Size"), (shape.width, shape.height), spring)?;
-        spring_vector2(compositor, geometry, h!("CornerRadius"), (shape.radius, shape.radius), spring)?;
-        spring_vector2(compositor, geometry, h!("Offset"), (offset.X + slide, offset.Y), spring)?;
+        let tall = trailing(spring);
+        spring_scalar(compositor, geometry, h!("Size.X"), shape.width, spring)?;
+        spring_scalar(compositor, geometry, h!("Offset.X"), offset.X + slide, spring)?;
+        spring_scalar(compositor, geometry, h!("Size.Y"), shape.height, tall)?;
+        spring_scalar(compositor, geometry, h!("Offset.Y"), offset.Y, tall)?;
+        spring_vector2(compositor, geometry, h!("CornerRadius"), (shape.radius, shape.radius), tall)?;
         if self.style == IslandStyle::Notch {
             let showing = pill != self.pill_for(Presentation::Hidden);
             self.spring_shoulders(offset.X + slide, shape, showing, spring)?;
@@ -543,7 +608,11 @@ impl Renderer {
             spring_vector2(&compositor, geometry, h!("Size"), (shape.width, shape.height), spring)?;
             spring_vector2(&compositor, geometry, h!("CornerRadius"), (shape.radius, shape.radius), spring)?;
             spring_vector2(&compositor, geometry, h!("Offset"), (left, shape_top), spring)?;
-            fade(&compositor, &self.bubble.visual, 1.0, FADE_IN, FADE_IN_DELAY)?;
+            let visual = &self.bubble.visual;
+            visual.SetCenterPoint(Vector3 { X: size.width / 2.0, Y: size.height / 2.0, Z: 0.0 })?;
+            visual.SetScale(Vector3 { X: BUBBLE_START_SCALE, Y: BUBBLE_START_SCALE, Z: 1.0 })?;
+            spring_vector3(&compositor, visual, h!("Scale"), (1.0, 1.0, 1.0), spring)?;
+            fade(&compositor, visual, 1.0, FADE_IN, FADE_IN_DELAY)?;
         }
         Ok(())
     }
@@ -575,11 +644,11 @@ impl Renderer {
         let painting = scene.painting(pill, self.scale, self.corner(pill));
         match &self.layers[self.front].surface {
             Some(surface) => self.painter.draw(surface, &painting),
-            None => self.cross_fade(scene, pill),
+            None => self.cross_fade(scene, pill, false),
         }
     }
 
-    fn cross_fade(&mut self, scene: &Scene, pill: Pill) -> Result<()> {
+    fn cross_fade(&mut self, scene: &Scene, pill: Pill, resized: bool) -> Result<()> {
         let painting = scene.painting(pill, self.scale, self.corner(pill));
         let surface = self.painter.create_surface(pill.width, pill.height)?;
         self.painter.draw(&surface, &painting)?;
@@ -590,10 +659,21 @@ impl Renderer {
         incoming.surface = Some(surface);
         incoming.visual.SetSize(Vector2 { X: pill.width, Y: pill.height })?;
         incoming.visual.SetOffset(Vector3 { X: origin.X, Y: origin.Y, Z: 0.0 })?;
+        incoming.visual.SetCenterPoint(Vector3 { X: pill.width / 2.0, Y: 0.0, Z: 0.0 })?;
+        incoming.visual.StopAnimation(h!("Scale"))?;
+        let start = if resized { CONTENT_START_SCALE } else { 1.0 };
+        incoming.visual.SetScale(Vector3 { X: start, Y: start, Z: 1.0 })?;
+        if resized {
+            spring_vector3(&self.compositor, &incoming.visual, h!("Scale"), (1.0, 1.0, 1.0), LIVELY)?;
+        }
         fade(&self.compositor, &incoming.visual, 1.0, FADE_IN, FADE_IN_DELAY)?;
 
         let outgoing = &self.layers[self.front];
         fade(&self.compositor, &outgoing.visual, 0.0, FADE_OUT, Duration::ZERO)?;
+        if resized {
+            let end = (CONTENT_END_SCALE, CONTENT_END_SCALE, 1.0);
+            spring_vector3(&self.compositor, &outgoing.visual, h!("Scale"), end, SOFT)?;
+        }
 
         self.front = 1 - self.front;
         Ok(())
