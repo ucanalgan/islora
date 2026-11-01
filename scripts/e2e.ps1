@@ -4,8 +4,8 @@
 # restoring both. Exits 1 if any check fails. The app always runs with
 # --only-session, so real media players are ignored and never controlled.
 param(
-    [string]$Exe = "$PSScriptRoot\..\target\release\dynamic-island.exe",
-    [string]$Shots = "$env:TEMP\dynamic-island-e2e"
+    [string]$Exe = "$PSScriptRoot\..\target\release\islora.exe",
+    [string]$Shots = "$env:TEMP\islora-e2e"
 )
 
 . "$PSScriptRoot\media-fixture.ps1"
@@ -19,7 +19,7 @@ $foreground = [Win]::GetForegroundWindow()
 
 try {
     'Startup'
-    Get-Process dynamic-island, dynamic_island -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process islora -ErrorAction SilentlyContinue | Stop-Process -Force
     # A killed copy holds the single-instance lock for a moment.
     Start-Sleep -Milliseconds 800
     Start-Process -FilePath $Exe -ArgumentList $NoSession
@@ -246,12 +246,12 @@ try {
     Stop-Island
 
     'Shutdown'
-    Check 'closes cleanly' (-not (Get-Process dynamic-island, dynamic_island -ErrorAction SilentlyContinue))
+    Check 'closes cleanly' (-not (Get-Process islora -ErrorAction SilentlyContinue))
 }
 finally {
     [Win]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
     [void][Win]::SetCursorPos($saved.X, $saved.Y)
-    Get-Process dynamic-island, dynamic_island, test_player -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process islora, test_player -ErrorAction SilentlyContinue | Stop-Process -Force
 }
 
 "Screenshots: $Shots"

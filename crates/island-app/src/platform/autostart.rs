@@ -9,7 +9,7 @@ use windows::Win32::System::Registry::{
 use windows::core::{PCWSTR, w};
 
 const RUN: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-const NAME: PCWSTR = w!("DynamicIsland");
+const NAME: PCWSTR = w!("Islora");
 const LONGEST_COMMAND: usize = 1024;
 
 fn this_copy() -> Option<String> {

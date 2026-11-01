@@ -58,8 +58,8 @@ function Wait-Until([scriptblock]$Condition, [int]$Milliseconds) {
     $false
 }
 
-function Island { [Win]::FindWindowW('DynamicIslandWindow', [NullString]::Value) }
-function Edge { [Win]::FindWindowW('DynamicIslandEdge', [NullString]::Value) }
+function Island { [Win]::FindWindowW('IsloraWindow', [NullString]::Value) }
+function Edge { [Win]::FindWindowW('IsloraEdge', [NullString]::Value) }
 function Visible { [Win]::IsWindowVisible((Island)) }
 
 $centerX = [int]([Win]::GetSystemMetrics(0) / 2)

@@ -1,10 +1,10 @@
-# End-to-end checks of the dynamic island: two activities at once, the bubble,
+# End-to-end checks of the island: two activities at once, the bubble,
 # the home view, the timer and calendar reminders. Uses the silent test player
 # and a made-up calendar file, so real music and real events are never touched.
 # Moves the mouse: leave the machine alone for about 40 seconds.
 param(
-    [string]$Exe = "$PSScriptRoot\..\target\release\dynamic-island.exe",
-    [string]$Shots = "$env:TEMP\dynamic-island-e2e"
+    [string]$Exe = "$PSScriptRoot\..\target\release\islora.exe",
+    [string]$Shots = "$env:TEMP\islora-e2e"
 )
 
 . "$PSScriptRoot\media-fixture.ps1"
@@ -37,7 +37,7 @@ $calendar = New-CalendarFixture $Shots
 $playerLog = Join-Path $Shots 'player.txt'
 
 try {
-    Get-Process dynamic-island, dynamic_island, test_player -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process islora, test_player -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 800
     [void][Win]::SetCursorPos($centerX, 600)
 
@@ -240,12 +240,12 @@ try {
     }
 
     'Shutdown'
-    Check 'closes cleanly' (-not (Get-Process dynamic-island -ErrorAction SilentlyContinue))
+    Check 'closes cleanly' (-not (Get-Process islora -ErrorAction SilentlyContinue))
 }
 finally {
     [Win]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
     [void][Win]::SetCursorPos($saved.X, $saved.Y)
-    Get-Process dynamic-island, dynamic_island, test_player -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process islora, test_player -ErrorAction SilentlyContinue | Stop-Process -Force
 }
 
 "Screenshots: $Shots"

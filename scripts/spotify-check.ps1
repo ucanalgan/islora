@@ -3,8 +3,8 @@
 # only when they ask for it. The app is pinned to Spotify's session, so commands
 # cannot reach any other player even if Windows changes the current session.
 param(
-    [string]$Exe = "$PSScriptRoot\..\target\release\dynamic-island.exe",
-    [string]$Shots = "$env:TEMP\dynamic-island-spotify",
+    [string]$Exe = "$PSScriptRoot\..\target\release\islora.exe",
+    [string]$Shots = "$env:TEMP\islora-spotify",
     [string]$Session = 'Spotify.exe'
 )
 
@@ -92,7 +92,7 @@ if (-not $before) { "No $Session session. Start Spotify and play something first
 
 $saved = New-Object Win+POINT
 [void][Win]::GetCursorPos([ref]$saved)
-Get-Process dynamic-island, dynamic_island -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process islora -ErrorAction SilentlyContinue | Stop-Process -Force
 # A killed copy holds the single-instance lock for a moment.
 Start-Sleep -Milliseconds 800
 
@@ -108,7 +108,7 @@ function Click-Button([int]$Offset, [long]$Window) {
 try {
     Start-Process -FilePath $Exe -ArgumentList '--only-session', $Session
     Start-Sleep -Milliseconds 1800
-    $island = [Win]::FindWindowW('DynamicIslandWindow', [NullString]::Value)
+    $island = [Win]::FindWindowW('IsloraWindow', [NullString]::Value)
     Check 'Spotify shows in the island by itself' ([Win]::IsWindowVisible($island))
     Shot 's1-compact'
 
@@ -145,15 +145,15 @@ try {
     Start-Sleep -Milliseconds 700
     Shot 's5-previous'
 
-    $island = [Win]::FindWindowW('DynamicIslandWindow', [NullString]::Value)
+    $island = [Win]::FindWindowW('IsloraWindow', [NullString]::Value)
     Check 'the app is still running' ($island -ne [IntPtr]::Zero)
 }
 finally {
     [void][Win]::SetCursorPos($saved.X, $saved.Y)
-    $island = [Win]::FindWindowW('DynamicIslandWindow', [NullString]::Value)
+    $island = [Win]::FindWindowW('IsloraWindow', [NullString]::Value)
     if ($island -ne [IntPtr]::Zero) { [void][Win]::PostMessageW($island, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
     Start-Sleep -Milliseconds 500
-    Get-Process dynamic-island, dynamic_island -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process islora -ErrorAction SilentlyContinue | Stop-Process -Force
 }
 
 $after = Get-Player

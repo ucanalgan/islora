@@ -3,7 +3,7 @@
 # hide from the app's own numbers. Run after `cargo build --release`.
 # Exits 1 if the budget is exceeded. Real media players are never touched.
 param(
-    [string]$Exe = "$PSScriptRoot\..\target\release\dynamic-island.exe",
+    [string]$Exe = "$PSScriptRoot\..\target\release\islora.exe",
     [int]$Seconds = 15,
     # dwm.exe is noisy, since it also draws everything else on screen, so the
     # wave modes are alternated over several rounds and compared by median.
@@ -26,10 +26,10 @@ public static class Win {
 '@
 
 function Close-Island {
-    $hwnd = [Win]::FindWindowW('DynamicIslandWindow', [NullString]::Value)
+    $hwnd = [Win]::FindWindowW('IsloraWindow', [NullString]::Value)
     if ($hwnd -ne [IntPtr]::Zero) { [void][Win]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
     Start-Sleep -Milliseconds 500
-    Get-Process dynamic-island, dynamic_island -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process islora -ErrorAction SilentlyContinue | Stop-Process -Force
 }
 
 # Reading dwm.exe's process times is denied, so this uses the performance
@@ -89,7 +89,7 @@ function Measure-Island([string]$Name, [string[]]$Arguments, [switch]$MustShow) 
     if ($process.HasExited) { throw "$Name`: the app exited during startup with code $($process.ExitCode)" }
     $sample = Measure-Window $process
     # A measurement of a pill that was not there would look like a great result.
-    if ($MustShow -and -not [Win]::IsWindowVisible([Win]::FindWindowW('DynamicIslandWindow', [NullString]::Value))) {
+    if ($MustShow -and -not [Win]::IsWindowVisible([Win]::FindWindowW('IsloraWindow', [NullString]::Value))) {
         Close-Island
         throw "$Name`: the pill was not on screen, so this sample means nothing"
     }
@@ -98,12 +98,12 @@ function Measure-Island([string]$Name, [string[]]$Arguments, [switch]$MustShow) 
     [pscustomobject]$sample
 }
 
-Get-Process dynamic-island, dynamic_island -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process islora -ErrorAction SilentlyContinue | Stop-Process -Force
 # A killed copy holds the single-instance lock for a moment.
 Start-Sleep -Milliseconds 800
 
-$fixture = New-MediaFixture (Join-Path $env:TEMP 'dynamic-island-measure')
-$playerLog = Join-Path $env:TEMP 'dynamic-island-measure\player.txt'
+$fixture = New-MediaFixture (Join-Path $env:TEMP 'islora-measure')
+$playerLog = Join-Path $env:TEMP 'islora-measure\player.txt'
 # Generous on purpose: the counters above take seconds to read, and a player that
 # quits early would silently turn the last samples into measurements of nothing.
 $playerSeconds = $Rounds * 2 * ($Seconds + 20) + 60

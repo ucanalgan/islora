@@ -59,7 +59,7 @@ impl Tray {
             hIcon: if taskbar_is_light() { black } else { white },
             ..Default::default()
         };
-        let tip: Vec<u16> = "Dynamic Island".encode_utf16().collect();
+        let tip: Vec<u16> = "Islora".encode_utf16().collect();
         data.szTip[..tip.len()].copy_from_slice(&tip);
 
         let tray = Self { data, white, black };

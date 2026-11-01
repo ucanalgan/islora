@@ -8,7 +8,7 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, w};
 
 const TEMPLATE: &str = "\
-# Dynamic Island ayarları
+# Islora ayarları
 #
 # Google Takvim adresi. Google Takvim'de: Ayarlar > sol taraftan takviminin adı >
 # Takvimi entegre et > \"iCal biçiminde gizli adres\". Bu adres şifre gibidir,
@@ -48,8 +48,13 @@ const LATER_NOTICES: &str = "
 ";
 
 fn path() -> Option<PathBuf> {
-    let folder = std::env::var_os("APPDATA")?;
-    Some(PathBuf::from(folder).join("DynamicIsland").join("config.toml"))
+    let roaming = PathBuf::from(std::env::var_os("APPDATA")?);
+    let folder = roaming.join("Islora");
+    // Settings from when the app had another name come along.
+    if !folder.exists() {
+        let _ = std::fs::rename(roaming.join("DynamicIsland"), &folder);
+    }
+    Some(folder.join("config.toml"))
 }
 
 /// Creates the file on first run, so there is something to fill in.

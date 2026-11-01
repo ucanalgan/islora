@@ -12,8 +12,8 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
-const ISLAND_CLASS: PCWSTR = w!("DynamicIslandWindow");
-const EDGE_CLASS: PCWSTR = w!("DynamicIslandEdge");
+const ISLAND_CLASS: PCWSTR = w!("IsloraWindow");
+const EDGE_CLASS: PCWSTR = w!("IsloraEdge");
 
 /// Geometry of the island window on the primary monitor.
 #[derive(Clone, Copy)]
@@ -63,7 +63,7 @@ fn create(class: PCWSTR, style: WINDOW_EX_STYLE) -> Result<HWND> {
         CreateWindowExW(
             style,
             class,
-            w!("Dynamic Island"),
+            w!("Islora"),
             WS_POPUP,
             0,
             0,

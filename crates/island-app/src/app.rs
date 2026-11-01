@@ -165,7 +165,7 @@ struct App {
 }
 
 pub fn run() -> Result<()> {
-    let _single_instance = unsafe { CreateMutexW(None, true, w!("Local\\DynamicIsland"))? };
+    let _single_instance = unsafe { CreateMutexW(None, true, w!("Local\\Islora"))? };
     // A look at a new build, beside the copy the user keeps running.
     let second_copy = std::env::args().any(|a| a == "--second-copy");
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS && !second_copy {
