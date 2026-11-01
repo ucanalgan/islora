@@ -1,0 +1,453 @@
+use crate::scheduler::Presentation;
+
+/// Size of the transparent window that hosts the pill, in DIPs. The pill can
+/// overshoot its target while springing, so this is larger than `EXPANDED`.
+pub const WINDOW_WIDTH: f32 = 460.0;
+pub const WINDOW_HEIGHT: f32 = 220.0;
+
+/// Gap between the screen edge and a floating pill.
+pub const TOP_MARGIN: f32 = 8.0;
+
+/// The compact pill fits what it shows, within these widths.
+pub const COMPACT_MIN_WIDTH: f32 = 84.0;
+pub const COMPACT_MAX_WIDTH: f32 = 260.0;
+
+/// Size of the curve that joins a notch to the top of the screen.
+pub const NOTCH_SHOULDER: f32 = 8.0;
+/// Corners as round as a floating pill's would make a notch look like a blob.
+const NOTCH_ROUNDING: f32 = 0.7;
+
+/// Where the pill sits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IslandStyle {
+    /// Floating just below the top of the screen.
+    #[default]
+    Island,
+    /// Grown out of the top of the screen.
+    Notch,
+}
+
+impl IslandStyle {
+    /// The name used for it in the settings file.
+    pub fn setting(self) -> &'static str {
+        match self {
+            IslandStyle::Island => "island",
+            IslandStyle::Notch => "notch",
+        }
+    }
+
+    /// Gap between the top of the screen and the pill.
+    pub fn margin(self) -> f32 {
+        match self {
+            IslandStyle::Island => TOP_MARGIN,
+            IslandStyle::Notch => 0.0,
+        }
+    }
+
+    /// Where the bubble beside `pill` starts, for pills scaled by `scale`. It
+    /// floats level with a pill, and hangs from the top of the screen by a notch.
+    pub fn bubble_top(self, scale: f32, pill: Pill, bubble: Pill) -> f32 {
+        match self {
+            IslandStyle::Island => TOP_MARGIN * scale + (pill.height - bubble.height) / 2.0,
+            IslandStyle::Notch => 0.0,
+        }
+    }
+}
+
+/// Length of the invisible strip along the top edge that reveals the island.
+pub const EDGE_TRIGGER_WIDTH: f32 = 160.0;
+
+/// Vertical centre of the transport buttons inside the expanded pill.
+pub const MEDIA_BUTTON_Y: f32 = 138.0;
+/// Side length of each button's clickable area.
+pub const MEDIA_BUTTON_SIZE: f32 = 42.0;
+
+/// Gap between the pill and the bubble beside it.
+pub const BUBBLE_GAP: f32 = 8.0;
+
+/// The shortcut to the home view inside the expanded media view.
+pub const HOME_SHORTCUT_X: f32 = 362.0;
+pub const HOME_SHORTCUT_Y: f32 = 36.0;
+pub const HOME_SHORTCUT_SIZE: f32 = 34.0;
+
+pub fn on_home_shortcut(x: f32, y: f32) -> bool {
+    (x - HOME_SHORTCUT_X).abs() <= HOME_SHORTCUT_SIZE / 2.0
+        && (y - HOME_SHORTCUT_Y).abs() <= HOME_SHORTCUT_SIZE / 2.0
+}
+
+/// What a preset in the home view starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StartMode {
+    /// A real Windows focus session, which may also silence notifications.
+    #[default]
+    Focus,
+    /// The island's own countdown, which Windows knows nothing about.
+    Timer,
+}
+
+pub const MODE_TAB_Y: f32 = 96.0;
+pub const MODE_TAB_HEIGHT: f32 = 24.0;
+
+impl StartMode {
+    pub const ALL: [StartMode; 2] = [StartMode::Focus, StartMode::Timer];
+
+    /// Left edge and width of its tab inside the expanded pill.
+    pub fn tab(self) -> (f32, f32) {
+        match self {
+            StartMode::Focus => (30.0, 58.0),
+            StartMode::Timer => (92.0, 94.0),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StartMode::Focus => "Odak",
+            StartMode::Timer => "Zamanlayıcı",
+        }
+    }
+
+    /// The name used for it in the settings file.
+    pub fn setting(self) -> &'static str {
+        match self {
+            StartMode::Focus => "focus",
+            StartMode::Timer => "timer",
+        }
+    }
+
+    pub fn at(x: f32, y: f32) -> Option<StartMode> {
+        if (y - MODE_TAB_Y).abs() > MODE_TAB_HEIGHT / 2.0 {
+            return None;
+        }
+        StartMode::ALL.into_iter().find(|mode| {
+            let (left, width) = mode.tab();
+            (left..=left + width).contains(&x)
+        })
+    }
+}
+
+/// Timer lengths offered in the home view by default, in minutes.
+pub const TIMER_PRESETS: [u64; 4] = [5, 15, 25, 45];
+pub const PRESET_Y: f32 = 130.0;
+pub const PRESET_WIDTH: f32 = 76.0;
+pub const PRESET_HEIGHT: f32 = 38.0;
+const PRESET_GAP: f32 = 12.0;
+
+pub fn preset_center_x(index: usize) -> f32 {
+    let step = PRESET_WIDTH + PRESET_GAP;
+    Pill::EXPANDED.width / 2.0 + (index as f32 - 1.5) * step
+}
+
+/// Which preset is under a point in DIPs relative to the expanded pill.
+pub fn preset_at(x: f32, y: f32) -> Option<usize> {
+    if (y - PRESET_Y).abs() > PRESET_HEIGHT / 2.0 {
+        return None;
+    }
+    (0..TIMER_PRESETS.len()).find(|&index| (x - preset_center_x(index)).abs() <= PRESET_WIDTH / 2.0)
+}
+
+/// Controls of the expanded timer view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimerButton {
+    Toggle,
+    Cancel,
+}
+
+impl TimerButton {
+    pub const ALL: [TimerButton; 2] = [TimerButton::Toggle, TimerButton::Cancel];
+
+    pub fn center_x(self) -> f32 {
+        let middle = Pill::EXPANDED.width / 2.0;
+        match self {
+            TimerButton::Toggle => middle - 34.0,
+            TimerButton::Cancel => middle + 34.0,
+        }
+    }
+
+    pub fn at(x: f32, y: f32) -> Option<TimerButton> {
+        let half = MEDIA_BUTTON_SIZE / 2.0;
+        if (y - MEDIA_BUTTON_Y).abs() > half {
+            return None;
+        }
+        TimerButton::ALL.into_iter().find(|button| (x - button.center_x()).abs() <= half)
+    }
+}
+
+/// The button that hides an event, in its expanded view.
+pub const EVENT_HIDE_WIDTH: f32 = 96.0;
+pub const EVENT_HIDE_HEIGHT: f32 = 34.0;
+
+pub fn on_event_hide(x: f32, y: f32) -> bool {
+    (x - Pill::EXPANDED.width / 2.0).abs() <= EVENT_HIDE_WIDTH / 2.0
+        && (y - MEDIA_BUTTON_Y).abs() <= EVENT_HIDE_HEIGHT / 2.0
+}
+
+/// The position bar inside the expanded pill.
+pub const PROGRESS_X: f32 = 24.0;
+pub const PROGRESS_Y: f32 = 104.0;
+pub const PROGRESS_WIDTH: f32 = Pill::EXPANDED.width - PROGRESS_X * 2.0;
+pub const PROGRESS_HEIGHT: f32 = 4.0;
+/// Clickable height. The bar alone would be a very small target.
+const PROGRESS_HIT_HEIGHT: f32 = 22.0;
+const PROGRESS_HIT_OVERHANG: f32 = 8.0;
+
+/// Whether a point in DIPs relative to the expanded pill is on the position bar.
+pub fn on_progress_bar(x: f32, y: f32) -> bool {
+    let middle = PROGRESS_Y + PROGRESS_HEIGHT / 2.0;
+    let across = PROGRESS_X - PROGRESS_HIT_OVERHANG..=PROGRESS_X + PROGRESS_WIDTH + PROGRESS_HIT_OVERHANG;
+    (y - middle).abs() < PROGRESS_HIT_HEIGHT / 2.0 && across.contains(&x)
+}
+
+/// Where along the track a horizontal position falls, from 0 to 1.
+pub fn progress_fraction(x: f32) -> f32 {
+    ((x - PROGRESS_X) / PROGRESS_WIDTH).clamp(0.0, 1.0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaButton {
+    Shuffle,
+    Previous,
+    PlayPause,
+    Next,
+    Repeat,
+}
+
+impl MediaButton {
+    /// The buttons every player has.
+    pub const TRANSPORT: [MediaButton; 3] = [MediaButton::Previous, MediaButton::PlayPause, MediaButton::Next];
+    pub const ALL: [MediaButton; 5] = [
+        MediaButton::Shuffle,
+        MediaButton::Previous,
+        MediaButton::PlayPause,
+        MediaButton::Next,
+        MediaButton::Repeat,
+    ];
+
+    /// Horizontal centre inside the expanded pill.
+    pub fn center_x(self) -> f32 {
+        let middle = Pill::EXPANDED.width / 2.0;
+        match self {
+            MediaButton::Shuffle => middle - 108.0,
+            MediaButton::Previous => middle - 56.0,
+            MediaButton::PlayPause => middle,
+            MediaButton::Next => middle + 56.0,
+            MediaButton::Repeat => middle + 108.0,
+        }
+    }
+
+    /// The button under a point given in DIPs relative to the expanded pill.
+    pub fn at(x: f32, y: f32) -> Option<MediaButton> {
+        let half = MEDIA_BUTTON_SIZE / 2.0;
+        if (y - MEDIA_BUTTON_Y).abs() > half {
+            return None;
+        }
+        MediaButton::ALL.into_iter().find(|button| (x - button.center_x()).abs() <= half)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pill {
+    pub width: f32,
+    pub height: f32,
+    pub radius: f32,
+}
+
+impl Pill {
+    /// Small sliver the pill collapses into before the window hides.
+    pub const HIDDEN: Pill = Pill { width: 96.0, height: 8.0, radius: 4.0 };
+    pub const BUBBLE: Pill = Pill { width: 36.0, height: 36.0, radius: 18.0 };
+    pub const COMPACT: Pill = Pill { width: 210.0, height: 36.0, radius: 18.0 };
+    pub const LEVEL: Pill = Pill { width: 280.0, height: 44.0, radius: 22.0 };
+    pub const ALERT: Pill = Pill { width: 320.0, height: 66.0, radius: 33.0 };
+    pub const EXPANDED: Pill = Pill { width: 400.0, height: 170.0, radius: 42.0 };
+
+    pub fn for_presentation(presentation: Presentation) -> Pill {
+        match presentation {
+            Presentation::Hidden => Pill::HIDDEN,
+            Presentation::Compact => Pill::COMPACT,
+            Presentation::Level => Pill::LEVEL,
+            Presentation::Alert => Pill::ALERT,
+            Presentation::Expanded => Pill::EXPANDED,
+        }
+    }
+
+    pub fn scaled(self, scale: f32) -> Pill {
+        Pill {
+            width: self.width * scale,
+            height: self.height * scale,
+            radius: self.radius * scale,
+        }
+    }
+
+    /// This pill as a notch reaching `reach` down from the top of the screen.
+    /// Returns where its top goes, which is above the screen by exactly its
+    /// radius, so the upper corners are out of sight and the lower ones stay.
+    pub fn as_notch(self, reach: f32) -> (f32, Pill) {
+        let radius = self.radius * NOTCH_ROUNDING;
+        (-radius, Pill { height: reach + radius, radius, ..self })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_pill_fits_inside_the_window_with_room_to_overshoot() {
+        let overshoot = 1.1;
+        for pill in [Pill::HIDDEN, Pill::COMPACT, Pill::LEVEL, Pill::ALERT, Pill::EXPANDED] {
+            assert!(pill.width * overshoot <= WINDOW_WIDTH, "{pill:?}");
+            assert!(pill.height * overshoot + TOP_MARGIN <= WINDOW_HEIGHT, "{pill:?}");
+        }
+    }
+
+    #[test]
+    fn radius_never_exceeds_half_the_height() {
+        for pill in [Pill::HIDDEN, Pill::COMPACT, Pill::LEVEL, Pill::ALERT, Pill::EXPANDED] {
+            assert!(pill.radius * 2.0 <= pill.height, "{pill:?}");
+        }
+    }
+
+    #[test]
+    fn every_pill_still_fits_with_a_bubble_beside_it() {
+        for pill in [Pill::COMPACT, Pill::LEVEL, Pill::ALERT] {
+            assert!(pill.width + BUBBLE_GAP + Pill::BUBBLE.width <= WINDOW_WIDTH, "{pill:?}");
+        }
+        const { assert!(COMPACT_MAX_WIDTH + BUBBLE_GAP + Pill::BUBBLE.width <= WINDOW_WIDTH) };
+    }
+
+    #[test]
+    fn presets_are_found_by_position_and_fit_the_pill() {
+        for index in 0..TIMER_PRESETS.len() {
+            assert_eq!(preset_at(preset_center_x(index), PRESET_Y), Some(index));
+        }
+        let half = PRESET_WIDTH / 2.0;
+        assert!(preset_center_x(0) - half >= 0.0);
+        assert!(preset_center_x(3) + half <= Pill::EXPANDED.width);
+        const { assert!(PRESET_Y + PRESET_HEIGHT / 2.0 <= Pill::EXPANDED.height) };
+        assert_eq!(preset_at(preset_center_x(0), 40.0), None);
+    }
+
+    #[test]
+    fn mode_tabs_are_found_by_position_and_clear_the_presets() {
+        for mode in StartMode::ALL {
+            let (left, width) = mode.tab();
+            assert_eq!(StartMode::at(left + width / 2.0, MODE_TAB_Y), Some(mode));
+            assert!(left + width <= Pill::EXPANDED.width);
+        }
+        assert_eq!(StartMode::at(StartMode::Focus.tab().0, 30.0), None);
+        const { assert!(MODE_TAB_Y + MODE_TAB_HEIGHT / 2.0 < PRESET_Y - PRESET_HEIGHT / 2.0) };
+        assert_eq!(preset_at(40.0, MODE_TAB_Y), None);
+    }
+
+    #[test]
+    fn the_hide_button_is_found_and_fits_the_pill() {
+        assert!(on_event_hide(Pill::EXPANDED.width / 2.0, MEDIA_BUTTON_Y));
+        assert!(!on_event_hide(40.0, MEDIA_BUTTON_Y));
+        assert!(!on_event_hide(Pill::EXPANDED.width / 2.0, 40.0));
+        const { assert!(MEDIA_BUTTON_Y + EVENT_HIDE_HEIGHT / 2.0 <= Pill::EXPANDED.height) };
+    }
+
+    #[test]
+    fn timer_buttons_are_found_by_position() {
+        for button in TimerButton::ALL {
+            assert_eq!(TimerButton::at(button.center_x(), MEDIA_BUTTON_Y), Some(button));
+        }
+        assert_eq!(TimerButton::at(20.0, MEDIA_BUTTON_Y), None);
+    }
+
+    #[test]
+    fn the_home_shortcut_stays_inside_the_pill_and_off_the_bar() {
+        let half = HOME_SHORTCUT_SIZE / 2.0;
+        assert!(HOME_SHORTCUT_X + half <= Pill::EXPANDED.width);
+        assert!(HOME_SHORTCUT_Y + half < PROGRESS_Y);
+        assert!(on_home_shortcut(HOME_SHORTCUT_X, HOME_SHORTCUT_Y));
+        assert!(!on_home_shortcut(100.0, HOME_SHORTCUT_Y));
+    }
+
+    #[test]
+    fn the_position_bar_is_easier_to_hit_than_it_is_to_see() {
+        let middle = PROGRESS_Y + PROGRESS_HEIGHT / 2.0;
+        assert!(on_progress_bar(200.0, middle));
+        assert!(on_progress_bar(200.0, middle + 9.0));
+        assert!(on_progress_bar(PROGRESS_X - 4.0, middle));
+        assert!(!on_progress_bar(200.0, 40.0));
+        assert!(!on_progress_bar(4.0, middle));
+    }
+
+    #[test]
+    fn the_position_bar_never_takes_a_click_meant_for_a_button() {
+        for button in MediaButton::ALL {
+            for y in [MEDIA_BUTTON_Y - MEDIA_BUTTON_SIZE / 2.0, MEDIA_BUTTON_Y] {
+                assert!(!on_progress_bar(button.center_x(), y));
+            }
+        }
+    }
+
+    #[test]
+    fn the_fraction_stays_on_the_track() {
+        assert_eq!(progress_fraction(PROGRESS_X), 0.0);
+        assert_eq!(progress_fraction(PROGRESS_X + PROGRESS_WIDTH / 2.0), 0.5);
+        assert_eq!(progress_fraction(PROGRESS_X + PROGRESS_WIDTH), 1.0);
+        assert_eq!(progress_fraction(-500.0), 0.0);
+        assert_eq!(progress_fraction(5_000.0), 1.0);
+    }
+
+    #[test]
+    fn media_buttons_are_found_by_position() {
+        for button in MediaButton::ALL {
+            assert_eq!(MediaButton::at(button.center_x(), MEDIA_BUTTON_Y), Some(button));
+        }
+    }
+
+    #[test]
+    fn clicks_between_and_around_media_buttons_hit_nothing() {
+        let between = (MediaButton::Previous.center_x() + MediaButton::PlayPause.center_x()) / 2.0;
+        assert_eq!(MediaButton::at(between, MEDIA_BUTTON_Y), None);
+        assert_eq!(MediaButton::at(MediaButton::PlayPause.center_x(), 40.0), None);
+        assert_eq!(MediaButton::at(10.0, MEDIA_BUTTON_Y), None);
+    }
+
+    #[test]
+    fn media_buttons_stay_inside_the_expanded_pill() {
+        let half = MEDIA_BUTTON_SIZE / 2.0;
+        assert!(MEDIA_BUTTON_Y + half <= Pill::EXPANDED.height);
+        assert!(MediaButton::Shuffle.center_x() - half >= 0.0);
+        assert!(MediaButton::Repeat.center_x() + half <= Pill::EXPANDED.width);
+    }
+
+    #[test]
+    fn media_buttons_do_not_overlap() {
+        for pair in MediaButton::ALL.windows(2) {
+            assert!(pair[1].center_x() - pair[0].center_x() >= MEDIA_BUTTON_SIZE);
+        }
+    }
+
+    #[test]
+    fn a_notch_hides_its_upper_corners_and_ends_where_it_should() {
+        let (top, notch) = Pill::COMPACT.as_notch(Pill::COMPACT.height);
+        assert_eq!(top + notch.height, Pill::COMPACT.height);
+        assert_eq!(top, -notch.radius);
+        assert_eq!(notch.width, Pill::COMPACT.width);
+        assert!(notch.radius < Pill::COMPACT.radius);
+    }
+
+    #[test]
+    fn a_notch_starts_at_the_top_of_the_screen() {
+        assert_eq!(IslandStyle::Notch.margin(), 0.0);
+        assert_eq!(IslandStyle::Island.margin(), TOP_MARGIN);
+    }
+
+    #[test]
+    fn the_bubble_floats_level_with_a_pill_and_hangs_with_a_notch() {
+        let (pill, bubble) = (Pill::ALERT, Pill::BUBBLE);
+        let level = TOP_MARGIN + (pill.height - bubble.height) / 2.0;
+        assert_eq!(IslandStyle::Island.bubble_top(1.0, pill, bubble), level);
+        assert_eq!(IslandStyle::Notch.bubble_top(1.0, pill, bubble), 0.0);
+    }
+
+    #[test]
+    fn scaling_applies_to_every_dimension() {
+        let scaled = Pill::COMPACT.scaled(1.5);
+        assert_eq!(scaled, Pill { width: 315.0, height: 54.0, radius: 27.0 });
+    }
+}

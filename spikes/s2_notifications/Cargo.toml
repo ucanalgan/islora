@@ -1,0 +1,22 @@
+[package]
+name = "s2_notifications"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+windows-future = "0.3"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "ApplicationModel",
+    "Foundation",
+    "Foundation_Collections",
+    "UI_Notifications",
+    "UI_Notifications_Management",
+    "Win32_Foundation",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_WinRT",
+    "Win32_UI_WindowsAndMessaging",
+]

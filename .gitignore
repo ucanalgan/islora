@@ -1,0 +1,9 @@
+target/
+dist/
+
+# Personal settings. The calendar address in them is a secret, so neither the
+# settings file nor a calendar export may ever enter the repository.
+config.toml
+*.ics
+.env
+.env.*

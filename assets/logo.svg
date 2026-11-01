@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Sound wave pill logo">
+  <rect width="256" height="256" rx="59" fill="#0B0B0F"/>
+  <g transform="translate(30.4 30.4) scale(6.08)">
+    <path fill="#FFFFFF" fill-rule="evenodd" d="M9.5 8.5h13a7.5 7.5 0 0 1 0 15h-13a7.5 7.5 0 0 1 0-15ZM10.2 13.5a1.2 1.2 0 0 0-1.2 1.2v2.6a1.2 1.2 0 0 0 2.4 0v-2.6a1.2 1.2 0 0 0-1.2-1.2ZM14.4 11.5a1.2 1.2 0 0 0-1.2 1.2v6.6a1.2 1.2 0 0 0 2.4 0v-6.6a1.2 1.2 0 0 0-1.2-1.2ZM18.6 12.7a1.2 1.2 0 0 0-1.2 1.2v4.2a1.2 1.2 0 0 0 2.4 0v-4.2a1.2 1.2 0 0 0-1.2-1.2ZM22.8 14a1.2 1.2 0 0 0-1.2 1.2v1.6a1.2 1.2 0 0 0 2.4 0v-1.6a1.2 1.2 0 0 0-1.2-1.2Z"/>
+  </g>
+</svg>

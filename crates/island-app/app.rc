@@ -1,0 +1,4 @@
+// Windows uses the lowest numbered icon for the .exe in Explorer and Start.
+1 ICON "../../assets/app.ico"
+2 ICON "../../assets/tray-white.ico"
+3 ICON "../../assets/tray-black.ico"

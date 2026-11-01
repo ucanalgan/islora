@@ -1,0 +1,9 @@
+[package]
+name = "island-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono = "0.4"
+chrono-tz = "0.10"
+rrule = "0.14"
