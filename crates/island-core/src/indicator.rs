@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn app_names_are_read_from_paths_and_packages() {
         assert_eq!(capability_app_name("C:#Program Files#Discord#Discord.exe"), "Discord");
-        assert_eq!(capability_app_name("C:#Users#Umut#zoom.exe"), "Zoom");
+        assert_eq!(capability_app_name("C:#Users#someone#zoom.exe"), "Zoom");
         assert_eq!(capability_app_name("5319275A.WhatsApp_cv1g1gvanyjgm"), "WhatsApp");
         assert_eq!(capability_app_name("Microsoft.WindowsCamera_8wekyb3d8bbwe"), "WindowsCamera");
         assert_eq!(capability_app_name(""), "");

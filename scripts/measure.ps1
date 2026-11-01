@@ -1,4 +1,4 @@
-# Measures CPU and memory against the budget in docs/PLAN.md, including what the
+# Measures CPU and memory against the budget below, including what the
 # island costs the system compositor (dwm.exe), which a looping animation can
 # hide from the app's own numbers. Run after `cargo build --release`.
 # Exits 1 if the budget is exceeded. Real media players are never touched.

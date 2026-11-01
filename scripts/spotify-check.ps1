@@ -1,7 +1,7 @@
 # Checks the island against the real Spotify app. Unlike e2e.ps1 this DOES touch
-# the user's music: it pauses it and skips a track, then puts things back. Run it
-# only when they ask for it. The app is pinned to Spotify's session, so commands
-# cannot reach any other player even if Windows changes the current session.
+# the music that is playing: it pauses it and skips a track, then puts things
+# back. The app is pinned to Spotify's session, so commands cannot reach any
+# other player even if Windows changes the current session.
 param(
     [string]$Exe = "$PSScriptRoot\..\target\release\islora.exe",
     [string]$Shots = "$env:TEMP\islora-spotify",

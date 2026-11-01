@@ -7,3 +7,6 @@ config.toml
 *.ics
 .env
 .env.*
+
+# Working notes about one machine and its owner, kept on that machine only.
+docs/PLAN.md
