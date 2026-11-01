@@ -7,6 +7,9 @@ use crate::activity::{Activity, Icon, Kind, Millis};
 pub const PAUSED_LINGER_MS: Millis = 30_000;
 /// How long a new track is announced for.
 pub const TRACK_NOTICE_MS: Millis = 3_000;
+/// Players report their position roughly. A difference this small is that, not
+/// a jump, and following it would make the time on screen twitch.
+const POSITION_NOISE_MS: u64 = 3_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepeatMode {
@@ -29,6 +32,9 @@ impl RepeatMode {
 /// What a media session reported, with its position read at `sampled_at`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MediaSnapshot {
+    /// Whether the player said anything about the position. A change such as
+    /// shuffle arrives with an old position, which means nothing.
+    pub new_position: bool,
     /// `None` while the player does not offer it, as for video.
     pub shuffle: Option<bool>,
     /// `None` while the player does not offer it, as for video.
@@ -65,6 +71,19 @@ impl MediaSnapshot {
 
     pub fn is_same_track(&self, other: &MediaSnapshot) -> bool {
         self.title == other.title && self.artist == other.artist
+    }
+
+    /// Carries on counting from `earlier`, unless this report really moved the
+    /// track somewhere else: a jump, a new track, or a pause or resume.
+    pub fn continue_from(&mut self, earlier: &MediaSnapshot, now: Millis) {
+        let same_run = self.is_same_track(earlier)
+            && self.playing == earlier.playing
+            && self.rate == earlier.rate;
+        let close = self.position_at(now).abs_diff(earlier.position_at(now)) <= POSITION_NOISE_MS;
+        if same_run && (close || !self.new_position) {
+            self.position_ms = earlier.position_ms;
+            self.sampled_at = earlier.sampled_at;
+        }
     }
 
     /// The passing notice that this track has started.
@@ -117,9 +136,56 @@ mod tests {
             sampled_at: 1_000,
             can_seek: true,
             artwork: None,
+            new_position: true,
             shuffle: None,
             repeat: None,
         }
+    }
+
+    #[test]
+    fn a_report_without_position_news_keeps_the_count() {
+        let earlier = snapshot(true);
+        let mut report = MediaSnapshot { position_ms: 2_000, sampled_at: 9_000, new_position: false, ..snapshot(true) };
+        report.continue_from(&earlier, 9_000);
+        assert_eq!(report.position_at(9_000), 18_000);
+    }
+
+    #[test]
+    fn a_small_difference_in_a_position_report_is_noise() {
+        let earlier = snapshot(true);
+        let mut report = MediaSnapshot { position_ms: 16_500, sampled_at: 9_000, ..snapshot(true) };
+        report.continue_from(&earlier, 9_000);
+        assert_eq!(report.position_at(9_000), 18_000);
+    }
+
+    #[test]
+    fn a_real_jump_is_followed() {
+        let earlier = snapshot(true);
+        let mut report = MediaSnapshot { position_ms: 60_000, sampled_at: 9_000, ..snapshot(true) };
+        report.continue_from(&earlier, 9_000);
+        assert_eq!(report.position_at(9_000), 60_000);
+    }
+
+    #[test]
+    fn pausing_takes_the_position_the_player_gives() {
+        let earlier = snapshot(true);
+        let mut report = MediaSnapshot { position_ms: 17_000, sampled_at: 9_000, ..snapshot(false) };
+        report.continue_from(&earlier, 9_000);
+        assert_eq!(report.position_at(9_000), 17_000);
+    }
+
+    #[test]
+    fn a_new_track_starts_from_its_own_position() {
+        let earlier = snapshot(true);
+        let mut report = MediaSnapshot {
+            title: "Other".into(),
+            position_ms: 0,
+            sampled_at: 9_000,
+            new_position: false,
+            ..snapshot(true)
+        };
+        report.continue_from(&earlier, 9_000);
+        assert_eq!(report.position_at(9_000), 0);
     }
 
     #[test]

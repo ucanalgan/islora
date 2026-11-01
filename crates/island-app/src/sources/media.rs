@@ -37,6 +37,7 @@ enum Signal {
     SessionChanged,
     MetadataChanged,
     StateChanged,
+    TimelineChanged,
     Press(MediaButton),
     Seek(u64),
 }
@@ -105,7 +106,7 @@ impl Tracked {
         }))?;
         let timeline = signals.clone();
         let timeline_token = session.TimelinePropertiesChanged(&TypedEventHandler::new(move |_, _| {
-            let _ = timeline.send(Signal::StateChanged);
+            let _ = timeline.send(Signal::TimelineChanged);
             Ok(())
         }))?;
         Ok(Self { session, metadata_token, playback_token, timeline_token })
@@ -159,6 +160,7 @@ impl Worker {
         while let Ok(first) = self.inbox.recv() {
             // Players send bursts of events; handle each burst once.
             let (mut session_changed, mut metadata_changed) = (false, false);
+            let mut timeline_changed = false;
             let mut presses = Vec::new();
             let mut seek = None;
             for signal in once(first).chain(self.inbox.try_iter()) {
@@ -166,6 +168,7 @@ impl Worker {
                     Signal::SessionChanged => session_changed = true,
                     Signal::MetadataChanged => metadata_changed = true,
                     Signal::StateChanged => {}
+                    Signal::TimelineChanged => timeline_changed = true,
                     Signal::Press(button) => presses.push(button),
                     Signal::Seek(position_ms) => seek = Some(position_ms),
                 }
@@ -194,7 +197,8 @@ impl Worker {
             if seek.is_some_and(|position_ms| seek_to(session, position_ms)) && !metadata_changed {
                 continue;
             }
-            self.send(self.snapshot(session, &metadata).unwrap_or(None));
+            let new_position = timeline_changed || metadata_changed;
+            self.send(self.snapshot(session, &metadata, new_position).unwrap_or(None));
         }
         Ok(())
     }
@@ -218,7 +222,7 @@ impl Worker {
         }
     }
 
-    fn snapshot(&self, session: &Session, metadata: &Metadata) -> Result<Option<MediaSnapshot>> {
+    fn snapshot(&self, session: &Session, metadata: &Metadata, new_position: bool) -> Result<Option<MediaSnapshot>> {
         let info = session.GetPlaybackInfo()?;
         let status = info.PlaybackStatus()?;
         if metadata.title.is_empty() || matches!(status, Status::Closed | Status::Stopped) {
@@ -245,6 +249,7 @@ impl Worker {
         let controls = info.Controls()?;
         let video = info.PlaybackType().and_then(|kind| kind.Value()) == Ok(MediaPlaybackType::Video);
         Ok(Some(MediaSnapshot {
+            new_position,
             shuffle: (!video && controls.IsShuffleEnabled()?).then(|| shuffle_of(&info)),
             repeat: (!video && controls.IsRepeatEnabled()?).then(|| repeat_of(&info)),
             title: metadata.title.clone(),

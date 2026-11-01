@@ -182,9 +182,12 @@ impl Island {
 
     /// Replaces the media activity. A session that stays paused keeps its
     /// original deadline, or small updates would keep it on screen forever.
-    pub fn upsert_media(&mut self, snapshot: MediaSnapshot, now: Millis) {
+    pub fn upsert_media(&mut self, mut snapshot: MediaSnapshot, now: Millis) {
         self.announce_track(&snapshot, now);
         let previous = self.activities.iter().find(|a| a.kind == Kind::Media);
+        if let Some(earlier) = previous.and_then(|a| a.media.as_ref()) {
+            snapshot.continue_from(earlier, now);
+        }
         let paused_deadline = previous.and_then(|a| a.dormant_at);
         let mut activity = snapshot.into_activity(now);
         activity.dormant_at = activity.dormant_at.and(paused_deadline.or(activity.dormant_at));
@@ -1527,6 +1530,7 @@ mod tests {
             sampled_at: 0,
             can_seek: true,
             artwork: None,
+            new_position: true,
             shuffle: None,
             repeat: None,
         }
@@ -1534,6 +1538,20 @@ mod tests {
 
     fn track(title: &str, playing: bool) -> MediaSnapshot {
         MediaSnapshot { title: title.into(), ..snapshot(playing) }
+    }
+
+    #[test]
+    fn pressing_shuffle_does_not_move_the_time_on_screen() {
+        let mut island = Island::new();
+        let long = MediaSnapshot { duration_ms: 200_000, sampled_at: 0, ..track("Bir", true) };
+        island.upsert_media(MediaSnapshot { position_ms: 30_000, ..long.clone() }, 0);
+        for at in [1_000, 2_000, 3_000] {
+            let stale = MediaSnapshot { position_ms: 1_000, sampled_at: at, new_position: false, shuffle: Some(true), ..long.clone() };
+            island.upsert_media(stale, at);
+            let media = island.frame(at).activity.unwrap().media.unwrap();
+            assert_eq!(media.position_at(at), 30_000 + at);
+            assert_eq!(media.shuffle, Some(true));
+        }
     }
 
     #[test]

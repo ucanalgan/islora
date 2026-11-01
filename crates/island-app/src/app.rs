@@ -1075,6 +1075,7 @@ impl App {
 
 fn demo_track(title: &str, playing: bool, now: Millis) -> MediaSnapshot {
     MediaSnapshot {
+        new_position: true,
         shuffle: Some(true),
         repeat: Some(RepeatMode::Off),
         title: title.to_owned(),
