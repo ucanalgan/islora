@@ -59,6 +59,7 @@ impl Timer {
         let remaining = self.remaining(now);
         let running = self.ends_at().is_some();
         let shown = remaining.div_ceil(1000) * 1000;
+        let left = (remaining.min(self.total) * 1000 / self.total.max(1)) as u16;
         Activity {
             leading: "Zamanlayıcı".into(),
             trailing: format_time(shown),
@@ -69,9 +70,9 @@ impl Timer {
             badge: Some(Bubble::Count {
                 value: remaining.div_ceil(60_000).to_string(),
                 icon: None,
-                ring: Some((remaining.min(self.total) * 100 / self.total.max(1)) as u8),
+                ring: Some((left / 10) as u8),
             }),
-            timer: Some(TimerView { running, has_controls: true }),
+            timer: Some(TimerView { running, has_controls: true, left: Some(left) }),
             ..Activity::new(Kind::TimerRunning)
         }
     }
@@ -97,8 +98,8 @@ impl Timer {
         let running = self.ends_at().is_some();
         Activity {
             kind: Kind::ClockTimer,
-            detail: if running { format!("Saat uygulaması · {name}") } else { "Saat'te duraklatıldı".into() },
-            timer: Some(TimerView { running, has_controls: false }),
+            detail: if running { format!("Saat · {name}") } else { "Duraklatıldı".into() },
+            timer: activity.timer.map(|timer| TimerView { has_controls: false, ..timer }),
             ..activity
         }
     }
@@ -164,8 +165,22 @@ mod tests {
     fn a_clock_timer_shows_where_it_runs_and_offers_no_buttons() {
         let activity = Timer::ending_at(60_000, 60_000).clock_activity(0, "1 dk");
         assert_eq!(activity.kind, Kind::ClockTimer);
-        assert_eq!(activity.detail, "Saat uygulaması · 1 dk");
+        assert_eq!(activity.detail, "Saat · 1 dk");
         assert!(!activity.timer.unwrap().has_controls);
+    }
+
+    #[test]
+    fn says_how_much_of_its_time_is_left() {
+        let left_at = |now| Timer::start(100_000, 0).activity(now).timer.unwrap().left;
+        assert_eq!(left_at(0), Some(1000));
+        assert_eq!(left_at(25_000), Some(750));
+        assert_eq!(left_at(100_000), Some(0));
+    }
+
+    #[test]
+    fn a_clock_timer_knows_how_much_is_left_too() {
+        let activity = Timer::ending_at(30_000, 60_000).clock_activity(0, "1 dk");
+        assert_eq!(activity.timer.unwrap().left, Some(500));
     }
 
     #[test]

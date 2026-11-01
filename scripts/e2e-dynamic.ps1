@@ -20,8 +20,9 @@ $PresetY = 138
 $Preset5X = $centerX - 132
 $Preset25X = $centerX + 44
 $ButtonY = 146
-$CancelX = $centerX + 34
-$PauseX = $centerX - 34
+$TimerButtonY = 93
+$CancelX = $centerX - 122
+$PauseX = $centerX + 122
 $ShuffleX = $centerX - 108
 $RepeatX = $centerX + 108
 $TabY = 104
@@ -95,10 +96,10 @@ try {
     Check 'the timer bubble can be clicked' (Click-Island $BubbleX $PillY)
     Start-Sleep -Milliseconds 800
     Shot '17-timer-open'
-    Check 'pause can be clicked' (Click-Island $PauseX $ButtonY)
+    Check 'pause can be clicked' (Click-Island $PauseX $TimerButtonY)
     Start-Sleep -Milliseconds 500
     Shot '18-timer-paused'
-    Check 'cancel can be clicked' (Click-Island $CancelX $ButtonY)
+    Check 'cancel can be clicked' (Click-Island $CancelX $TimerButtonY)
     Start-Sleep -Milliseconds 1000
     [void][Win]::SetCursorPos($centerX, 600)
     Start-Sleep -Milliseconds 1100
@@ -222,17 +223,17 @@ try {
         Shot '27-focus-open'
         # A clock pill would open the home view instead, with its lighter chips.
         Check 'the island follows it, not just the clock' ((Get-ScreenRed ($Preset25X - 30) $PresetY) -lt 20)
-        Check 'pause can be clicked' (Click-Island $PauseX $ButtonY)
+        Check 'pause can be clicked' (Click-Island $PauseX $TimerButtonY)
         Start-Sleep -Milliseconds 150
         Shot '28-focus-paused-at-once'
         Check 'it pauses in Windows too' (Wait-Until { -not $sessions.IsFocusActive } 4000)
         Start-Sleep -Milliseconds 1200
         Shot '29-focus-paused'
         Check 'a paused session stays on the island' (Visible)
-        Check 'resume can be clicked' (Click-Island $PauseX $ButtonY)
+        Check 'resume can be clicked' (Click-Island $PauseX $TimerButtonY)
         Check 'it resumes in Windows too' (Wait-Until { $sessions.IsFocusActive } 4000)
         Start-Sleep -Milliseconds 1000
-        Check 'the end button can be clicked' (Click-Island $CancelX $ButtonY)
+        Check 'the end button can be clicked' (Click-Island $CancelX $TimerButtonY)
         Check 'it ends in Windows too' (Wait-Until { -not $sessions.IsFocusActive } 4000)
         [void][Win]::SetCursorPos($centerX, 600)
         Check 'the island lets go of it' (Wait-Until { -not (Visible) } 6000)

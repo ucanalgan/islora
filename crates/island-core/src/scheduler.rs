@@ -543,9 +543,9 @@ impl Island {
                 leading: "Odak".into(),
                 trailing: "Açık".into(),
                 title: "Odak".into(),
-                detail: "Odak oturumu".into(),
+                detail: "Açık".into(),
                 icon: Some(Icon::Focus),
-                timer: Some(TimerView { running: true, has_controls: true }),
+                timer: Some(TimerView { running: true, has_controls: true, left: None }),
                 ..Activity::new(Kind::Focus)
             }),
             None => self.remove(Kind::Focus),
@@ -817,6 +817,20 @@ mod tests {
     }
 
     #[test]
+    fn pausing_keeps_the_open_timer_open() {
+        let mut island = Island::new();
+        island.start_timer(5 * MINUTE, 0);
+        island.frame(0);
+        island.click(1_000);
+        assert_eq!(island.frame(1_000).presentation, Presentation::Expanded);
+        island.toggle_timer(2_000);
+        let frame = island.frame(2_000);
+        assert_eq!(frame.presentation, Presentation::Expanded);
+        assert!(!frame.activity.unwrap().timer.unwrap().running);
+        assert_eq!(island.frame(MINUTE).presentation, Presentation::Expanded);
+    }
+
+    #[test]
     fn a_focus_session_counts_down_with_controls() {
         let mut island = Island::new();
         island.set_focus(focus(15 * MINUTE, 15 * MINUTE), 0);
@@ -852,8 +866,10 @@ mod tests {
         let mut island = Island::new();
         island.set_focus(FocusView::Open, 0);
         let frame = island.frame(0);
-        assert_eq!(frame.activity.unwrap().trailing, "Açık");
         assert_eq!(frame.wake_at, None);
+        let activity = frame.activity.unwrap();
+        assert_eq!(activity.trailing, "Açık");
+        assert_eq!(activity.timer.unwrap().left, None);
     }
 
     #[test]

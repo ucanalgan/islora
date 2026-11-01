@@ -145,27 +145,36 @@ pub fn preset_at(x: f32, y: f32) -> Option<usize> {
     (0..TIMER_PRESETS.len()).find(|&index| (x - preset_center_x(index)).abs() <= PRESET_WIDTH / 2.0)
 }
 
+/// The ring of the expanded timer view, around the countdown.
+pub const TIMER_RING_X: f32 = Pill::EXPANDED.width / 2.0;
+pub const TIMER_RING_Y: f32 = Pill::EXPANDED.height / 2.0;
+pub const TIMER_RING_RADIUS: f32 = 62.0;
+pub const TIMER_RING_WIDTH: f32 = 6.0;
+
+/// Round buttons on either side of the ring, level with its centre.
+pub const TIMER_BUTTON_SIZE: f32 = 52.0;
+const TIMER_BUTTON_REACH: f32 = 122.0;
+
 /// Controls of the expanded timer view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerButton {
-    Toggle,
     Cancel,
+    Toggle,
 }
 
 impl TimerButton {
-    pub const ALL: [TimerButton; 2] = [TimerButton::Toggle, TimerButton::Cancel];
+    pub const ALL: [TimerButton; 2] = [TimerButton::Cancel, TimerButton::Toggle];
 
     pub fn center_x(self) -> f32 {
-        let middle = Pill::EXPANDED.width / 2.0;
         match self {
-            TimerButton::Toggle => middle - 34.0,
-            TimerButton::Cancel => middle + 34.0,
+            TimerButton::Cancel => TIMER_RING_X - TIMER_BUTTON_REACH,
+            TimerButton::Toggle => TIMER_RING_X + TIMER_BUTTON_REACH,
         }
     }
 
     pub fn at(x: f32, y: f32) -> Option<TimerButton> {
-        let half = MEDIA_BUTTON_SIZE / 2.0;
-        if (y - MEDIA_BUTTON_Y).abs() > half {
+        let half = TIMER_BUTTON_SIZE / 2.0;
+        if (y - TIMER_RING_Y).abs() > half {
             return None;
         }
         TimerButton::ALL.into_iter().find(|button| (x - button.center_x()).abs() <= half)
@@ -350,9 +359,30 @@ mod tests {
     #[test]
     fn timer_buttons_are_found_by_position() {
         for button in TimerButton::ALL {
-            assert_eq!(TimerButton::at(button.center_x(), MEDIA_BUTTON_Y), Some(button));
+            assert_eq!(TimerButton::at(button.center_x(), TIMER_RING_Y), Some(button));
         }
-        assert_eq!(TimerButton::at(20.0, MEDIA_BUTTON_Y), None);
+        assert_eq!(TimerButton::at(TIMER_RING_X, TIMER_RING_Y), None);
+        assert_eq!(TimerButton::at(TimerButton::Cancel.center_x(), 10.0), None);
+    }
+
+    #[test]
+    fn the_timer_ring_fits_the_pill_and_leaves_room_for_its_buttons() {
+        let half = TIMER_BUTTON_SIZE / 2.0;
+        let outer = TIMER_RING_RADIUS + TIMER_RING_WIDTH / 2.0;
+        assert!(TIMER_RING_Y - outer >= 0.0);
+        assert!(TIMER_RING_Y + outer <= Pill::EXPANDED.height);
+        assert!(TimerButton::Cancel.center_x() + half < TIMER_RING_X - outer);
+        assert!(TimerButton::Toggle.center_x() - half > TIMER_RING_X + outer);
+        assert!(TimerButton::Cancel.center_x() - half >= 0.0);
+        assert!(TimerButton::Toggle.center_x() + half <= Pill::EXPANDED.width);
+    }
+
+    #[test]
+    fn timer_buttons_stay_clear_of_the_home_shortcut() {
+        const { assert!(TIMER_RING_Y - TIMER_BUTTON_SIZE / 2.0 > HOME_SHORTCUT_Y + HOME_SHORTCUT_SIZE / 2.0) };
+        for button in TimerButton::ALL {
+            assert!(!on_home_shortcut(button.center_x(), TIMER_RING_Y));
+        }
     }
 
     #[test]

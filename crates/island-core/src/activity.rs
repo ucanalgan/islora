@@ -70,6 +70,8 @@ pub struct TimerView {
     pub running: bool,
     /// Whether it can be paused and cancelled from the island.
     pub has_controls: bool,
+    /// How much of its time is left, in thousandths. `None` without a set length.
+    pub left: Option<u16>,
 }
 
 /// One thing the island can show. There is at most one activity per [`Kind`]:

@@ -9,21 +9,22 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_ROUNDED_RECT,
-    D2D1_SWEEP_DIRECTION_CLOCKWISE,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap, ID2D1DeviceContext,
-    ID2D1Factory1,
+    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap, ID2D1Brush,
+    ID2D1DeviceContext, ID2D1Factory1,
 };
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_TRIMMING,
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory,
     IDWriteFactory, IDWriteTextFormat,
 };
@@ -95,6 +96,8 @@ pub struct TextRun<'a> {
     pub opacity: f32,
     pub align: Align,
     pub font: Font,
+    /// Gives every digit the same width, or a centred countdown would twitch.
+    pub even_digits: bool,
 }
 
 /// A white rounded bar, used for the progress track and its fill.
@@ -103,13 +106,14 @@ pub struct BarRun {
     pub opacity: f32,
 }
 
-/// A thin circle filled clockwise from the top to `fraction`, from 0 to 1.
+/// A circle filled clockwise from the top to `fraction`, from 0 to 1.
 pub struct RingRun {
     pub center_x: f32,
     pub center_y: f32,
     pub radius: f32,
     pub width: f32,
     pub fraction: f32,
+    pub opacity: f32,
 }
 
 /// A square image, cropped to fill its bounds, as covers usually are shown.
@@ -212,7 +216,16 @@ impl Painter {
     pub fn measure(&self, text: &str, size: f32, bold: bool) -> Result<f32> {
         const ROOMY: f32 = 4096.0;
         let bounds = Bounds { x: 0.0, y: 0.0, width: ROOMY, height: ROOMY };
-        let run = TextRun { text, bounds, size, bold, opacity: 1.0, align: Align::Leading, font: Font::Text };
+        let run = TextRun {
+            text,
+            bounds,
+            size,
+            bold,
+            opacity: 1.0,
+            align: Align::Leading,
+            font: Font::Text,
+            even_digits: false,
+        };
         let format = self.format(&run)?;
         let utf16: Vec<u16> = text.encode_utf16().collect();
         let mut metrics = DWRITE_TEXT_METRICS::default();
@@ -248,14 +261,18 @@ impl Painter {
             let utf16: Vec<u16> = run.text.encode_utf16().collect();
             unsafe {
                 let brush = dc.CreateSolidColorBrush(&color, None)?;
-                dc.DrawText(
-                    &utf16,
-                    &format,
-                    &run.bounds.rect(),
-                    &brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
+                if run.even_digits {
+                    self.draw_even_digits(dc, run, &utf16, &format, &brush.cast()?)?;
+                } else {
+                    dc.DrawText(
+                        &utf16,
+                        &format,
+                        &run.bounds.rect(),
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
             }
         }
         for (text, bounds) in &painting.owned_labels {
@@ -267,6 +284,7 @@ impl Painter {
                 opacity: 1.0,
                 align: Align::Center,
                 font: Font::Text,
+                even_digits: false,
             };
             let format = self.format(&run)?;
             let color = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: run.opacity };
@@ -286,6 +304,29 @@ impl Painter {
         Ok(())
     }
 
+    /// Drawing with the font's own feature needs a layout, unlike plain text.
+    unsafe fn draw_even_digits(
+        &self,
+        dc: &ID2D1DeviceContext,
+        run: &TextRun,
+        utf16: &[u16],
+        format: &IDWriteTextFormat,
+        brush: &ID2D1Brush,
+    ) -> Result<()> {
+        let bounds = run.bounds;
+        let feature = DWRITE_FONT_FEATURE { nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, parameter: 1 };
+        let whole = DWRITE_TEXT_RANGE { startPosition: 0, length: utf16.len() as u32 };
+        unsafe {
+            let layout = self.dwrite.CreateTextLayout(utf16, format, bounds.width, bounds.height)?;
+            let typography = self.dwrite.CreateTypography()?;
+            typography.AddFontFeature(feature)?;
+            layout.SetTypography(&typography, whole)?;
+            let origin = Vector2 { X: bounds.x, Y: bounds.y };
+            dc.DrawTextLayout(origin, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+        Ok(())
+    }
+
     unsafe fn draw_ring(&self, dc: &ID2D1DeviceContext, ring: &RingRun) -> Result<()> {
         let center = Vector2 { X: ring.center_x, Y: ring.center_y };
         let full = D2D1_ELLIPSE { point: center, radiusX: ring.radius, radiusY: ring.radius };
@@ -293,7 +334,7 @@ impl Painter {
             let track = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.22 }, None)?;
             dc.DrawEllipse(&full, &track, ring.width, None);
 
-            let white = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
+            let white = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: ring.opacity }, None)?;
             if ring.fraction >= 0.999 {
                 dc.DrawEllipse(&full, &white, ring.width, None);
                 return Ok(());
@@ -307,7 +348,8 @@ impl Painter {
                 X: center.X + ring.radius * angle.sin(),
                 Y: center.Y - ring.radius * angle.cos(),
             };
-            let path = dc.GetFactory()?.CreatePathGeometry()?;
+            let factory = dc.GetFactory()?;
+            let path = factory.CreatePathGeometry()?;
             let sink = path.Open()?;
             sink.BeginFigure(top, D2D1_FIGURE_BEGIN_HOLLOW);
             sink.AddArc(&D2D1_ARC_SEGMENT {
@@ -319,7 +361,13 @@ impl Painter {
             });
             sink.EndFigure(D2D1_FIGURE_END_OPEN);
             sink.Close()?;
-            dc.DrawGeometry(&path, &white, ring.width, None);
+            let round_ends = D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                ..Default::default()
+            };
+            let stroke = factory.CreateStrokeStyle(&round_ends, None)?;
+            dc.DrawGeometry(&path, &white, ring.width, &stroke);
         }
         Ok(())
     }

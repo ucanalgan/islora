@@ -74,7 +74,7 @@ const HIDE_MS: u32 = 380;
 /// reach a browser tab does not open anything.
 const EDGE_DWELL_MS: u32 = 120;
 const DEMO_STEP_MS: u32 = 3_500;
-const DEMO_STEPS: u32 = 8;
+const DEMO_STEPS: u32 = 11;
 const INDICATOR_DEMO_STEP_MS: u32 = 1_500;
 /// Running time only needs repainting while it is on screen, once a second.
 const MEDIA_TICK_MS: u32 = 1_000;
@@ -1062,6 +1062,16 @@ impl App {
             6 => {
                 self.island.start_timer(25 * 60_000, now);
                 self.island.set_camera(Some("Zoom".to_owned()));
+            }
+            7 => {
+                self.island.set_camera(None);
+                self.island.remove(Kind::Media);
+                self.island.click(now);
+            }
+            8 => self.island.toggle_timer(now),
+            9 => {
+                self.island.start_timer(90 * 60_000, now);
+                self.island.click(now);
             }
             _ => {
                 self.island.cancel_timer();

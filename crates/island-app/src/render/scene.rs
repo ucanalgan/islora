@@ -7,7 +7,8 @@ use island_core::layout::{
     COMPACT_MAX_WIDTH, COMPACT_MIN_WIDTH, EVENT_HIDE_HEIGHT, EVENT_HIDE_WIDTH, HOME_SHORTCUT_SIZE,
     HOME_SHORTCUT_X, HOME_SHORTCUT_Y, MEDIA_BUTTON_Y, MODE_TAB_HEIGHT,
     MODE_TAB_Y, MediaButton, PRESET_HEIGHT, PRESET_WIDTH, PRESET_Y, PROGRESS_HEIGHT,
-    PROGRESS_WIDTH, PROGRESS_X, PROGRESS_Y, StartMode, TIMER_PRESETS, TimerButton, preset_center_x,
+    PROGRESS_WIDTH, PROGRESS_X, PROGRESS_Y, StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS,
+    TIMER_RING_RADIUS, TIMER_RING_WIDTH, TIMER_RING_X, TIMER_RING_Y, TimerButton, preset_center_x,
 };
 use island_core::media::{RepeatMode, format_time};
 use island_core::{
@@ -75,6 +76,13 @@ const COMPACT_TEXT_GAP: f32 = 12.0;
 /// Text measures a little narrower than it may draw, and a cut last letter is ugly.
 const MEASURE_SPARE: f32 = 2.0;
 const SMALLEST_ART_RADIUS: f32 = 5.0;
+const COUNTDOWN_SIZE: f32 = 34.0;
+/// Past an hour the countdown has to fit two more digits inside the same ring.
+const LONG_COUNTDOWN_SIZE: f32 = 26.0;
+const LONG_COUNTDOWN: usize = "24:13".len();
+const COUNTDOWN_LABEL_WIDTH: f32 = 96.0;
+/// A paused countdown steps back, so its state reads without any words.
+const PAUSED_OPACITY: f32 = 0.55;
 
 /// Digits differ in width, so a countdown is measured as if all were zeros, or
 /// the pill would twitch every second.
@@ -287,8 +295,11 @@ impl Scene {
                 scene.level = Some(0);
                 scene.detail.clear();
             }
-            if scene.timer.is_some() {
+            if let Some(timer) = &mut scene.timer {
+                timer.running = false;
+                timer.left = None;
                 scene.title.clear();
+                scene.detail.clear();
             }
             if let Some(clock) = &mut scene.clock {
                 clock.clear();
@@ -430,8 +441,26 @@ impl Scene {
     fn expanded_timer(&self, timer: TimerView, canvas: &Canvas) -> Painting<'_> {
         let mut painting = Painting::default();
         canvas.home_shortcut(&mut painting);
-        painting.texts.push(canvas.text(&self.title, canvas.bounds(0.0, 26.0, canvas.width, 56.0), 44.0, true, 1.0, Align::Center));
-        painting.texts.push(canvas.text(&self.detail, canvas.bounds(0.0, 84.0, canvas.width, 22.0), 13.0, false, 0.7, Align::Center));
+        let opacity = if timer.running { 1.0 } else { PAUSED_OPACITY };
+        painting.rings.push(RingRun {
+            center_x: TIMER_RING_X * canvas.scale,
+            center_y: TIMER_RING_Y * canvas.scale,
+            radius: TIMER_RING_RADIUS * canvas.scale,
+            width: TIMER_RING_WIDTH * canvas.scale,
+            fraction: timer.left.map_or(0.0, |left| left as f32 / 1000.0),
+            opacity,
+        });
+
+        let size = if self.title.len() > LONG_COUNTDOWN { LONG_COUNTDOWN_SIZE } else { COUNTDOWN_SIZE };
+        let inside = (TIMER_RING_RADIUS - TIMER_RING_WIDTH / 2.0) * 2.0;
+        let countdown = canvas.bounds(TIMER_RING_X - inside / 2.0, TIMER_RING_Y - 28.0, inside, 44.0);
+        painting.texts.push(TextRun {
+            even_digits: true,
+            ..canvas.text(&self.title, countdown, size, true, opacity, Align::Center)
+        });
+        let label = canvas.bounds(TIMER_RING_X - COUNTDOWN_LABEL_WIDTH / 2.0, TIMER_RING_Y + 18.0, COUNTDOWN_LABEL_WIDTH, 18.0);
+        painting.texts.push(canvas.text(&self.detail, label, 11.5, false, 0.6, Align::Center));
+
         let buttons: &[TimerButton] = if timer.has_controls { &TimerButton::ALL } else { &[] };
         for &button in buttons {
             let glyph = match button {
@@ -439,9 +468,10 @@ impl Scene {
                 TimerButton::Toggle => ICON_PLAY,
                 TimerButton::Cancel => ICON_CANCEL,
             };
-            let half = 21.0;
-            let bounds = canvas.bounds(button.center_x() - half, MEDIA_BUTTON_Y - half, half * 2.0, half * 2.0);
-            painting.texts.push(canvas.icon(glyph, bounds, 21.0));
+            let half = TIMER_BUTTON_SIZE / 2.0;
+            let bounds = canvas.bounds(button.center_x() - half, TIMER_RING_Y - half, TIMER_BUTTON_SIZE, TIMER_BUTTON_SIZE);
+            painting.bars.push(BarRun { bounds, opacity: 0.14 });
+            painting.texts.push(canvas.icon(glyph, bounds, 19.0));
         }
         painting
     }
@@ -581,6 +611,7 @@ pub fn bubble_painting(bubble: &Bubble, size: f32, scale: f32) -> Painting<'_> {
                     radius: (middle - 3.0) * scale,
                     width: 2.0 * scale,
                     fraction: *percent as f32 / 100.0,
+                    opacity: 1.0,
                 });
             }
             let (text_top, text_height) = match icon {
@@ -612,7 +643,7 @@ impl Canvas {
     }
 
     fn text<'a>(&self, text: &'a str, bounds: Bounds, size: f32, bold: bool, opacity: f32, align: Align) -> TextRun<'a> {
-        TextRun { text, bounds, size: size * self.scale, bold, opacity, align, font: Font::Text }
+        TextRun { text, bounds, size: size * self.scale, bold, opacity, align, font: Font::Text, even_digits: false }
     }
 
     fn icon<'a>(&self, glyph: &'a str, bounds: Bounds, size: f32) -> TextRun<'a> {
@@ -624,6 +655,7 @@ impl Canvas {
             opacity: 1.0,
             align: Align::Center,
             font: Font::Icons,
+            even_digits: false,
         }
     }
 
