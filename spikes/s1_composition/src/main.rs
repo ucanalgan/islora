@@ -144,7 +144,7 @@ fn create_dispatcher_queue() -> Result<DispatcherQueueController> {
 fn create_window() -> Result<HWND> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
-        let class = w!("DynamicIslandSpike");
+        let class = w!("IsloraSpike");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wnd_proc),
             hInstance: instance.into(),
@@ -160,7 +160,7 @@ fn create_window() -> Result<HWND> {
         CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
             class,
-            w!("Dynamic Island Spike"),
+            w!("Islora Spike"),
             WS_POPUP,
             x,
             0,

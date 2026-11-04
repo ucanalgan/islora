@@ -175,6 +175,9 @@ try {
     Check 'it opens the home view' ((Get-ScreenRed ($Preset25X - 30) $PresetY) -gt 20)
     Check 'the pointer on the top row keeps it open' ([Win]::Root($centerX, 0) -eq $notch)
     Stop-Island
+    # Left on the top edge, the pointer would bring the clock up by itself, and
+    # the next double press would then open and close the home view.
+    [void][Win]::SetCursorPos($centerX, 600)
 
     'Calendar out of reach'
     Start-Process -FilePath $Exe -ArgumentList ($NoSession + '--local-timers', '--calendar-file', 'no-such-file.ics')

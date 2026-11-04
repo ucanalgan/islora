@@ -1,6 +1,6 @@
 # Islora
 
-Apple's Dynamic Island, brought to Windows 11. Islora shows what your PC is doing in a small black pill at the top of the screen, and hides when there is nothing to show.
+A live island for Windows 11. Islora shows what your PC is doing in a small black or glass pill at the top of the screen, and hides when there is nothing to show.
 
 <table>
   <tr>
@@ -11,10 +11,14 @@ Apple's Dynamic Island, brought to Windows 11. Islora shows what your PC is doin
     <td><img src="assets/screenshots/music.png" alt="Expanded music controls"></td>
     <td><img src="assets/screenshots/timer.png" alt="Expanded running timer"></td>
   </tr>
+  <tr>
+    <td><img src="assets/screenshots/glass.png" alt="The glass material, showing the colours behind it"></td>
+    <td><img src="assets/screenshots/settings.png" alt="The settings window on its appearance page"></td>
+  </tr>
 </table>
 
 > [!NOTE]
-> Islora is at an early stage. The interface is in Turkish only, and Islora has only been run on a Windows 11 Insider build so far. Its design is moving closer to Apple's, so the timer and calendar screens will change.
+> Islora is at an early stage. The interface is in Turkish only, and Islora has only been run on a Windows 11 Insider build so far. The timer and calendar screens will change.
 
 ## Download
 
@@ -29,7 +33,7 @@ The file is not signed, so SmartScreen may warn you the first time. Choose **Mor
 - **Calendar:** events from a private iCal address, as a bubble 30 minutes before they start, in the pill 5 minutes before, and as an alert when they begin.
 - **System changes:** volume, brightness, Caps Lock, Num Lock, charger, low battery, Energy Saver, Bluetooth, sound output, microphone, camera, internet, Wi-Fi, VPN, airplane mode, USB drives, displays, screenshots, copied items, track changes and keyboard language.
 
-Two things can run at once: the main one sits in the pill and the second in a bubble beside it, as on an iPhone.
+Two things can run at once: the main one sits in the pill and the second in a bubble beside it.
 
 The island hides during fullscreen apps and leaves itself out of screenshots, screen recordings and screen sharing.
 
@@ -85,8 +89,6 @@ cargo test -p island-core
 
 The app is `target\release\islora.exe`. `crates/island-core` holds the logic and has no Windows dependency, so it can be tested on its own. `crates/island-app` holds the window, drawing and event sources. `spikes` keeps the early experiments and is not part of the build.
 
-## Legal
-
-Apple and Dynamic Island are trademarks of Apple Inc. Islora is an independent project and is not affiliated with or endorsed by Apple.
+## License
 
 No license has been chosen yet, so all rights are reserved for now.

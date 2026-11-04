@@ -391,7 +391,9 @@ impl Island {
                     self.focused = None;
                 }
             }
-            None if self.peek_until.is_some() => {
+            // The clock is up, whether from a peek or from the pointer resting
+            // where it appeared, which ends the peek but keeps it in view.
+            None if self.peek_until.is_some() || self.hovered => {
                 self.home = true;
                 self.collapse_at = Some(now + KEYBOARD_EXPAND_MS);
                 self.peek_until = Some(now + KEYBOARD_EXPAND_MS);
@@ -1271,6 +1273,17 @@ mod tests {
         let frame = island.frame(500 + KEYBOARD_EXPAND_MS);
         assert_eq!(frame.home, None);
         assert_eq!(frame.presentation, Presentation::Hidden);
+    }
+
+    #[test]
+    fn the_shortcut_twice_opens_the_home_view_under_a_resting_pointer() {
+        let mut island = Island::new();
+        island.summon(0);
+        // The clock came up right under the pointer.
+        island.set_hovered(true, 100);
+        assert_eq!(island.frame(100).presentation, Presentation::Compact);
+        island.summon(500);
+        assert!(island.frame(500).home.is_some());
     }
 
     #[test]

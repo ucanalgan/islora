@@ -97,8 +97,8 @@ const CLIPBOARD_QUIET_MS: Millis = 800;
 const CLIPBOARD_QUIET_AFTER_SCREENSHOT_MS: Millis = 3_000;
 /// Windows switches language a moment after the shortcut's last key comes up.
 const LANGUAGE_SETTLE_MS: u32 = 300;
-/// A maximized window opened from the desktop fills the screen too, and Windows
-/// takes back what it said about the desktop only a moment after it appears.
+/// A window opened from the bare desktop counts as full screen for a moment, as
+/// Windows takes back what it said about the desktop only after it appears.
 const FULLSCREEN_SETTLE_MS: u32 = 200;
 
 const NOTIFICATION_MS: Millis = 3_000;
@@ -232,7 +232,7 @@ pub fn run() -> Result<()> {
     apply_settings(&mut island);
     let reported = fullscreen::fullscreen_now();
     let mut fullscreen_watch = FullscreenWatch::default();
-    fullscreen_watch.report(reported, fullscreen::front_fills_screen());
+    fullscreen_watch.report(reported, fullscreen::desktop_in_front());
     presence.follow_front(reported);
     island.set_suppressed(Suppression::Fullscreen, fullscreen_watch.active());
     if !fullscreen_watch.active() {
@@ -487,7 +487,7 @@ impl App {
             }
             TIMER_FULLSCREEN => {
                 self.cancel_timer(TIMER_FULLSCREEN);
-                self.fullscreen.front_changed(fullscreen::front_fills_screen());
+                self.fullscreen.front_changed(fullscreen::desktop_in_front());
                 self.apply_fullscreen();
             }
             _ => {}
@@ -1216,14 +1216,14 @@ impl App {
     }
 
     fn on_fullscreen(&mut self, reported: bool) {
-        self.fullscreen.report(reported, fullscreen::front_fills_screen());
+        self.fullscreen.report(reported, fullscreen::desktop_in_front());
         self.presence.follow_front(reported);
         self.cancel_timer(TIMER_FULLSCREEN);
         self.apply_fullscreen();
     }
 
     fn on_front_changed(&mut self) {
-        self.fullscreen.front_changed(fullscreen::front_fills_screen());
+        self.fullscreen.front_changed(fullscreen::desktop_in_front());
         if self.fullscreen.active() {
             self.set_timer(TIMER_FULLSCREEN, FULLSCREEN_SETTLE_MS);
         } else {

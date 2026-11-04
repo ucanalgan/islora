@@ -5,10 +5,7 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use island_core::fullscreen::is_desktop_class;
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
-};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Power::{
     HPOWERNOTIFY, POWERBROADCAST_SETTING, RegisterPowerSettingNotification,
     UnregisterPowerSettingNotification,
@@ -25,8 +22,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND,
-    EVENT_SYSTEM_MOVESIZESTART, GetClassNameW, GetForegroundWindow, GetWindowRect,
-    PBT_POWERSETTINGCHANGE, PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
+    EVENT_SYSTEM_MOVESIZESTART, GetClassNameW, GetForegroundWindow, PBT_POWERSETTINGCHANGE, PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
 };
 use windows::core::Result;
 
@@ -160,28 +156,13 @@ pub fn fullscreen_now() -> bool {
     matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE)
 }
 
-/// Whether the window in front covers its whole screen and is not the desktop.
-/// The taskbar and Start also come to the front while Windows calls the desktop
-/// full screen, which the size rules out without naming each of them.
-pub fn front_fills_screen() -> bool {
-    unsafe {
-        let front = GetForegroundWindow();
-        let mut class = [0u16; 32];
-        let length = GetClassNameW(front, &mut class).max(0) as usize;
-        if is_desktop_class(&String::from_utf16_lossy(&class[..length])) {
-            return false;
-        }
-        let mut window = RECT::default();
-        let mut monitor = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let measured = GetWindowRect(front, &mut window).is_ok()
-            && GetMonitorInfoW(MonitorFromWindow(front, MONITOR_DEFAULTTONEAREST), &mut monitor).as_bool();
-        let screen = monitor.rcMonitor;
-        measured
-            && window.left <= screen.left
-            && window.top <= screen.top
-            && window.right >= screen.right
-            && window.bottom >= screen.bottom
-    }
+/// Whether the desktop or the taskbar is in front, which Windows also reports as
+/// full screen. A full screen app need not be in front for Windows to report it,
+/// for one on another screen, so nothing else is second-guessed.
+pub fn desktop_in_front() -> bool {
+    let mut class = [0u16; 32];
+    let length = unsafe { GetClassNameW(GetForegroundWindow(), &mut class) }.max(0) as usize;
+    is_desktop_class(&String::from_utf16_lossy(&class[..length]))
 }
 
 /// Decodes `WM_POWERBROADCAST`. Returns whether the display is now on.
