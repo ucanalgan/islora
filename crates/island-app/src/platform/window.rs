@@ -33,6 +33,11 @@ pub fn create_island(wnd_proc: WNDPROC) -> Result<HWND> {
     create(ISLAND_CLASS, style)
 }
 
+/// The island of a copy that is already running.
+pub fn find_running() -> Option<HWND> {
+    unsafe { FindWindowW(ISLAND_CLASS, None) }.ok()
+}
+
 /// Leaves the island out of screenshots, recordings and shared screens, where
 /// it would only be in the way. What is behind it shows there instead.
 pub fn exclude_from_capture(hwnd: HWND) {

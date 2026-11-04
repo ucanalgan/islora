@@ -6,7 +6,7 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegG
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    ShellExecuteW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, Result, w};
@@ -15,27 +15,16 @@ pub const MSG_TRAY: u32 = WM_APP + 1;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Command {
-    ToggleDemo,
-    Reload,
     OpenSettings,
-    ToggleAutostart,
-    ToggleNotch,
+    ReleaseNotes,
     Quit,
 }
 
-/// What the menu shows as switched on.
-pub struct MenuState {
-    pub demo_running: bool,
-    pub autostart: bool,
-    pub notch: bool,
-}
+const ID_SETTINGS: usize = 1;
+const ID_RELEASE_NOTES: usize = 2;
+const ID_QUIT: usize = 3;
 
-const ID_DEMO: usize = 1;
-const ID_QUIT: usize = 2;
-const ID_RELOAD: usize = 3;
-const ID_SETTINGS: usize = 4;
-const ID_AUTOSTART: usize = 5;
-const ID_NOTCH: usize = 6;
+const RELEASE_NOTES: &str = concat!("https://github.com/ucanalgan/islora/releases/tag/v", env!("CARGO_PKG_VERSION"));
 
 // Resource numbers from app.rc.
 const ICON_WHITE: usize = 2;
@@ -107,20 +96,29 @@ fn load_icon(hwnd: HWND, resource: usize) -> Result<HICON> {
 }
 
 fn taskbar_is_light() -> bool {
+    theme_setting(w!("SystemUsesLightTheme")).is_some_and(|value| value != 0)
+}
+
+/// Whether Windows draws its own surfaces transparent. A missing value means yes.
+pub fn transparency_is_on() -> bool {
+    theme_setting(w!("EnableTransparency")).is_none_or(|value| value != 0)
+}
+
+fn theme_setting(name: PCWSTR) -> Option<u32> {
     let mut value = 0_u32;
     let mut size = size_of::<u32>() as u32;
     let result = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
-            w!("SystemUsesLightTheme"),
+            name,
             RRF_RT_REG_DWORD,
             None,
             Some((&raw mut value).cast()),
             Some(&mut size),
         )
     };
-    result.is_ok() && value != 0
+    result.is_ok().then_some(value)
 }
 
 /// Decodes `WM_SETTINGCHANGE`, which Windows sends for many other settings too.
@@ -132,19 +130,14 @@ pub fn is_theme_change(lparam: LPARAM) -> bool {
 
 /// Blocks in a modal loop until the menu closes, so it must not be called
 /// while the app state is borrowed.
-pub fn show_menu(hwnd: HWND, state: &MenuState) -> Option<Command> {
-    let switch = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
+/// Everything else lives in the settings window, which the first item opens.
+pub fn show_menu(hwnd: HWND) -> Option<Command> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
-        let label = if state.demo_running { w!("Demoyu durdur") } else { w!("Demoyu başlat") };
-        AppendMenuW(menu, MF_STRING, ID_DEMO, label).ok()?;
-        AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Ayarları aç")).ok()?;
-        AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("Takvimi ve ayarları yenile")).ok()?;
+        AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Ayarlar")).ok()?;
+        AppendMenuW(menu, MF_STRING, ID_RELEASE_NOTES, &HSTRING::from("Sürüm notları")).ok()?;
         AppendMenuW(menu, MF_SEPARATOR, 0, None).ok()?;
-        AppendMenuW(menu, switch(state.autostart), ID_AUTOSTART, w!("Windows ile başlat")).ok()?;
-        AppendMenuW(menu, switch(state.notch), ID_NOTCH, w!("Notch görünümü")).ok()?;
-        AppendMenuW(menu, MF_SEPARATOR, 0, None).ok()?;
-        AppendMenuW(menu, MF_STRING, ID_QUIT, &HSTRING::from("Çıkış")).ok()?;
+        AppendMenuW(menu, MF_STRING, ID_QUIT, &HSTRING::from("Islora'dan çık")).ok()?;
 
         let mut cursor = POINT::default();
         GetCursorPos(&mut cursor).ok()?;
@@ -161,13 +154,18 @@ pub fn show_menu(hwnd: HWND, state: &MenuState) -> Option<Command> {
         );
         let _ = DestroyMenu(menu);
         match chosen.0 as usize {
-            ID_DEMO => Some(Command::ToggleDemo),
-            ID_RELOAD => Some(Command::Reload),
             ID_SETTINGS => Some(Command::OpenSettings),
-            ID_AUTOSTART => Some(Command::ToggleAutostart),
-            ID_NOTCH => Some(Command::ToggleNotch),
+            ID_RELEASE_NOTES => Some(Command::ReleaseNotes),
             ID_QUIT => Some(Command::Quit),
             _ => None,
         }
     }
+}
+
+/// Opens this version's notes in the browser. The app itself fetches nothing.
+pub fn open_release_notes() {
+    // Handing a link to the browser can take a while, which the UI must not wait for.
+    std::thread::spawn(|| unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(RELEASE_NOTES), None, None, SW_SHOWNORMAL);
+    });
 }

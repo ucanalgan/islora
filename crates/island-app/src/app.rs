@@ -11,30 +11,39 @@ use island_core::focus::{
 use island_core::ics::{self, Event};
 use island_core::media::RepeatMode;
 use island_core::layout::{
-    TIMER_PRESETS, on_event_hide, on_home_shortcut, on_progress_bar, preset_at, progress_fraction,
+    TIMER_PRESETS, on_event_hide, on_home_shortcut, on_progress_bar, on_settings_shortcut,
+    preset_at, progress_fraction,
+};
+use island_core::settings_view::{
+    Action, NOTICES, Page, SettingsState, is_calendar_address, stepped_preset, toggled_notice,
 };
 use island_core::{
-    Activity, CalendarState, FocusView, Frame, Indicator, Island, IslandStyle, Kind, MediaButton,
-    MediaSnapshot, Millis, Pill, Presentation, StartMode, Suppression, SystemTracker, TimerButton,
-    Upcoming,
+    Activity, CalendarState, FocusView, Frame, FullscreenWatch, Indicator, Island, IslandStyle,
+    Kind, Material, MediaButton, MediaSnapshot, Millis, Pill, Presentation, StartMode, Suppression,
+    SystemTracker, TimerButton, Upcoming,
 };
 use windows::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
+use windows::Win32::Graphics::Gdi::HDC;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    VIRTUAL_KEY, VK_ESCAPE, VK_SHIFT,
 };
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::UI::Shell::ABN_FULLSCREENAPP;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Result, w};
 
-use crate::platform::tray::{self, Command, MSG_TRAY, MenuState, Tray};
+use crate::platform::settings_window::{
+    self, MSG_OPEN_SETTINGS, MSG_SETTINGS_CLOSED, SettingsWindow,
+};
+use crate::platform::tray::{self, Command, MSG_TRAY, Tray};
 use crate::platform::window::{self, Placement};
 use crate::platform::{autostart, hotkey, settings};
 use crate::render::{self, ClockText, Renderer, WaveMotion};
@@ -44,7 +53,7 @@ use crate::sources::calendar::{CalendarSource, CalendarUpdate, MSG_CALENDAR, uni
 use crate::sources::clock_timers::{ClockTimerWatch, MSG_CLOCK_TIMERS};
 use crate::sources::drives::Drives;
 use crate::sources::focus::{self, FocusWatch, MSG_FOCUS, MSG_FOCUS_REFUSED};
-use crate::sources::fullscreen::{self, MSG_APPBAR, MSG_WINDOW_DRAG, Presence};
+use crate::sources::fullscreen::{self, MSG_APPBAR, MSG_FRONT_CHANGED, MSG_WINDOW_DRAG, Presence};
 use crate::sources::media::{MSG_MEDIA, MediaSource};
 use crate::sources::power::{self, PowerEvent, PowerWatch};
 use crate::sources::privacy::{CameraWatch, MSG_CAMERA};
@@ -64,6 +73,7 @@ const TIMER_INDICATOR_DEMO: usize = 8;
 const TIMER_FOCUS_CHECK: usize = 9;
 const TIMER_CLOCK: usize = 10;
 const TIMER_LANGUAGE: usize = 11;
+const TIMER_FULLSCREEN: usize = 12;
 
 /// When the pill looks settled. The compositor's own completion event only
 /// fires about 1.2 s after an animation starts, long after it visibly stopped.
@@ -87,6 +97,9 @@ const CLIPBOARD_QUIET_MS: Millis = 800;
 const CLIPBOARD_QUIET_AFTER_SCREENSHOT_MS: Millis = 3_000;
 /// Windows switches language a moment after the shortcut's last key comes up.
 const LANGUAGE_SETTLE_MS: u32 = 300;
+/// A maximized window opened from the desktop fills the screen too, and Windows
+/// takes back what it said about the desktop only a moment after it appears.
+const FULLSCREEN_SETTLE_MS: u32 = 200;
 
 const NOTIFICATION_MS: Millis = 3_000;
 
@@ -120,7 +133,16 @@ struct App {
     island: Island,
     renderer: Renderer,
     tray: Tray,
-    _presence: Presence,
+    presence: Presence,
+    fullscreen: FullscreenWatch,
+    /// Whether the island is out of the way for a full screen app right now.
+    out_for_fullscreen: bool,
+    /// Only there while open, so that it costs nothing the rest of the time.
+    settings: Option<SettingsWindow>,
+    /// What the user chose, which Energy Saver can overrule for a while.
+    material: Material,
+    sound_wave: bool,
+    battery_saver: bool,
     media: MediaSource,
     calendar: CalendarSource,
     events: Vec<Event>,
@@ -169,8 +191,14 @@ pub fn run() -> Result<()> {
     // A look at a new build, beside the copy the user keeps running.
     let second_copy = std::env::args().any(|a| a == "--second-copy");
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS && !second_copy {
+        // Opening the app again is how most people will look for its settings.
+        // Tests start it with arguments, and expect nothing but a quick exit.
+        if std::env::args().len() == 1 {
+            ask_running_copy_for_settings();
+        }
         return Ok(());
     }
+    let first_run = settings::is_first_run();
 
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)? };
     TASKBAR_CREATED.store(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }, Ordering::Relaxed);
@@ -183,17 +211,18 @@ pub fn run() -> Result<()> {
     }
     let edge_window = window::create_edge(Some(edge_proc))?;
     let placement = window::place(island_window, edge_window, stored_style())?;
-    let wave_motion = match argument_after("--wave").as_deref() {
-        Some("still") => WaveMotion::Still,
-        _ => WaveMotion::Always,
+    let sound_wave = match argument_after("--wave").as_deref() {
+        Some("still") => false,
+        _ => stored_sound_wave(),
     };
+    let wave_motion = if sound_wave { WaveMotion::Always } else { WaveMotion::Still };
     let renderer = Renderer::new(island_window, placement.scale, placement.width, placement.style, wave_motion)?;
 
     if !hotkey::register(island_window) {
         eprintln!("no global shortcut available, only the top edge will open the island");
     }
     let tray = Tray::add(island_window)?;
-    let presence = Presence::start(island_window)?;
+    let mut presence = Presence::start(island_window)?;
 
     let mut island = Island::new();
     if std::env::args().any(|a| a == "--local-timers") {
@@ -201,9 +230,12 @@ pub fn run() -> Result<()> {
     }
     // Before the calendar thread, which reads the same file.
     apply_settings(&mut island);
-    let fullscreen = fullscreen::fullscreen_now();
-    island.set_suppressed(Suppression::Fullscreen, fullscreen);
-    if !fullscreen {
+    let reported = fullscreen::fullscreen_now();
+    let mut fullscreen_watch = FullscreenWatch::default();
+    fullscreen_watch.report(reported, fullscreen::front_fills_screen());
+    presence.follow_front(reported);
+    island.set_suppressed(Suppression::Fullscreen, fullscreen_watch.active());
+    if !fullscreen_watch.active() {
         window::show(edge_window);
     }
 
@@ -233,7 +265,13 @@ pub fn run() -> Result<()> {
         island,
         renderer,
         tray,
-        _presence: presence,
+        presence,
+        fullscreen: fullscreen_watch,
+        out_for_fullscreen: fullscreen_watch.active(),
+        settings: None,
+        material: stored_material(),
+        sound_wave,
+        battery_saver: false,
         media: MediaSource::start(island_window, started, argument_after("--only-session")),
         calendar: CalendarSource::start(island_window, argument_after("--calendar-file")),
         events: Vec::new(),
@@ -267,6 +305,7 @@ pub fn run() -> Result<()> {
         demo_step: None,
         indicator_demo_step: None,
     };
+    app.apply_material();
     if std::env::args().any(|a| a == "--demo") {
         app.toggle_demo();
     }
@@ -277,6 +316,12 @@ pub fn run() -> Result<()> {
     }
     APP.with(|cell| *cell.borrow_mut() = Some(app));
 
+    // The island hides when idle, so nothing else would show that the app started.
+    let welcome = first_run && std::env::args().len() == 1;
+    if welcome || std::env::args().any(|a| a == "--settings-offscreen") {
+        with_app(App::open_settings);
+    }
+
     // Windows answers this with the current state, which is what tells a real
     // change from then on. The app must be there to hear it, or the first time
     // the charger is plugged in would pass for that report and show nothing.
@@ -286,6 +331,11 @@ pub fn run() -> Result<()> {
     unsafe {
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            // Tab, Enter and Esc in the address box act on its window, as in a dialog.
+            if settings_window::is_dialog_key(&message) {
+                let _ = PostMessageW(GetParent(message.hwnd).ok(), WM_KEYDOWN, message.wParam, message.lParam);
+                continue;
+            }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
@@ -435,6 +485,11 @@ impl App {
                 self.cancel_timer(TIMER_LANGUAGE);
                 self.check_language();
             }
+            TIMER_FULLSCREEN => {
+                self.cancel_timer(TIMER_FULLSCREEN);
+                self.fullscreen.front_changed(fullscreen::front_fills_screen());
+                self.apply_fullscreen();
+            }
             _ => {}
         }
     }
@@ -533,6 +588,10 @@ impl App {
                     }
                 }
                 OpenView::Home => {
+                    if on_settings_shortcut(pill_x, pill_y) {
+                        self.open_settings();
+                        return;
+                    }
                     if let Some(index) = preset_at(pill_x, pill_y) {
                         self.start_preset(index, now);
                         return;
@@ -771,20 +830,174 @@ impl App {
         apply_settings(&mut self.island);
         self.notices_off = stored_notices_off();
         self.calendar.refresh();
+        self.sound_wave = stored_sound_wave();
+        self.apply_wave();
+        self.material = stored_material();
+        self.apply_material();
         self.set_style(stored_style());
         self.refresh();
     }
 
-    fn toggle_notch(&mut self) {
-        let style = match self.placement.style {
-            IslandStyle::Island => IslandStyle::Notch,
-            IslandStyle::Notch => IslandStyle::Island,
-        };
+    /// Puts the chosen material on, unless Windows has a reason against it now.
+    fn apply_material(&mut self) {
+        let material = self.material.in_effect(tray::transparency_is_on(), self.battery_saver);
+        if let Err(error) = self.renderer.set_material(material) {
+            eprintln!("material failed: {error}");
+        }
+    }
+
+    fn open_settings(&mut self) {
+        if let Some(window) = &self.settings {
+            window.bring_to_front();
+            return;
+        }
+        let address = settings::read()
+            .and_then(|text| config::read_value(&text, "calendar_ics_url"))
+            .unwrap_or_default();
+        let page = argument_after("--settings-page")
+            .and_then(|page| page.parse::<usize>().ok())
+            .and_then(|page| Page::ALL.get(page).copied())
+            .unwrap_or_default();
+        let hidden_away = std::env::args().any(|a| a == "--settings-offscreen");
+        let state = self.settings_state(page);
+        match SettingsWindow::open(self.island_window, Some(settings_proc), state, &address, hidden_away) {
+            Ok(window) => self.settings = Some(window),
+            Err(error) => eprintln!("settings window failed: {error}"),
+        }
+    }
+
+    fn settings_state(&self, page: Page) -> SettingsState {
+        SettingsState {
+            page,
+            material: self.material,
+            style: self.placement.style,
+            sound_wave: self.sound_wave,
+            notices_off: self.notices_off.clone(),
+            presets: self.island.presets(),
+            mode: self.island.start_mode(),
+            autostart: autostart::is_on(),
+            demo_running: self.demo_step.is_some(),
+            calendar_note: None,
+        }
+    }
+
+    fn paint_settings(&mut self) -> bool {
+        match &mut self.settings {
+            Some(window) => {
+                window.paint(self.renderer.painter());
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn on_settings_click(&mut self, x: i32, y: i32) {
+        let Some(window) = &mut self.settings else { return };
+        if let Some(action) = window.action_at(x, y) {
+            window.focus_on(action);
+            self.on_settings_action(action);
+        }
+    }
+
+    fn on_settings_key(&mut self, key: VIRTUAL_KEY, shift: bool) {
+        if let Some(action) = self.settings.as_mut().and_then(|window| window.on_key(key, shift)) {
+            self.on_settings_action(action);
+        }
+    }
+
+    /// Every change takes effect at once, and the window then shows what is true.
+    fn on_settings_action(&mut self, action: Action) {
+        let Some(mut page) = self.settings.as_ref().map(|window| window.state().page) else { return };
+        let mut calendar_note = None;
+        match action {
+            Action::Open(chosen) => page = chosen,
+            Action::Material(material) => self.choose_material(material),
+            Action::Style(style) => self.choose_style(style),
+            Action::SoundWave => {
+                self.sound_wave = !self.sound_wave;
+                settings::remember("sound_wave", if self.sound_wave { "on" } else { "off" });
+                self.apply_wave();
+            }
+            Action::Notice(index) => self.toggle_notice(NOTICES[index].0),
+            Action::Preset { index, longer } => {
+                let mut presets = self.island.presets();
+                presets[index] = stepped_preset(presets[index], longer);
+                settings::remember("timer_presets", &presets.map(|minutes| minutes.to_string()).join(", "));
+                self.island.set_presets(presets);
+                self.refresh();
+            }
+            Action::Mode(mode) => {
+                if self.island.set_start_mode(mode) {
+                    settings::remember("start_mode", mode.setting());
+                    self.refresh();
+                }
+            }
+            Action::SaveCalendar => calendar_note = self.save_calendar(),
+            Action::Autostart => autostart::set(!autostart::is_on()),
+            Action::Demo => self.toggle_demo(),
+            Action::Reload => self.reload(),
+            Action::EditFile => settings::open_in_editor(),
+            Action::Quit => {
+                unsafe {
+                    let _ = DestroyWindow(self.island_window);
+                }
+                return;
+            }
+        }
+        let state = SettingsState { calendar_note, ..self.settings_state(page) };
+        if let Some(window) = &mut self.settings {
+            window.update(state);
+        }
+    }
+
+    fn choose_material(&mut self, material: Material) {
+        if material == self.material {
+            return;
+        }
+        self.material = material;
+        settings::remember("material", material.setting());
+        self.apply_material();
+        // Otherwise a change made with nothing on screen would not show.
+        self.island.peek(self.now());
+        self.refresh();
+    }
+
+    fn choose_style(&mut self, style: IslandStyle) {
+        if style == self.placement.style {
+            return;
+        }
         settings::remember("island_style", style.setting());
         self.set_style(style);
         // Otherwise a change made with nothing on screen would not show.
         self.island.peek(self.now());
         self.refresh();
+    }
+
+    /// The moving wave is the costliest thing on screen, so Energy Saver stills
+    /// it as well, whatever the user chose.
+    fn apply_wave(&mut self) {
+        let moving = self.sound_wave && !self.battery_saver;
+        let motion = if moving { WaveMotion::Always } else { WaveMotion::Still };
+        if let Err(error) = self.renderer.set_wave_motion(motion) {
+            eprintln!("wave failed: {error}");
+        }
+    }
+
+    fn toggle_notice(&mut self, name: &str) {
+        self.notices_off = toggled_notice(&self.notices_off, name);
+        settings::remember("notices_off", &self.notices_off.join(", "));
+        apply_settings(&mut self.island);
+        self.on_camera();
+    }
+
+    fn save_calendar(&mut self) -> Option<&'static str> {
+        let address = self.settings.as_ref()?.address();
+        if !is_calendar_address(&address) {
+            return Some("Bu bir takvim adresi değil, https:// ile başlamalı");
+        }
+        settings::remember("calendar_ics_url", &address);
+        self.calendar.refresh();
+        Some(if address.is_empty() { "Takvim adresi kaldırıldı" } else { "Kaydedildi, takvim yenileniyor" })
     }
 
     fn set_style(&mut self, style: IslandStyle) {
@@ -915,11 +1128,17 @@ impl App {
     }
 
     fn on_power(&mut self, event: PowerEvent) {
+        let now = self.now();
         let indicator = match event {
             PowerEvent::Source { on_battery } => self.tracker.power_source_changed(on_battery),
             PowerEvent::Battery(percent) => self.tracker.battery_changed(percent),
-            PowerEvent::Brightness(percent) => self.tracker.brightness_changed(percent),
-            PowerEvent::BatterySaver(on) => self.tracker.battery_saver_changed(on),
+            PowerEvent::Brightness(percent) => self.tracker.brightness_changed(percent, now),
+            PowerEvent::BatterySaver(on) => {
+                self.battery_saver = on;
+                self.apply_material();
+                self.apply_wave();
+                self.tracker.battery_saver_changed(on, now)
+            }
         };
         if let Some(indicator) = indicator {
             self.show_indicator(indicator);
@@ -996,7 +1215,29 @@ impl App {
         self.refresh();
     }
 
-    fn on_fullscreen(&mut self, active: bool) {
+    fn on_fullscreen(&mut self, reported: bool) {
+        self.fullscreen.report(reported, fullscreen::front_fills_screen());
+        self.presence.follow_front(reported);
+        self.cancel_timer(TIMER_FULLSCREEN);
+        self.apply_fullscreen();
+    }
+
+    fn on_front_changed(&mut self) {
+        self.fullscreen.front_changed(fullscreen::front_fills_screen());
+        if self.fullscreen.active() {
+            self.set_timer(TIMER_FULLSCREEN, FULLSCREEN_SETTLE_MS);
+        } else {
+            self.cancel_timer(TIMER_FULLSCREEN);
+            self.apply_fullscreen();
+        }
+    }
+
+    fn apply_fullscreen(&mut self) {
+        let active = self.fullscreen.active();
+        if active == self.out_for_fullscreen {
+            return;
+        }
+        self.out_for_fullscreen = active;
         self.island.set_suppressed(Suppression::Fullscreen, active);
         if active {
             window::hide(self.edge_window);
@@ -1126,6 +1367,25 @@ fn stored_style() -> IslandStyle {
     settings::read().and_then(|text| config::read_island_style(&text)).unwrap_or_default()
 }
 
+fn stored_material() -> Material {
+    settings::read().and_then(|text| config::read_material(&text)).unwrap_or_default()
+}
+
+fn stored_sound_wave() -> bool {
+    settings::read().is_none_or(|text| config::read_sound_wave(&text))
+}
+
+fn ask_running_copy_for_settings() {
+    let Some(running) = window::find_running() else { return };
+    unsafe {
+        let mut process = 0;
+        GetWindowThreadProcessId(running, Some(&mut process));
+        // Only the app in front may bring another to the front.
+        let _ = AllowSetForegroundWindow(process);
+        let _ = PostMessageW(Some(running), MSG_OPEN_SETTINGS, WPARAM(0), LPARAM(0));
+    }
+}
+
 fn apply_settings(island: &mut Island) {
     let text = settings::read().unwrap_or_default();
     island.set_presets(config::read_presets(&text).unwrap_or(TIMER_PRESETS));
@@ -1206,6 +1466,15 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         MSG_APPBAR if wparam.0 as u32 == ABN_FULLSCREENAPP => {
             with_app(|app| app.on_fullscreen(lparam.0 != 0));
         }
+        MSG_FRONT_CHANGED => {
+            with_app(App::on_front_changed);
+        }
+        MSG_OPEN_SETTINGS => {
+            with_app(App::open_settings);
+        }
+        MSG_SETTINGS_CLOSED => {
+            with_app(|app| app.settings = None);
+        }
         MSG_MEDIA => {
             with_app(App::on_media);
         }
@@ -1260,7 +1529,10 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         WM_SETTINGCHANGE => {
             if tray::is_theme_change(lparam) {
-                with_app(|app| app.tray.follow_theme());
+                with_app(|app| {
+                    app.tray.follow_theme();
+                    app.apply_material();
+                });
             }
         }
         WM_DESTROY => {
@@ -1274,29 +1546,67 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     LRESULT(0)
 }
 
+unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        // Painted in full each time, which an erased background would only flash.
+        WM_ERASEBKGND => return LRESULT(1),
+        WM_PAINT if with_app(App::paint_settings) == Some(true) => return LRESULT(0),
+        WM_MOUSEMOVE => {
+            let (x, y) = pointer_position(lparam);
+            with_app(|app| app.settings.as_mut().map(|window| window.on_pointer(x, y)));
+        }
+        WM_MOUSELEAVE => {
+            with_app(|app| app.settings.as_mut().map(SettingsWindow::on_pointer_left));
+        }
+        WM_LBUTTONDOWN => {
+            with_app(|app| app.settings.as_ref().map(SettingsWindow::take_focus));
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = pointer_position(lparam);
+            with_app(|app| app.on_settings_click(x, y));
+        }
+        WM_CTLCOLOREDIT => {
+            let dc = HDC(wparam.0 as _);
+            if let Some(Some(brush)) = with_app(|app| app.settings.as_ref().map(|window| window.color_field(dc))) {
+                return brush;
+            }
+        }
+        WM_KEYDOWN if wparam.0 == VK_ESCAPE.0 as usize => unsafe {
+            let _ = DestroyWindow(hwnd);
+        },
+        WM_KEYDOWN => {
+            let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+            with_app(|app| app.on_settings_key(VIRTUAL_KEY(wparam.0 as u16), shift));
+            return LRESULT(0);
+        }
+        WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT && wparam.0 == hwnd.0 as usize => {
+            let on_control = with_app(|app| app.settings.as_ref().is_some_and(SettingsWindow::pointer_on_control));
+            if on_control == Some(true) {
+                unsafe { SetCursor(LoadCursorW(None, IDC_HAND).ok()) };
+                return LRESULT(1);
+            }
+        }
+        WM_DPICHANGED => {
+            let dpi = (wparam.0 & 0xFFFF) as u32;
+            let suggested = unsafe { *(lparam.0 as *const RECT) };
+            with_app(|app| app.settings.as_mut().map(|window| window.on_dpi_changed(dpi, &suggested)));
+        }
+        WM_DESTROY => settings_window::notify_closed(),
+        _ => {}
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
 fn pointer_position(lparam: LPARAM) -> (i32, i32) {
     (lparam.0 as i16 as i32, (lparam.0 >> 16) as i16 as i32)
 }
 
 fn open_tray_menu(hwnd: HWND) {
-    let state = MenuState {
-        demo_running: with_app(|app| app.demo_step.is_some()).unwrap_or(false),
-        autostart: autostart::is_on(),
-        notch: with_app(|app| app.placement.style == IslandStyle::Notch).unwrap_or(false),
-    };
-    let autostart_was_on = state.autostart;
-    match tray::show_menu(hwnd, &state) {
-        Some(Command::ToggleDemo) => {
-            with_app(App::toggle_demo);
+    match tray::show_menu(hwnd) {
+        Some(Command::OpenSettings) => {
+            with_app(App::open_settings);
         }
-        Some(Command::ToggleAutostart) => autostart::set(!autostart_was_on),
-        Some(Command::ToggleNotch) => {
-            with_app(App::toggle_notch);
-        }
-        Some(Command::Reload) => {
-            with_app(App::reload);
-        }
-        Some(Command::OpenSettings) => settings::open_in_editor(),
+        Some(Command::ReleaseNotes) => tray::open_release_notes(),
         Some(Command::Quit) => unsafe {
             let _ = DestroyWindow(hwnd);
         },

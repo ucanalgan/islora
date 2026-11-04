@@ -13,6 +13,9 @@ const BRIEF_MS: Millis = 1_200;
 const SCREENSHOT_MS: Millis = 6_000;
 /// Warns once on the way down past each of these percentages.
 const BATTERY_WARNINGS: [u8; 2] = [20, 10];
+/// Energy Saver, once called Battery Saver, dims the screen itself, in steps,
+/// which would otherwise talk over its own notice.
+const SAVER_DIMMING_MS: Millis = 3_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Indicator {
@@ -85,7 +88,7 @@ impl Indicator {
             },
             Indicator::Copied { what } => brief(Icon::Clipboard, "Kopyalandı", what, now),
             Indicator::BatterySaver { on } => {
-                notice(Icon::Battery, "Pil Tasarrufu", switch_text(on), now)
+                notice(Icon::Battery, "Enerji tasarrufu", switch_text(on), now)
             }
             Indicator::KeyboardLanguage { code } => brief(Icon::Keyboard, "Klavye", code, now),
             Indicator::BluetoothBattery { name, percent } => {
@@ -194,6 +197,8 @@ pub struct SystemTracker {
     monitors: Option<u32>,
     battery_saver: Option<bool>,
     language: Option<String>,
+    /// Until when a brightness change is Energy Saver's doing.
+    brightness_quiet_until: Millis,
 }
 
 impl SystemTracker {
@@ -201,9 +206,13 @@ impl SystemTracker {
         Self::default()
     }
 
-    pub fn battery_saver_changed(&mut self, on: bool) -> Option<Indicator> {
+    pub fn battery_saver_changed(&mut self, on: bool, now: Millis) -> Option<Indicator> {
         let previous = self.battery_saver.replace(on)?;
-        (previous != on).then_some(Indicator::BatterySaver { on })
+        if previous == on {
+            return None;
+        }
+        self.brightness_quiet_until = now + SAVER_DIMMING_MS;
+        Some(Indicator::BatterySaver { on })
     }
 
     pub fn keyboard_language_changed(&mut self, code: String) -> Option<Indicator> {
@@ -248,9 +257,9 @@ impl SystemTracker {
             .then_some(Indicator::LowBattery { percent })
     }
 
-    pub fn brightness_changed(&mut self, percent: u8) -> Option<Indicator> {
+    pub fn brightness_changed(&mut self, percent: u8, now: Millis) -> Option<Indicator> {
         let previous = self.brightness.replace(percent)?;
-        (previous != percent).then_some(Indicator::Brightness { percent })
+        (previous != percent && now >= self.brightness_quiet_until).then_some(Indicator::Brightness { percent })
     }
 
     /// Unlike the others, this source reports nothing at startup, so the very
@@ -436,9 +445,20 @@ mod tests {
     #[test]
     fn the_battery_saver_is_silent_at_first_then_reports_changes() {
         let mut tracker = SystemTracker::new();
-        assert_eq!(tracker.battery_saver_changed(false), None);
-        assert_eq!(tracker.battery_saver_changed(false), None);
-        assert_eq!(tracker.battery_saver_changed(true), Some(Indicator::BatterySaver { on: true }));
+        assert_eq!(tracker.battery_saver_changed(false, 0), None);
+        assert_eq!(tracker.battery_saver_changed(false, 0), None);
+        assert_eq!(tracker.battery_saver_changed(true, 0), Some(Indicator::BatterySaver { on: true }));
+    }
+
+    #[test]
+    fn battery_saver_dimming_the_screen_does_not_cover_its_notice() {
+        let mut tracker = SystemTracker::new();
+        tracker.brightness_changed(80, 0);
+        tracker.battery_saver_changed(false, 0);
+        assert!(tracker.battery_saver_changed(true, 10_000).is_some());
+        assert_eq!(tracker.brightness_changed(60, 10_200), None);
+        assert_eq!(tracker.brightness_changed(50, 12_900), None);
+        assert_eq!(tracker.brightness_changed(70, 13_000), Some(Indicator::Brightness { percent: 70 }));
     }
 
     #[test]
@@ -541,14 +561,14 @@ mod tests {
         let mut tracker = SystemTracker::new();
         assert_eq!(tracker.power_source_changed(true), None);
         assert_eq!(tracker.battery_changed(50), None);
-        assert_eq!(tracker.brightness_changed(70), None);
+        assert_eq!(tracker.brightness_changed(70, 0), None);
     }
 
     #[test]
     fn repeated_values_are_ignored() {
         let mut tracker = SystemTracker::new();
-        tracker.brightness_changed(70);
-        assert_eq!(tracker.brightness_changed(70), None);
+        tracker.brightness_changed(70, 0);
+        assert_eq!(tracker.brightness_changed(70, 0), None);
         tracker.volume_changed(40, false);
         assert_eq!(tracker.volume_changed(40, false), None);
     }

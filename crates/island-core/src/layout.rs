@@ -65,6 +65,31 @@ pub const MEDIA_BUTTON_SIZE: f32 = 42.0;
 /// Gap between the pill and the bubble beside it.
 pub const BUBBLE_GAP: f32 = 8.0;
 
+/// What the pill is made of.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Material {
+    #[default]
+    Black,
+    /// Shows a blurred view of what lies behind it.
+    Glass,
+}
+
+impl Material {
+    /// The name used for it in the settings file.
+    pub fn setting(self) -> &'static str {
+        match self {
+            Material::Black => "black",
+            Material::Glass => "glass",
+        }
+    }
+
+    /// Glass asks more of the system, so it gives way when the user wants the
+    /// battery to last or has turned transparency off for all of Windows.
+    pub fn in_effect(self, transparency: bool, battery_saver: bool) -> Material {
+        if transparency && !battery_saver { self } else { Material::Black }
+    }
+}
+
 /// The shortcut to the home view inside the expanded media view.
 pub const HOME_SHORTCUT_X: f32 = 362.0;
 pub const HOME_SHORTCUT_Y: f32 = 36.0;
@@ -73,6 +98,16 @@ pub const HOME_SHORTCUT_SIZE: f32 = 34.0;
 pub fn on_home_shortcut(x: f32, y: f32) -> bool {
     (x - HOME_SHORTCUT_X).abs() <= HOME_SHORTCUT_SIZE / 2.0
         && (y - HOME_SHORTCUT_Y).abs() <= HOME_SHORTCUT_SIZE / 2.0
+}
+
+/// The settings button in the home view, on the row of the mode tabs.
+pub const SETTINGS_SHORTCUT_X: f32 = HOME_SHORTCUT_X;
+pub const SETTINGS_SHORTCUT_Y: f32 = MODE_TAB_Y;
+pub const SETTINGS_SHORTCUT_SIZE: f32 = 28.0;
+
+pub fn on_settings_shortcut(x: f32, y: f32) -> bool {
+    (x - SETTINGS_SHORTCUT_X).abs() <= SETTINGS_SHORTCUT_SIZE / 2.0
+        && (y - SETTINGS_SHORTCUT_Y).abs() <= SETTINGS_SHORTCUT_SIZE / 2.0
 }
 
 /// What a preset in the home view starts.
@@ -383,6 +418,27 @@ mod tests {
         for button in TimerButton::ALL {
             assert!(!on_home_shortcut(button.center_x(), TIMER_RING_Y));
         }
+    }
+
+    #[test]
+    fn glass_gives_way_to_battery_saver_and_plain_windows() {
+        assert_eq!(Material::Glass.in_effect(true, false), Material::Glass);
+        assert_eq!(Material::Glass.in_effect(true, true), Material::Black);
+        assert_eq!(Material::Glass.in_effect(false, false), Material::Black);
+        assert_eq!(Material::Black.in_effect(true, false), Material::Black);
+    }
+
+    #[test]
+    fn the_settings_shortcut_stays_clear_of_the_tabs_and_presets() {
+        let half = SETTINGS_SHORTCUT_SIZE / 2.0;
+        assert!(SETTINGS_SHORTCUT_X + half <= Pill::EXPANDED.width);
+        assert!(SETTINGS_SHORTCUT_Y + half <= PRESET_Y - PRESET_HEIGHT / 2.0);
+        for mode in StartMode::ALL {
+            let (left, width) = mode.tab();
+            assert!(left + width < SETTINGS_SHORTCUT_X - half);
+        }
+        assert!(on_settings_shortcut(SETTINGS_SHORTCUT_X, SETTINGS_SHORTCUT_Y));
+        assert!(!on_settings_shortcut(100.0, SETTINGS_SHORTCUT_Y));
     }
 
     #[test]

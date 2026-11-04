@@ -15,7 +15,6 @@ New-Item -ItemType Directory -Force $Shots | Out-Null
 
 $saved = New-Object Win+POINT
 [void][Win]::GetCursorPos([ref]$saved)
-$foreground = [Win]::GetForegroundWindow()
 
 try {
     'Startup'
@@ -36,6 +35,7 @@ try {
     # The pill rightly stays open under the pointer, wherever the user left it.
     [void][Win]::SetCursorPos($centerX, 600)
     Start-Sleep -Milliseconds 150
+    $foreground = [Win]::GetForegroundWindow()
     [Win]::Press(0x5B, 0x12, 0x20)
     Start-Sleep -Milliseconds 700
     Check 'Win+Alt+Space shows the clock' (Visible)
@@ -53,8 +53,7 @@ try {
     Start-Sleep -Milliseconds 600
     Check 'resting on the top edge reveals the clock' (Visible)
     [void][Win]::SetCursorPos($centerX, 600)
-    Start-Sleep -Milliseconds 3400
-    Check 'hides after the pointer goes' (-not (Visible))
+    Check 'hides after the pointer goes' (Wait-Until { -not (Visible) } 6000)
 
     'Passing over the edge'
     [void][Win]::SetCursorPos($centerX, 0)
@@ -77,16 +76,17 @@ try {
     if (-not $takesClicks) { "        in the way: $([Win]::Describe($centerX, 25))" }
     Check 'outside the pill reaches the app below' ([Win]::Root($centerX, 120) -ne $hwnd)
 
-    Start-Sleep -Milliseconds 3500
+    # The demo moves every 3.5 s and opens the pill on its fourth step.
+    Start-Sleep -Milliseconds 10500
     Shot '3-expanded'
     Check 'expanded takes clicks in its full area' ([Win]::Root($centerX, 120) -eq $hwnd)
 
-    Start-Sleep -Milliseconds 3200
+    Start-Sleep -Milliseconds 3000
     Shot '4-alert'
     Start-Sleep -Milliseconds 3500
     Shot '5-notification'
     # The demo loops, so watch for its gap rather than sleeping towards it.
-    Check 'hides when the last activity ends' (Wait-Until { -not (Visible) } 5000)
+    Check 'hides when the last activity ends' (Wait-Until { -not (Visible) } 22000)
     Stop-Island
 
     'Staying out of the way'
@@ -204,8 +204,8 @@ try {
     Check 'a drag lands where it was released' (Near (Last-Seek) 450)
 
     [void][Win]::SetCursorPos($centerX, 600)
-    Start-Sleep -Milliseconds 1000
-    Check 'collapses after the pointer leaves' ([Win]::Root($centerX, 120) -ne $hwnd)
+    # The click area only shrinks once the pill has settled.
+    Check 'collapses after the pointer leaves' (Wait-Until { [Win]::Root($centerX, 120) -ne $hwnd } 2500)
     Check 'stays visible while playing' (Visible)
 
     Stop-Process -Id $player.Id -Force -ErrorAction SilentlyContinue

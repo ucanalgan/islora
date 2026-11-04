@@ -47,6 +47,23 @@ const LATER_NOTICES: &str = "
 # battery_saver, keyboard_language
 ";
 
+const WAVE_SETTINGS: &str = "
+# Küçük pill'deki ses dalgası: on veya off. Kapalıyken sistem daha az yorulur.
+# Enerji tasarrufu açıkken dalga her durumda durur.
+sound_wave = \"on\"
+";
+
+const MATERIAL_SETTINGS: &str = "
+# Tasarım: black düz siyah, glass arkasını bulanık gösteren camdır. Cam, enerji
+# tasarrufunda ve Windows şeffaflığı kapalıyken siyah görünür.
+material = \"black\"
+";
+
+/// Whether this is the very first start on this account.
+pub fn is_first_run() -> bool {
+    path().is_some_and(|path| !path.exists())
+}
+
 fn path() -> Option<PathBuf> {
     let roaming = PathBuf::from(std::env::var_os("APPDATA")?);
     let folder = roaming.join("Islora");
@@ -62,7 +79,8 @@ pub fn read() -> Option<String> {
     let path = path()?;
     if !path.exists() {
         std::fs::create_dir_all(path.parent()?).ok()?;
-        std::fs::write(&path, format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}")).ok()?;
+        let text = format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{WAVE_SETTINGS}{MATERIAL_SETTINGS}");
+        std::fs::write(&path, text).ok()?;
     }
     let mut text = std::fs::read_to_string(&path).ok()?;
     let mut added = false;
@@ -70,6 +88,8 @@ pub fn read() -> Option<String> {
         ("timer_presets", START_SETTINGS),
         ("notices_off", NOTICE_SETTINGS),
         ("keyboard_language", LATER_NOTICES),
+        ("sound_wave", WAVE_SETTINGS),
+        ("material", MATERIAL_SETTINGS),
     ];
     for (setting, section) in sections {
         if !text.contains(setting) {

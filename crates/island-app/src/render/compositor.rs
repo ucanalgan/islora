@@ -2,24 +2,38 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use island_core::layout::{BUBBLE_GAP, NOTCH_SHOULDER};
-use island_core::{Bubble, Frame, IslandStyle, Millis, Pill, Presentation};
+use island_core::{Bubble, Frame, IslandStyle, Material, Millis, Pill, Presentation};
 use windows::Foundation::TimeSpan;
+use windows::Graphics::{IGeometrySource2D, IGeometrySource2D_Impl};
 use windows::System::DispatcherQueueController;
 use windows::UI::Color;
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
-    AnimationIterationBehavior, CompositionDrawingSurface, CompositionRoundedRectangleGeometry,
-    CompositionStretch, CompositionSurfaceBrush, Compositor, ContainerVisual, ICompositionSurface,
-    SpriteVisual,
+    AnimationIterationBehavior, CompositionBrush, CompositionClip,
+    CompositionColorBrush, CompositionDrawingSurface, CompositionGeometricClip,
+    CompositionLinearGradientBrush, CompositionPath, CompositionRoundedRectangleGeometry,
+    CompositionSpriteShape, CompositionStretch, CompositionSurfaceBrush, Compositor,
+    ContainerVisual, ICompositionSurface, SpriteVisual,
 };
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{E_NOTIMPL, HWND};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_COMBINE_MODE_EXCLUDE, D2D1_DEFAULT_FLATTENING_TOLERANCE, D2D1_ELLIPSE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Factory, ID2D1Factory1,
+    ID2D1Geometry,
+};
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
+use windows::Win32::System::WinRT::Graphics::Direct2D::{
+    IGeometrySource2DInterop, IGeometrySource2DInterop_Impl,
+};
 use windows::Win32::System::WinRT::{
     CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
 };
-use windows::core::{Interface, Result, h};
+use windows::core::{Interface, Ref, Result, h, implement};
 use windows_numerics::{Vector2, Vector3};
 
+use super::glass;
 use super::scene::{ClockText, CompactFit, Scene, WAVE_RESERVED, bubble_painting};
 use super::spring::{
     CALM, LIVELY, SOFT, Spring, fade, spring_scalar, spring_vector2, spring_vector3, trailing,
@@ -54,6 +68,32 @@ const WAVE_LOW: f32 = 0.38;
 /// Where a notch's curve starts to turn solid, which softens its edge.
 const SHOULDER_EDGE: f32 = 0.92;
 
+/// Laid over the glass, whose brightness is already held: a light sheen at the
+/// top, as light falling from above would leave, and a little more depth
+/// towards the bottom, where the controls are.
+const GLASS_SHEEN: Color = Color { A: 34, R: 255, G: 255, B: 255 };
+const GLASS_MIDDLE: Color = Color { A: 26, R: 0, G: 0, B: 0 };
+const GLASS_BOTTOM: Color = Color { A: 86, R: 0, G: 0, B: 0 };
+/// Where the sheen has faded into the darker glass.
+const SHEEN_END: f32 = 0.42;
+/// The top of a notch is off the screen, so its visible part starts lower in
+/// the sheen. Its curves take this shade, to run on into it.
+const NOTCH_TOP_SHADE: Color = Color { A: 18, R: 255, G: 255, B: 255 };
+/// Light caught by the edge of the glass: strongest at the upper corner, a
+/// faint answer at the opposite one.
+const RIM: [(f32, Color); 3] = [
+    (0.0, Color { A: 160, R: 255, G: 255, B: 255 }),
+    (0.5, Color { A: 34, R: 255, G: 255, B: 255 }),
+    (1.0, Color { A: 80, R: 255, G: 255, B: 255 }),
+];
+/// A notch has no upper edge of its own, so its rim starts unlit where it
+/// meets the curves and only shows along the lower sides.
+const RIM_NOTCH: [(f32, Color); 2] = [
+    (0.0, Color { A: 0, R: 255, G: 255, B: 255 }),
+    (1.0, Color { A: 70, R: 255, G: 255, B: 255 }),
+];
+const RIM_WIDTH: f32 = 1.2;
+
 /// The compositor needs a dispatcher queue on the thread that creates it.
 pub fn create_dispatcher_queue() -> Result<DispatcherQueueController> {
     let options = DispatcherQueueOptions {
@@ -79,6 +119,77 @@ fn shoulder(compositor: &Compositor, center_x: f32) -> Result<SpriteVisual> {
     let visual = compositor.CreateSpriteVisual()?;
     visual.SetBrush(&brush)?;
     visual.SetOpacity(0.0)?;
+    Ok(visual)
+}
+
+/// Colours from top to bottom, each at its offset from 0 to 1.
+fn vertical_gradient(compositor: &Compositor, stops: &[(f32, Color)]) -> Result<CompositionLinearGradientBrush> {
+    let brush = compositor.CreateLinearGradientBrush()?;
+    brush.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 })?;
+    brush.SetEndPoint(Vector2 { X: 0.0, Y: 1.0 })?;
+    let list = brush.ColorStops()?;
+    for &(offset, color) in stops {
+        list.Append(&compositor.CreateColorGradientStopWithOffsetAndColor(offset, color)?)?;
+    }
+    Ok(brush)
+}
+
+/// Colours from the upper left corner to the lower right one.
+fn diagonal_gradient(compositor: &Compositor, stops: &[(f32, Color)]) -> Result<CompositionLinearGradientBrush> {
+    let brush = vertical_gradient(compositor, stops)?;
+    brush.SetEndPoint(Vector2 { X: 1.0, Y: 1.0 })?;
+    Ok(brush)
+}
+
+/// Hands a Direct2D shape to the compositor, which accepts shapes only this way.
+#[implement(IGeometrySource2D, IGeometrySource2DInterop)]
+struct Outline(ID2D1Geometry);
+
+impl IGeometrySource2D_Impl for Outline_Impl {}
+
+impl IGeometrySource2DInterop_Impl for Outline_Impl {
+    fn GetGeometry(&self) -> Result<ID2D1Geometry> {
+        Ok(self.0.clone())
+    }
+
+    fn TryGetGeometryUsingFactory(&self, _factory: Ref<'_, ID2D1Factory>) -> Result<ID2D1Geometry> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+/// The curve of a notch as a real shape, for glass to be cut to: its square,
+/// less the quarter circle at the lower corner on the side `center_x` names.
+fn shoulder_clip(compositor: &Compositor, size: f32, center_x: f32) -> Result<CompositionGeometricClip> {
+    unsafe {
+        let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+        let square = factory.CreateRectangleGeometry(&D2D_RECT_F { left: 0.0, top: 0.0, right: size, bottom: size })?;
+        let circle = factory.CreateEllipseGeometry(&D2D1_ELLIPSE {
+            point: Vector2 { X: center_x * size, Y: size },
+            radiusX: size,
+            radiusY: size,
+        })?;
+        let path = factory.CreatePathGeometry()?;
+        let sink = path.Open()?;
+        square.CombineWithGeometry(&circle, D2D1_COMBINE_MODE_EXCLUDE, None, D2D1_DEFAULT_FLATTENING_TOLERANCE, &sink)?;
+        sink.Close()?;
+        let source: IGeometrySource2D = Outline(path.cast()?).into();
+        let geometry = compositor.CreatePathGeometryWithPath(&CompositionPath::Create(&source)?)?;
+        compositor.CreateGeometricClipWithGeometry(&geometry)
+    }
+}
+
+/// The blurred view of what is behind the window, cut to the shape it backs.
+/// Shape visuals cannot be filled with this brush, so it has to be a sprite.
+fn frost(
+    compositor: &Compositor,
+    brush: &CompositionBrush,
+    shape: &CompositionRoundedRectangleGeometry,
+) -> Result<SpriteVisual> {
+    let visual = compositor.CreateSpriteVisual()?;
+    visual.SetBrush(brush)?;
+    visual.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
+    visual.SetClip(&compositor.CreateGeometricClipWithGeometry(shape)?)?;
+    visual.SetIsVisible(false)?;
     Ok(visual)
 }
 
@@ -217,12 +328,30 @@ struct BubbleShape {
     spot: Option<(f32, f32)>,
 }
 
+/// What it takes to switch the pill, the bubble and a notch's curves between
+/// materials.
+struct Surfaces {
+    shapes: [CompositionSpriteShape; 2],
+    frost: [SpriteVisual; 2],
+    glass: CompositionBrush,
+    black: CompositionColorBrush,
+    tint: CompositionLinearGradientBrush,
+    rim: CompositionLinearGradientBrush,
+    rim_notch: CompositionLinearGradientBrush,
+    /// The painted black of each curve, and the tint laid over its glass.
+    shoulder_black: [CompositionBrush; 2],
+    shoulder_tint: [SpriteVisual; 2],
+}
+
 pub struct Renderer {
     compositor: Compositor,
     _target: DesktopWindowTarget,
+    hwnd: HWND,
     /// Holds everything, so the island can come and go as one.
     root: ContainerVisual,
     geometry: CompositionRoundedRectangleGeometry,
+    surfaces: Surfaces,
+    material: Material,
     /// Left and right curve of a notch.
     shoulders: [SpriteVisual; 2],
     /// Carries everything drawn on the pill, so it can slide with it.
@@ -271,10 +400,41 @@ impl Renderer {
         sprite.SetFillBrush(&black)?;
         shape.Shapes()?.Append(&sprite)?;
 
-        let shoulders = [shoulder(&compositor, 0.0)?, shoulder(&compositor, 1.0)?];
-        for visual in &shoulders {
-            root.Children()?.InsertAtTop(visual)?;
+        let backdrop = compositor.CreateHostBackdropBrush()?;
+        // A plain blur is still glass, if Windows turns the effects down.
+        let glass = glass::brush(&compositor, &backdrop).or_else(|error| {
+            eprintln!("glass effects failed: {error}");
+            backdrop.cast()
+        })?;
+        let frosted = [frost(&compositor, &glass, &geometry)?, frost(&compositor, &glass, &bubble_geometry)?];
+        for visual in &frosted {
+            root.Children()?.InsertAtBottom(visual)?;
         }
+
+        let shoulders = [shoulder(&compositor, 0.0)?, shoulder(&compositor, 1.0)?];
+        let sheen = compositor.CreateColorBrushWithColor(NOTCH_TOP_SHADE)?;
+        let mut shoulder_tint = Vec::with_capacity(2);
+        for visual in &shoulders {
+            let tint = compositor.CreateSpriteVisual()?;
+            tint.SetBrush(&sheen)?;
+            tint.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
+            tint.SetIsVisible(false)?;
+            visual.Children()?.InsertAtTop(&tint)?;
+            root.Children()?.InsertAtTop(visual)?;
+            shoulder_tint.push(tint);
+        }
+        let [left_tint, right_tint]: [SpriteVisual; 2] = shoulder_tint.try_into().map_err(|_| windows::core::Error::empty())?;
+        let surfaces = Surfaces {
+            shapes: [sprite, bubble_sprite],
+            frost: frosted,
+            tint: vertical_gradient(&compositor, &[(0.0, GLASS_SHEEN), (SHEEN_END, GLASS_MIDDLE), (1.0, GLASS_BOTTOM)])?,
+            rim: diagonal_gradient(&compositor, &RIM)?,
+            rim_notch: vertical_gradient(&compositor, &RIM_NOTCH)?,
+            shoulder_black: [shoulders[0].Brush()?, shoulders[1].Brush()?],
+            shoulder_tint: [left_tint, right_tint],
+            glass,
+            black,
+        };
 
         let bubble_content = compositor.CreateContainerVisual()?;
         bubble_content.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
@@ -312,8 +472,11 @@ impl Renderer {
         let mut renderer = Self {
             compositor,
             _target: target,
+            hwnd,
             root,
             geometry,
+            surfaces,
+            material: Material::Black,
             shoulders,
             moving,
             bubble,
@@ -338,12 +501,88 @@ impl Renderer {
         self.scale = scale;
         self.window_width = window_width;
         self.scene = None;
+        self.dress_surfaces()?;
         self.snap_to_hidden()
+    }
+
+    /// Windows only blurs behind a window that asks, and it costs the compositor
+    /// work for as long as it does, so black leaves the request off.
+    pub fn set_material(&mut self, material: Material) -> Result<()> {
+        if material == self.material {
+            return Ok(());
+        }
+        self.material = material;
+        let glass = i32::from(material == Material::Glass);
+        unsafe {
+            DwmSetWindowAttribute(
+                self.hwnd,
+                DWMWA_USE_HOSTBACKDROPBRUSH,
+                (&raw const glass).cast(),
+                size_of::<i32>() as u32,
+            )?;
+        }
+        self.dress_surfaces()
+    }
+
+    fn dress_surfaces(&self) -> Result<()> {
+        let glass = self.material == Material::Glass;
+        let surfaces = &self.surfaces;
+        for visual in &surfaces.frost {
+            visual.SetIsVisible(glass)?;
+        }
+        let rim = match self.style {
+            IslandStyle::Island => &surfaces.rim,
+            IslandStyle::Notch => &surfaces.rim_notch,
+        };
+        for shape in &surfaces.shapes {
+            if glass {
+                shape.SetFillBrush(&surfaces.tint)?;
+            } else {
+                shape.SetFillBrush(&surfaces.black)?;
+            }
+            shape.SetStrokeBrush(rim)?;
+            shape.SetStrokeThickness(if glass { RIM_WIDTH * self.scale } else { 0.0 })?;
+        }
+        // Black curves are a painted gradient. Glass ones are the blur itself, cut
+        // to the curve, so that they match the pill they lead into.
+        let size = NOTCH_SHOULDER * self.scale;
+        for (index, (visual, center_x)) in self.shoulders.iter().zip([0.0, 1.0]).enumerate() {
+            surfaces.shoulder_tint[index].SetIsVisible(glass)?;
+            if glass {
+                visual.SetBrush(&surfaces.glass)?;
+                visual.SetClip(&shoulder_clip(&self.compositor, size, center_x)?)?;
+            } else {
+                visual.SetBrush(&surfaces.shoulder_black[index])?;
+                visual.SetClip(None::<&CompositionClip>)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn shows_shoulders(&self) -> bool {
+        self.style == IslandStyle::Notch
+    }
+
+    pub fn painter(&self) -> &Painter {
+        &self.painter
+    }
+
+    pub fn set_wave_motion(&mut self, motion: WaveMotion) -> Result<()> {
+        self.wave_motion = motion;
+        match self.scene.take() {
+            Some(scene) => {
+                let updated = self.update_wave(&scene);
+                self.scene = Some(scene);
+                updated
+            }
+            None => Ok(()),
+        }
     }
 
     pub fn set_style(&mut self, style: IslandStyle) -> Result<()> {
         self.style = style;
         self.scene = None;
+        self.dress_surfaces()?;
         self.snap_to_hidden()
     }
 
@@ -404,7 +643,7 @@ impl Renderer {
             visual.SetOpacity(0.0)?;
             visual.SetSize(Vector2 { X: size, Y: size })?;
             visual.SetOffset(Vector3 { X: x, Y: 0.0, Z: 0.0 })?;
-            visual.SetIsVisible(self.style == IslandStyle::Notch)?;
+            visual.SetIsVisible(self.shows_shoulders())?;
         }
         Ok(())
     }

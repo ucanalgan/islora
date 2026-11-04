@@ -106,6 +106,15 @@ pub struct BarRun {
     pub opacity: f32,
 }
 
+/// A coloured shape, drawn below everything else. Colours are red, green, blue
+/// and opacity, each from 0 to 1.
+pub struct ShapeRun {
+    pub bounds: Bounds,
+    pub radius: f32,
+    pub fill: [f32; 4],
+    pub border: Option<([f32; 4], f32)>,
+}
+
 /// A circle filled clockwise from the top to `fraction`, from 0 to 1.
 pub struct RingRun {
     pub center_x: f32,
@@ -127,6 +136,7 @@ pub struct ImageRun<'a> {
 
 #[derive(Default)]
 pub struct Painting<'a> {
+    pub shapes: Vec<ShapeRun>,
     pub texts: Vec<TextRun<'a>>,
     pub bars: Vec<BarRun>,
     pub rings: Vec<RingRun>,
@@ -208,6 +218,12 @@ impl Painter {
         }
     }
 
+    /// Paints on a target of its own, such as a window, for which the caller
+    /// starts and ends the drawing.
+    pub fn draw_on(&self, dc: &ID2D1DeviceContext, painting: &Painting) -> Result<()> {
+        unsafe { self.draw_all(dc, painting) }
+    }
+
     pub fn forget_images(&self) {
         self.decoded.borrow_mut().take();
     }
@@ -237,6 +253,20 @@ impl Painter {
     }
 
     unsafe fn draw_all(&self, dc: &ID2D1DeviceContext, painting: &Painting) -> Result<()> {
+        for shape in &painting.shapes {
+            let color = |[r, g, b, a]: [f32; 4]| D2D1_COLOR_F { r, g, b, a };
+            let rounded = D2D1_ROUNDED_RECT {
+                rect: shape.bounds.rect(),
+                radiusX: shape.radius,
+                radiusY: shape.radius,
+            };
+            unsafe {
+                dc.FillRoundedRectangle(&rounded, &dc.CreateSolidColorBrush(&color(shape.fill), None)?);
+                if let Some((border, width)) = shape.border {
+                    dc.DrawRoundedRectangle(&rounded, &dc.CreateSolidColorBrush(&color(border), None)?, width, None);
+                }
+            }
+        }
         for bar in &painting.bars {
             let color = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: bar.opacity };
             let radius = bar.bounds.height / 2.0;

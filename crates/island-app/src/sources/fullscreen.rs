@@ -4,7 +4,11 @@
 use std::mem::size_of;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
+use island_core::fullscreen::is_desktop_class;
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
 use windows::Win32::System::Power::{
     HPOWERNOTIFY, POWERBROADCAST_SETTING, RegisterPowerSettingNotification,
     UnregisterPowerSettingNotification,
@@ -20,28 +24,31 @@ use windows::Win32::UI::Shell::{
     SHQueryUserNotificationState,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
+    DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND,
+    EVENT_SYSTEM_MOVESIZESTART, GetClassNameW, GetForegroundWindow, GetWindowRect,
     PBT_POWERSETTINGCHANGE, PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
 };
 use windows::core::Result;
 
 pub const MSG_APPBAR: u32 = WM_APP + 2;
 pub const MSG_WINDOW_DRAG: u32 = WM_APP + 3;
+pub const MSG_FRONT_CHANGED: u32 = WM_APP + 16;
 
 const WTS_SESSION_LOCK: usize = 7;
 const WTS_SESSION_UNLOCK: usize = 8;
 
-static DRAG_LISTENER: AtomicIsize = AtomicIsize::new(0);
+static LISTENER: AtomicIsize = AtomicIsize::new(0);
 
 pub struct Presence {
     hwnd: HWND,
     drag_hook: HWINEVENTHOOK,
+    front_hook: Option<HWINEVENTHOOK>,
     display: HPOWERNOTIFY,
 }
 
 impl Presence {
     pub fn start(hwnd: HWND) -> Result<Self> {
-        DRAG_LISTENER.store(hwnd.0 as isize, Ordering::Relaxed);
+        LISTENER.store(hwnd.0 as isize, Ordering::Relaxed);
         unsafe {
             // Registered only for its full-screen notification. Without
             // ABM_SETPOS an app bar reserves no screen space.
@@ -65,13 +72,37 @@ impl Presence {
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             )?;
             WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION)?;
-            Ok(Self { hwnd, drag_hook, display })
+            Ok(Self { hwnd, drag_hook, front_hook: None, display })
+        }
+    }
+
+    /// Reports each new window in front. Only needed while Windows calls something
+    /// full screen, so everyday switching between windows never wakes the app.
+    pub fn follow_front(&mut self, on: bool) {
+        match (on, self.front_hook) {
+            (true, None) => unsafe {
+                self.front_hook = Some(SetWinEventHook(
+                    EVENT_SYSTEM_FOREGROUND,
+                    EVENT_SYSTEM_FOREGROUND,
+                    None,
+                    Some(on_front_changed),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                ));
+            },
+            (false, Some(hook)) => unsafe {
+                let _ = UnhookWinEvent(hook);
+                self.front_hook = None;
+            },
+            _ => {}
         }
     }
 }
 
 impl Drop for Presence {
     fn drop(&mut self) {
+        self.follow_front(false);
         unsafe {
             let mut bar = appbar(self.hwnd);
             SHAppBarMessage(ABM_REMOVE, &mut bar);
@@ -100,18 +131,57 @@ unsafe extern "system" fn on_move_size(
     _thread: u32,
     _time: u32,
 ) {
-    let listener = HWND(DRAG_LISTENER.load(Ordering::Relaxed) as _);
+    let listener = HWND(LISTENER.load(Ordering::Relaxed) as _);
     let started = (event == EVENT_SYSTEM_MOVESIZESTART) as usize;
     unsafe {
         let _ = PostMessageW(Some(listener), MSG_WINDOW_DRAG, WPARAM(started), LPARAM(0));
     }
 }
 
-/// Whether something is already full screen, for the state at startup.
+unsafe extern "system" fn on_front_changed(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _object: i32,
+    _child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    let listener = HWND(LISTENER.load(Ordering::Relaxed) as _);
+    unsafe {
+        let _ = PostMessageW(Some(listener), MSG_FRONT_CHANGED, WPARAM(0), LPARAM(0));
+    }
+}
+
+/// Whether Windows calls something full screen, for the state at startup.
 pub fn fullscreen_now() -> bool {
     let state: QUERY_USER_NOTIFICATION_STATE =
         unsafe { SHQueryUserNotificationState() }.unwrap_or_default();
     matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE)
+}
+
+/// Whether the window in front covers its whole screen and is not the desktop.
+/// The taskbar and Start also come to the front while Windows calls the desktop
+/// full screen, which the size rules out without naming each of them.
+pub fn front_fills_screen() -> bool {
+    unsafe {
+        let front = GetForegroundWindow();
+        let mut class = [0u16; 32];
+        let length = GetClassNameW(front, &mut class).max(0) as usize;
+        if is_desktop_class(&String::from_utf16_lossy(&class[..length])) {
+            return false;
+        }
+        let mut window = RECT::default();
+        let mut monitor = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let measured = GetWindowRect(front, &mut window).is_ok()
+            && GetMonitorInfoW(MonitorFromWindow(front, MONITOR_DEFAULTTONEAREST), &mut monitor).as_bool();
+        let screen = monitor.rcMonitor;
+        measured
+            && window.left <= screen.left
+            && window.top <= screen.top
+            && window.right >= screen.right
+            && window.bottom >= screen.bottom
+    }
 }
 
 /// Decodes `WM_POWERBROADCAST`. Returns whether the display is now on.

@@ -7,7 +7,8 @@ use island_core::layout::{
     COMPACT_MAX_WIDTH, COMPACT_MIN_WIDTH, EVENT_HIDE_HEIGHT, EVENT_HIDE_WIDTH, HOME_SHORTCUT_SIZE,
     HOME_SHORTCUT_X, HOME_SHORTCUT_Y, MEDIA_BUTTON_Y, MODE_TAB_HEIGHT,
     MODE_TAB_Y, MediaButton, PRESET_HEIGHT, PRESET_WIDTH, PRESET_Y, PROGRESS_HEIGHT,
-    PROGRESS_WIDTH, PROGRESS_X, PROGRESS_Y, StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS,
+    PROGRESS_WIDTH, PROGRESS_X, PROGRESS_Y, SETTINGS_SHORTCUT_SIZE, SETTINGS_SHORTCUT_X,
+    SETTINGS_SHORTCUT_Y, StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS,
     TIMER_RING_RADIUS, TIMER_RING_WIDTH, TIMER_RING_X, TIMER_RING_Y, TimerButton, preset_center_x,
 };
 use island_core::media::{RepeatMode, format_time};
@@ -24,6 +25,7 @@ const ICON_PREVIOUS: &str = "\u{E892}";
 const ICON_NEXT: &str = "\u{E893}";
 const ICON_CANCEL: &str = "\u{E711}";
 const ICON_STOPWATCH: &str = "\u{E916}";
+const ICON_SETTINGS: &str = "\u{E713}";
 const ICON_SHUFFLE: &str = "\u{E8B1}";
 const ICON_REPEAT_ALL: &str = "\u{E8EE}";
 const ICON_REPEAT_ONE: &str = "\u{E8ED}";
@@ -486,7 +488,7 @@ impl Scene {
             [] => {
                 let (title, detail) = match home.calendar {
                     CalendarState::Ready => ("Yaklaşan etkinlik yok", ""),
-                    CalendarState::NotSet => ("Takvim bağlı değil", "Tepsi menüsünden Ayarları aç"),
+                    CalendarState::NotSet => ("Takvim bağlı değil", "Ayarlar'dan takvim adresini ekle"),
                     CalendarState::Unreachable => ("Takvime ulaşılamadı", "Bağlantı gelince yeniden denenecek"),
                 };
                 painting.texts.push(canvas.text(title, canvas.bounds(MARGIN, 30.0, inner, 24.0), 14.0, false, 0.8, Align::Leading));
@@ -530,6 +532,9 @@ impl Scene {
             painting.bars.push(BarRun { bounds, opacity: 0.14 });
             painting.owned_labels.push((format!("{minutes} dk"), bounds));
         }
+        let half = SETTINGS_SHORTCUT_SIZE / 2.0;
+        let gear = canvas.bounds(SETTINGS_SHORTCUT_X - half, SETTINGS_SHORTCUT_Y - half, SETTINGS_SHORTCUT_SIZE, SETTINGS_SHORTCUT_SIZE);
+        painting.texts.push(canvas.icon(ICON_SETTINGS, gear, 15.0));
         painting
     }
 

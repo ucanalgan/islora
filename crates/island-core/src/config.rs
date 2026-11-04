@@ -1,6 +1,6 @@
 //! The settings file: one `key = "value"` per line, `#` for comments.
 
-use crate::layout::{IslandStyle, StartMode, TIMER_PRESETS};
+use crate::layout::{IslandStyle, Material, StartMode, TIMER_PRESETS};
 
 const LONGEST_PRESET_MINUTES: u64 = 720;
 
@@ -56,10 +56,23 @@ pub fn read_notices_off(text: &str) -> Vec<String> {
     })
 }
 
+/// Only an explicit `off` stills the wave, which runs by default.
+pub fn read_sound_wave(text: &str) -> bool {
+    read_value(text, "sound_wave").as_deref() != Some("off")
+}
+
 pub fn read_start_mode(text: &str) -> Option<StartMode> {
     match read_value(text, "start_mode")?.as_str() {
         "focus" => Some(StartMode::Focus),
         "timer" => Some(StartMode::Timer),
+        _ => None,
+    }
+}
+
+pub fn read_material(text: &str) -> Option<Material> {
+    match read_value(text, "material")?.as_str() {
+        "black" => Some(Material::Black),
+        "glass" => Some(Material::Glass),
         _ => None,
     }
 }
@@ -81,6 +94,20 @@ mod tests {
         assert_eq!(read_notices_off("notices_off = \"wifi, usb,\""), vec!["wifi", "usb"]);
         assert_eq!(read_notices_off("notices_off = \"\""), Vec::<String>::new());
         assert_eq!(read_notices_off(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_sound_wave_stays_on_unless_turned_off() {
+        assert!(read_sound_wave(""));
+        assert!(read_sound_wave("sound_wave = \"on\""));
+        assert!(!read_sound_wave("sound_wave = \"off\""));
+    }
+
+    #[test]
+    fn the_material_is_read_by_its_name() {
+        assert_eq!(read_material("material = \"glass\""), Some(Material::Glass));
+        assert_eq!(read_material("material = \"black\""), Some(Material::Black));
+        assert_eq!(read_material("material = \"tahta\""), None);
     }
 
     #[test]

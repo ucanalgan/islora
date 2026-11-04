@@ -14,7 +14,7 @@ Apple's Dynamic Island, brought to Windows 11. Islora shows what your PC is doin
 </table>
 
 > [!NOTE]
-> v0.1 is an early release. The interface is in Turkish only, and Islora has only been run on a Windows 11 Insider build so far. Its design is moving closer to Apple's, so the timer and calendar screens will change.
+> Islora is at an early stage. The interface is in Turkish only, and Islora has only been run on a Windows 11 Insider build so far. Its design is moving closer to Apple's, so the timer and calendar screens will change.
 
 ## Download
 
@@ -27,7 +27,7 @@ The file is not signed, so SmartScreen may warn you the first time. Choose **Mor
 - **Music:** cover, title, artist, progress and playback buttons for any player that reports to Windows, such as Spotify or a browser. You can seek, shuffle and repeat when the player allows it.
 - **Timers:** Islora's own countdown, Windows Focus sessions in both directions, and running timers from the Clock app. Clock timers are read-only, as Windows offers no public way to create them.
 - **Calendar:** events from a private iCal address, as a bubble 30 minutes before they start, in the pill 5 minutes before, and as an alert when they begin.
-- **System changes:** volume, brightness, Caps Lock, Num Lock, charger, low battery, Battery Saver, Bluetooth, sound output, microphone, camera, internet, Wi-Fi, VPN, airplane mode, USB drives, displays, screenshots, copied items, track changes and keyboard language.
+- **System changes:** volume, brightness, Caps Lock, Num Lock, charger, low battery, Energy Saver, Bluetooth, sound output, microphone, camera, internet, Wi-Fi, VPN, airplane mode, USB drives, displays, screenshots, copied items, track changes and keyboard language.
 
 Two things can run at once: the main one sits in the pill and the second in a bubble beside it, as on an iPhone.
 
@@ -41,21 +41,21 @@ The island hides during fullscreen apps and leaves itself out of screenshots, sc
 | Expand or collapse it | Click the pill. Moving the pointer away also collapses it. |
 | Switch to the second thing | Click the bubble. |
 | Start a timer or see your next events | Open the home view with the timer icon or by pressing the shortcut twice. |
-| Change settings | Right-click the tray icon. |
-
-The tray menu has the demo, the settings file, start with Windows and the notch style.
+| Change settings | Open Islora again from the Start menu or its exe, or use the gear in the home view or the tray menu. The window works with the keyboard too: Tab and the arrows move, Enter or Space press, Esc closes. |
 
 ## Settings
 
-Settings live in `%APPDATA%\Islora\config.toml`, which is created on first run. After editing the file, choose **Takvimi ve ayarları yenile** in the tray menu.
+The settings window opens by itself on first run, and changes apply at once. Everything in it is stored in `%APPDATA%\Islora\config.toml`, which you can also edit by hand. After editing the file, choose **Takvimi ve ayarları yenile** on the window's Genel page.
 
 | Setting | Meaning | Default |
 |---|---|---|
 | `calendar_ics_url` | Private iCal address of your calendar. Treat it like a password. | empty |
 | `timer_presets` | The four durations in the home view, in minutes. | `5, 15, 25, 45` |
 | `start_mode` | What those buttons start: `focus` for a Windows Focus session, `timer` for Islora's own countdown. | `focus` |
+| `material` | `black`, or `glass` for a frosted view of what is behind the pill. Glass turns black in Energy Saver and with Windows transparency off. | `black` |
 | `island_style` | `island` floats below the top edge, `notch` is attached to it. | `island` |
 | `notices_off` | Notices to hide, separated by commas. The file lists the names. | empty |
+| `sound_wave` | `off` stills the wave in the small pill, which is lighter on the system. Energy Saver stills it too. | `on` |
 
 ## Privacy
 
@@ -63,9 +63,9 @@ Islora has no account and no telemetry. Its only network request downloads the c
 
 ## System load
 
-Islora is written in Rust with no runtime or web view. Nothing polls: every source waits for a Windows event, and shape animations run in the Windows compositor, so the app itself does no work per frame. With nothing to show, v0.1 used 0 ms of CPU over 15 seconds and 7.4 MB of private memory. The exe is 3.2 MB.
+Islora is written in Rust with no runtime or web view. Nothing polls: every source waits for a Windows event, and shape animations run in the Windows compositor, so the app itself does no work per frame. With nothing to show, v0.0.1 used 0 ms of CPU over 15 seconds and 7.4 MB of private memory. The exe is 3.2 MB.
 
-The exception is the sound wave in the small pill while music plays. It loops, so the compositor (`dwm.exe`) redraws it on every frame, which costs about half a CPU core at 144 Hz. Start Islora with `--wave still` to stop it.
+The exception is the sound wave in the small pill while music plays. It loops, so the compositor (`dwm.exe`) redraws it on every frame, which costs about half a CPU core at 144 Hz. Turn off **Ses dalgası** in the settings to stop it. It also stops by itself while Windows Energy Saver is on.
 
 ## Known limits
 
