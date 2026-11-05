@@ -206,6 +206,10 @@ struct App {
     clipboard_quiet_until: Millis,
     /// Until when a picture on the clipboard counts as a screen clip.
     clip_expected_until: Millis,
+    /// Tests and screenshots ignore what really happens on the computer, such
+    /// as a phone connecting over Bluetooth, which would cover what they show
+    /// and could put a device's name in a picture.
+    quiet: bool,
     /// One preset step in milliseconds. Tests shorten it from minutes to seconds.
     preset_unit: Millis,
     tracker: SystemTracker,
@@ -353,6 +357,7 @@ pub fn run() -> Result<()> {
         network_quiet_until: 0,
         clipboard_quiet_until: 0,
         clip_expected_until: 0,
+        quiet: std::env::args().any(|a| a == "--no-real-notices"),
         preset_unit: if std::env::args().any(|a| a == "--short-timers") { 1_000 } else { 60_000 },
         tracker,
         indicators,
@@ -969,17 +974,26 @@ impl App {
 
     fn on_camera(&mut self) {
         let Some(app) = self.camera_watch.latest() else { return };
+        if self.quiet {
+            return;
+        }
         self.island.set_camera(app.filter(|_| !self.is_turned_off("camera")));
         self.refresh();
     }
 
     fn check_language(&mut self) {
+        if self.quiet {
+            return;
+        }
         if let Some(indicator) = keys::language().and_then(|code| self.tracker.keyboard_language_changed(code)) {
             self.show_indicator(indicator);
         }
     }
 
     fn on_clipboard(&mut self) {
+        if self.quiet {
+            return;
+        }
         let now = self.now();
         if now < self.clipboard_quiet_until {
             return;
@@ -996,6 +1010,9 @@ impl App {
     }
 
     fn on_device_change(&mut self, wparam: WPARAM, lparam: LPARAM) {
+        if self.quiet {
+            return;
+        }
         for indicator in self.drives.changed(wparam, lparam) {
             self.show_indicator(indicator);
         }
@@ -1541,6 +1558,10 @@ impl App {
     }
 
     fn on_indicators(&mut self) {
+        if self.quiet {
+            while self.indicators.try_recv().is_ok() {}
+            return;
+        }
         while let Ok(indicator) = self.indicators.try_recv() {
             let shown = match indicator {
                 Indicator::Volume { percent, muted } => self.tracker.volume_changed(percent, muted),
@@ -1555,6 +1576,9 @@ impl App {
     }
 
     fn on_power(&mut self, event: PowerEvent) {
+        if self.quiet {
+            return;
+        }
         let now = self.now();
         let indicator = match event {
             PowerEvent::Source { on_battery } => self.tracker.power_source_changed(on_battery),
@@ -1590,6 +1614,9 @@ impl App {
     }
 
     fn on_audio_device_changed(&mut self, device: usize) {
+        if self.quiet {
+            return;
+        }
         let Some(audio) = &mut self.audio else { return };
         if device == DEVICE_MICROPHONE {
             audio.follow_default_microphone();
@@ -1788,6 +1815,11 @@ impl App {
                 self.island.click(now);
             }
             15 => self.show_indicator(Indicator::ScreenClip),
+            17 => {
+                // Music playing in the small pill, with its wave, and nothing else.
+                self.demo_step = Some(0);
+                self.island.upsert_media(demo_track("Kısa Şarkı", true, now), now);
+            }
             _ => {}
         }
         self.refresh();

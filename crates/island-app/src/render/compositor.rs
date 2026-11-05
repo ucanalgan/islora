@@ -259,9 +259,13 @@ impl Wave {
         let x = origin.X + pill.width - (WAVE_RESERVED - left) * scale;
         let y = origin.Y + top * scale;
         if self.visible {
+            // Both ways: the pill's height and its distance from the top edge
+            // change too, not only its width.
             spring_scalar(compositor, &self.container, h!("Offset.X"), x, LIVELY)?;
+            spring_scalar(compositor, &self.container, h!("Offset.Y"), y, LIVELY)?;
         } else {
             self.container.StopAnimation(h!("Offset.X"))?;
+            self.container.StopAnimation(h!("Offset.Y"))?;
             self.container.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
         }
         for (index, bar) in self.bars.iter().enumerate() {
@@ -274,6 +278,18 @@ impl Wave {
             })?;
             bar.SetCenterPoint(Vector3 { X: 0.0, Y: height / 2.0, Z: 0.0 })?;
         }
+        Ok(())
+    }
+
+    /// Out of sight at once. The next placement then puts the bars where they
+    /// belong and fades them in there, instead of sliding them over from a
+    /// layout that is gone, such as the other style.
+    fn hide_now(&mut self) -> Result<()> {
+        for property in [h!("Opacity"), h!("Offset.X"), h!("Offset.Y")] {
+            self.container.StopAnimation(property)?;
+        }
+        self.container.SetOpacity(0.0)?;
+        self.visible = false;
         Ok(())
     }
 
@@ -627,6 +643,7 @@ impl Renderer {
         self.root.SetScale(Vector3 { X: EMERGE_SCALE, Y: EMERGE_SCALE, Z: 1.0 })?;
         self.moving.StopAnimation(h!("Offset.X"))?;
         self.moving.SetOffset(Vector3::default())?;
+        self.wave.hide_now()?;
         self.bubble.geometry.SetSize(Vector2::default())?;
         self.bubble.shown = None;
         self.bubble.spot = None;
