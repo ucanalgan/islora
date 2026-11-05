@@ -1939,6 +1939,24 @@ impl App {
                 self.demo_step = Some(0);
                 self.island.upsert_media(demo_track("Kısa Şarkı", true, now), now);
             }
+            // Music playing while a send waits, closes, goes, and is done.
+            21..=24 => {
+                self.demo_step = Some(0);
+                self.island.upsert_media(demo_track("Kısa Şarkı", true, now), now);
+                let Some(code) = QrMatrix::encode("http://192.168.1.20:52731/q7m2k4vx9pd3hz6tbw5n") else { return };
+                self.begin_transfer(std::slice::from_ref(&photo), code, "Wi-Fi · Ev".into(), None);
+                if step >= 22 {
+                    self.island.set_hovered(false, now);
+                    self.island.close_views();
+                    self.island.set_hovered(true, now);
+                }
+                if step == 23 {
+                    self.island.transfer_progress(photo.size * 2 / 5);
+                }
+                if step == 24 {
+                    self.island.transfer_done(now + 60_000);
+                }
+            }
             _ => {}
         }
         self.refresh();
