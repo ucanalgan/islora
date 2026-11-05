@@ -87,6 +87,7 @@ const TIMER_LANGUAGE: usize = 11;
 const TIMER_FULLSCREEN: usize = 12;
 const TIMER_DRAG_LEAVE: usize = 13;
 const TIMER_SCREEN_CLIP: usize = 14;
+const TIMER_RAISE: usize = 15;
 
 /// When the pill looks settled. The compositor's own completion event only
 /// fires about 1.2 s after an animation starts, long after it visibly stopped.
@@ -96,6 +97,10 @@ const HIDE_MS: u32 = 380;
 /// How long the pointer must rest on the top edge, so that passing over it to
 /// reach a browser tab does not open anything.
 const EDGE_DWELL_MS: u32 = 120;
+/// Windows' shell reorders windows for a new window in front or a full screen
+/// change by its own messages, which may come after ours. Raising the island's
+/// windows once more a little later keeps them on top either way.
+const RAISE_AGAIN_MS: u32 = 250;
 const DEMO_STEP_MS: u32 = 3_500;
 const DEMO_STEPS: u32 = 11;
 const INDICATOR_DEMO_STEP_MS: u32 = 1_500;
@@ -179,7 +184,7 @@ struct App {
     island: Island,
     renderer: Renderer,
     tray: Tray,
-    presence: Presence,
+    _presence: Presence,
     fullscreen: FullscreenWatch,
     /// Whether the island is out of the way for a full screen app right now.
     out_for_fullscreen: bool,
@@ -300,7 +305,7 @@ pub fn run() -> Result<()> {
         eprintln!("no global shortcut available, only the top edge will open the island");
     }
     let tray = Tray::add(island_window)?;
-    let mut presence = Presence::start(island_window)?;
+    let presence = Presence::start(island_window)?;
 
     let mut island = Island::new();
     if std::env::args().any(|a| a == "--local-timers") {
@@ -311,7 +316,6 @@ pub fn run() -> Result<()> {
     let reported = fullscreen::fullscreen_now();
     let mut fullscreen_watch = FullscreenWatch::default();
     fullscreen_watch.report(reported, fullscreen::desktop_in_front());
-    presence.follow_front(reported);
     island.set_suppressed(Suppression::Fullscreen, fullscreen_watch.active());
     if !fullscreen_watch.active() {
         window::show(edge_window);
@@ -343,7 +347,7 @@ pub fn run() -> Result<()> {
         island,
         renderer,
         tray,
-        presence,
+        _presence: presence,
         fullscreen: fullscreen_watch,
         out_for_fullscreen: fullscreen_watch.active(),
         settings: None,
@@ -617,6 +621,10 @@ impl App {
             TIMER_SCREEN_CLIP => {
                 self.cancel_timer(TIMER_SCREEN_CLIP);
                 self.show_indicator(Indicator::ScreenClip);
+            }
+            TIMER_RAISE => {
+                self.cancel_timer(TIMER_RAISE);
+                self.keep_on_top();
             }
             TIMER_DRAG_LEAVE => {
                 self.cancel_timer(TIMER_DRAG_LEAVE);
@@ -1772,18 +1780,37 @@ impl App {
 
     fn on_fullscreen(&mut self, reported: bool) {
         self.fullscreen.report(reported, fullscreen::desktop_in_front());
-        self.presence.follow_front(reported);
         self.cancel_timer(TIMER_FULLSCREEN);
         self.apply_fullscreen();
+        self.stay_on_top();
     }
 
     fn on_front_changed(&mut self) {
+        self.stay_on_top();
         self.fullscreen.front_changed(fullscreen::desktop_in_front());
         if self.fullscreen.active() {
             self.set_timer(TIMER_FULLSCREEN, FULLSCREEN_SETTLE_MS);
         } else {
             self.cancel_timer(TIMER_FULLSCREEN);
             self.apply_fullscreen();
+        }
+    }
+
+    /// A window that fills the screen can cover the edge strip and the island as
+    /// it comes to the front, after which the pointer reaches it and not the
+    /// strip. Seen with maximized windows over a taskbar that hides itself.
+    fn stay_on_top(&self) {
+        self.keep_on_top();
+        self.set_timer(TIMER_RAISE, RAISE_AGAIN_MS);
+    }
+
+    /// The island stays above the strip, as when it is shown.
+    fn keep_on_top(&self) {
+        if !self.out_for_fullscreen {
+            window::raise(self.edge_window);
+        }
+        if self.window_visible {
+            window::raise(self.island_window);
         }
     }
 

@@ -126,6 +126,17 @@ fn primary_monitor() -> Result<RECT> {
 }
 
 pub fn show(hwnd: HWND) {
+    to_top(hwnd, SWP_SHOWWINDOW);
+}
+
+/// Puts a shown window back above the other always-on-top windows. Recent
+/// Windows 11 builds let a window that fills the screen cover them when it
+/// comes to the front, as with a maximized window over a taskbar that hides.
+pub fn raise(hwnd: HWND) {
+    to_top(hwnd, SET_WINDOW_POS_FLAGS(0));
+}
+
+fn to_top(hwnd: HWND, extra: SET_WINDOW_POS_FLAGS) {
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -134,7 +145,7 @@ pub fn show(hwnd: HWND) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | extra,
         );
     }
 }

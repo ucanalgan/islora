@@ -38,7 +38,7 @@ static LISTENER: AtomicIsize = AtomicIsize::new(0);
 pub struct Presence {
     hwnd: HWND,
     drag_hook: HWINEVENTHOOK,
-    front_hook: Option<HWINEVENTHOOK>,
+    front_hook: HWINEVENTHOOK,
     display: HPOWERNOTIFY,
 }
 
@@ -62,46 +62,37 @@ impl Presence {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             );
 
+            // Each new window in front. A window filling the screen may cover
+            // the island and the edge strip as it comes forward, and Windows'
+            // full screen report has to be checked against what is in front.
+            // It wakes the app once per switch between windows, nothing more.
+            let front_hook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                None,
+                Some(on_front_changed),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            );
+
             let display = RegisterPowerSettingNotification(
                 HANDLE(hwnd.0),
                 &GUID_CONSOLE_DISPLAY_STATE,
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             )?;
             WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION)?;
-            Ok(Self { hwnd, drag_hook, front_hook: None, display })
-        }
-    }
-
-    /// Reports each new window in front. Only needed while Windows calls something
-    /// full screen, so everyday switching between windows never wakes the app.
-    pub fn follow_front(&mut self, on: bool) {
-        match (on, self.front_hook) {
-            (true, None) => unsafe {
-                self.front_hook = Some(SetWinEventHook(
-                    EVENT_SYSTEM_FOREGROUND,
-                    EVENT_SYSTEM_FOREGROUND,
-                    None,
-                    Some(on_front_changed),
-                    0,
-                    0,
-                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-                ));
-            },
-            (false, Some(hook)) => unsafe {
-                let _ = UnhookWinEvent(hook);
-                self.front_hook = None;
-            },
-            _ => {}
+            Ok(Self { hwnd, drag_hook, front_hook, display })
         }
     }
 }
 
 impl Drop for Presence {
     fn drop(&mut self) {
-        self.follow_front(false);
         unsafe {
             let mut bar = appbar(self.hwnd);
             SHAppBarMessage(ABM_REMOVE, &mut bar);
+            let _ = UnhookWinEvent(self.front_hook);
             let _ = UnhookWinEvent(self.drag_hook);
             let _ = UnregisterPowerSettingNotification(self.display);
             let _ = WTSUnRegisterSessionNotification(self.hwnd);
