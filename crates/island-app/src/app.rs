@@ -1584,11 +1584,12 @@ impl App {
             PowerEvent::Source { on_battery } => self.tracker.power_source_changed(on_battery),
             PowerEvent::Battery(percent) => self.tracker.battery_changed(percent),
             PowerEvent::Brightness(percent) => self.tracker.brightness_changed(percent, now),
-            PowerEvent::BatterySaver(on) => {
-                self.battery_saver = on;
+            PowerEvent::Saver { source, on } => {
+                let indicator = self.tracker.saver_changed(source, on, now);
+                self.battery_saver = self.tracker.saver_on();
                 self.apply_material();
                 self.apply_wave();
-                self.tracker.battery_saver_changed(on, now)
+                indicator
             }
         };
         if let Some(indicator) = indicator {

@@ -13,9 +13,22 @@ const BRIEF_MS: Millis = 1_200;
 const SCREENSHOT_MS: Millis = 6_000;
 /// Warns once on the way down past each of these percentages.
 const BATTERY_WARNINGS: [u8; 2] = [20, 10];
-/// Energy Saver, once called Battery Saver, dims the screen itself, in steps,
-/// which would otherwise talk over its own notice.
-const SAVER_DIMMING_MS: Millis = 3_000;
+/// Energy Saver dims the screen when it turns on and brightens it again when
+/// it turns off, in one step or several and sometimes a moment later. Changes
+/// of brightness that soon after belong to it and would cover its own notice,
+/// so they stay quiet. Each step keeps the quiet a little longer, up to a limit.
+const SAVER_DIMMING_MS: Millis = 4_000;
+const SAVER_STEP_MS: Millis = 1_500;
+const SAVER_LONGEST_MS: Millis = 10_000;
+
+/// Where Windows says that it saves power. Windows 10's Battery Saver has its
+/// own report, and Windows 11's Energy Saver another, which changes alone when
+/// the computer is plugged in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaverSource {
+    Battery,
+    Energy,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Indicator {
@@ -201,10 +214,13 @@ pub struct SystemTracker {
     microphone: Option<bool>,
     audio_output: Option<String>,
     monitors: Option<u32>,
-    battery_saver: Option<bool>,
+    /// What each source last said, in the order of [`SaverSource`].
+    savers: [Option<bool>; 2],
     language: Option<String>,
     /// Until when a brightness change is Energy Saver's doing.
     brightness_quiet_until: Millis,
+    /// When Energy Saver last turned on or off.
+    saver_changed_at: Millis,
 }
 
 impl SystemTracker {
@@ -213,12 +229,27 @@ impl SystemTracker {
     }
 
     pub fn battery_saver_changed(&mut self, on: bool, now: Millis) -> Option<Indicator> {
-        let previous = self.battery_saver.replace(on)?;
-        if previous == on {
+        self.saver_changed(SaverSource::Battery, on, now)
+    }
+
+    /// Saving counts as on while either source says so. The first report of
+    /// each is where it stands, not a change, and one change told by both
+    /// sources is told once.
+    pub fn saver_changed(&mut self, source: SaverSource, on: bool, now: Millis) -> Option<Indicator> {
+        let before = self.saver_on();
+        let first = self.savers[source as usize].replace(on).is_none();
+        let after = self.saver_on();
+        if first || before == after {
             return None;
         }
+        let on = after;
+        self.saver_changed_at = now;
         self.brightness_quiet_until = now + SAVER_DIMMING_MS;
         Some(Indicator::BatterySaver { on })
+    }
+
+    pub fn saver_on(&self) -> bool {
+        self.savers.contains(&Some(true))
     }
 
     pub fn keyboard_language_changed(&mut self, code: String) -> Option<Indicator> {
@@ -265,7 +296,15 @@ impl SystemTracker {
 
     pub fn brightness_changed(&mut self, percent: u8, now: Millis) -> Option<Indicator> {
         let previous = self.brightness.replace(percent)?;
-        (previous != percent && now >= self.brightness_quiet_until).then_some(Indicator::Brightness { percent })
+        if previous == percent {
+            return None;
+        }
+        if now < self.brightness_quiet_until {
+            let longest = self.saver_changed_at + SAVER_LONGEST_MS;
+            self.brightness_quiet_until = (now + SAVER_STEP_MS).max(self.brightness_quiet_until).min(longest);
+            return None;
+        }
+        Some(Indicator::Brightness { percent })
     }
 
     /// Unlike the others, this source reports nothing at startup, so the very
@@ -472,8 +511,65 @@ mod tests {
         tracker.battery_saver_changed(false, 0);
         assert!(tracker.battery_saver_changed(true, 10_000).is_some());
         assert_eq!(tracker.brightness_changed(60, 10_200), None);
-        assert_eq!(tracker.brightness_changed(50, 12_900), None);
-        assert_eq!(tracker.brightness_changed(70, 13_000), Some(Indicator::Brightness { percent: 70 }));
+        assert_eq!(tracker.brightness_changed(50, 13_900), None);
+        // Your own change, once the dimming is over, shows again.
+        assert_eq!(tracker.brightness_changed(70, 15_500), Some(Indicator::Brightness { percent: 70 }));
+    }
+
+    #[test]
+    fn energy_saver_alone_is_heard_and_quiets_its_dimming() {
+        // As measured: plugged in, only Energy Saver changes, and the screen
+        // dims 9 ms later.
+        let mut tracker = SystemTracker::new();
+        tracker.brightness_changed(90, 0);
+        assert_eq!(tracker.saver_changed(SaverSource::Energy, false, 0), None);
+        assert_eq!(tracker.saver_changed(SaverSource::Battery, false, 0), None);
+        assert_eq!(tracker.saver_changed(SaverSource::Energy, true, 39_933), Some(Indicator::BatterySaver { on: true }));
+        assert_eq!(tracker.brightness_changed(63, 39_942), None);
+        assert_eq!(tracker.saver_changed(SaverSource::Energy, false, 57_793), Some(Indicator::BatterySaver { on: false }));
+        assert_eq!(tracker.brightness_changed(90, 57_808), None);
+    }
+
+    #[test]
+    fn one_change_told_by_both_sources_is_told_once() {
+        let mut tracker = SystemTracker::new();
+        tracker.saver_changed(SaverSource::Battery, false, 0);
+        tracker.saver_changed(SaverSource::Energy, false, 0);
+        assert!(tracker.saver_changed(SaverSource::Energy, true, 1_000).is_some());
+        assert_eq!(tracker.saver_changed(SaverSource::Battery, true, 1_010), None);
+        assert!(tracker.saver_on());
+    }
+
+    #[test]
+    fn sources_that_disagree_at_first_say_nothing() {
+        // Energy Saver already on while plugged in, which Battery Saver does not reflect.
+        let mut tracker = SystemTracker::new();
+        assert_eq!(tracker.saver_changed(SaverSource::Battery, false, 0), None);
+        assert_eq!(tracker.saver_changed(SaverSource::Energy, true, 0), None);
+        assert!(tracker.saver_on());
+    }
+
+    #[test]
+    fn dimming_in_several_steps_stays_quiet_to_the_last() {
+        let mut tracker = SystemTracker::new();
+        tracker.brightness_changed(80, 0);
+        tracker.battery_saver_changed(false, 0);
+        tracker.battery_saver_changed(true, 10_000);
+        for (step, at) in [(75, 11_000), (70, 13_500), (65, 14_900), (60, 16_300)] {
+            assert_eq!(tracker.brightness_changed(step, at), None, "{at}");
+        }
+        // The quiet never lasts past its limit.
+        assert_eq!(tracker.brightness_changed(55, 17_700), None);
+        assert_eq!(tracker.brightness_changed(50, 20_000), Some(Indicator::Brightness { percent: 50 }));
+    }
+
+    #[test]
+    fn turning_energy_saver_off_brightens_quietly_too() {
+        let mut tracker = SystemTracker::new();
+        tracker.brightness_changed(56, 0);
+        tracker.battery_saver_changed(true, 0);
+        assert!(tracker.battery_saver_changed(false, 5_000).is_some());
+        assert_eq!(tracker.brightness_changed(80, 7_500), None);
     }
 
     #[test]
