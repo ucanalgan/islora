@@ -7,7 +7,8 @@ use std::time::Instant;
 use island_core::clock_timer::{self, ClockTimer};
 use island_core::config;
 use island_core::convert::Target;
-use island_core::drop::{DropView, ShelfHit, Zone, on_transfer_stop, shelf_hit};
+use island_core::direct;
+use island_core::drop::{DropView, ShelfHit, Zone, on_transfer_direct, on_transfer_stop, shelf_hit};
 use island_core::files::{DroppedFile, file_name, summary};
 use island_core::focus::{
     CHANGE_WAIT_MS, FocusReport, FocusStatus, FocusTracker, START_WAIT_MS,
@@ -60,6 +61,7 @@ use crate::sources::calendar::{CalendarSource, CalendarUpdate, MSG_CALENDAR, uni
 use crate::sources::clock_timers::{ClockTimerWatch, MSG_CLOCK_TIMERS};
 use crate::sources::drives::Drives;
 use crate::sources::focus::{self, FocusWatch, MSG_FOCUS, MSG_FOCUS_REFUSED};
+use crate::sources::direct_link::{DirectEvent, DirectLink, MSG_DIRECT};
 use crate::sources::fullscreen::{self, MSG_APPBAR, MSG_FRONT_CHANGED, MSG_WINDOW_DRAG, Presence};
 use crate::sources::imaging::{Imaging, MSG_IMAGING, Made};
 use crate::sources::media::{MSG_MEDIA, MediaSource};
@@ -241,6 +243,11 @@ struct App {
     /// Pictures waiting for a choice of format.
     to_convert: Vec<String>,
     sharing: Option<Sharing>,
+    /// The island's own network, for a phone that is not on the computer's,
+    /// with its name and passphrase.
+    direct: Option<(DirectLink, String, String)>,
+    /// The files of the send under way, which the own network serves again.
+    shared_files: Vec<DroppedFile>,
     imaging: Imaging,
     progress_style: ProgressStyle,
     /// What the open music view shows, for buttons that depend on the player.
@@ -381,6 +388,8 @@ pub fn run() -> Result<()> {
         pressed_file: None,
         to_convert: Vec::new(),
         sharing: None,
+        direct: None,
+        shared_files: Vec::new(),
         imaging: Imaging::new(island_window),
         progress_style: stored_progress_style(),
         offers_shuffle: false,
@@ -397,6 +406,10 @@ pub fn run() -> Result<()> {
     if let Some(path) = argument_after("--send-file") {
         let size = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
         app.send_to_phone(vec![DroppedFile { path, size, is_folder: false }]);
+        // And over the island's own network, as the button beside Stop does.
+        if std::env::args().any(|a| a == "--send-direct") {
+            app.start_direct();
+        }
     }
     // Tests convert a picture as if it were dropped and a format chosen.
     if let Some(path) = argument_after("--convert-file") {
@@ -460,8 +473,11 @@ impl App {
         let now = self.now();
         let frame = self.island.frame(now);
         // The code timed out, or the view with it was closed.
-        if self.sharing.is_some() && self.island.transfer_stage().is_none() {
+        if self.island.transfer_stage().is_none() && (self.sharing.is_some() || self.direct.is_some()) {
             self.sharing = None;
+            // The own network stays until the view closes, two seconds after
+            // the last byte left, so that it does not cut that byte off.
+            self.direct = None;
         }
         if let Err(error) = self.present(&frame, now) {
             eprintln!("present failed: {error}");
@@ -730,11 +746,18 @@ impl App {
                     }
                 }
                 OpenView::Transfer => {
-                    let sending = matches!(self.island.transfer_stage(), Some(Stage::Waiting { .. } | Stage::Sending { .. }));
+                    let stage = self.island.transfer_stage();
+                    let waiting = matches!(stage, Some(Stage::Waiting { .. }));
+                    let sending = waiting || matches!(stage, Some(Stage::Sending { .. }));
                     if sending && on_transfer_stop(pill_x, pill_y) {
                         self.island.cancel_transfer();
                         self.sharing = None;
+                        self.direct = None;
                         self.refresh();
+                        return;
+                    }
+                    if waiting && !self.island.transfer_is_direct() && on_transfer_direct(pill_x, pill_y) {
+                        self.start_direct();
                         return;
                     }
                 }
@@ -1408,18 +1431,23 @@ impl App {
         // Tests reach the server from this computer, which needs no firewall rule.
         let loopback = std::env::args().any(|a| a == "--share-loopback");
         let network = if loopback { Some(sharing::loopback()) } else { sharing::local_network() };
-        let Some(network) = network else {
-            self.notify("Telefona gönderilemedi", "Bilgisayar bir ağa bağlı değil", Icon::Warning);
-            return;
-        };
         // One send at a time: a new one takes over from the last.
         self.sharing = None;
+        self.direct = None;
+        self.shared_files = files.clone();
+        let Some(network) = network else {
+            // No network to share with a phone: the island makes its own.
+            let Some(waiting) = QrMatrix::encode("Islora") else { return };
+            self.begin_transfer(&files, waiting, "Islora".into(), None);
+            self.start_direct();
+            return;
+        };
         let shared = files
             .iter()
             .map(|file| SharedFile { path: file.path.clone(), name: file.name().to_owned(), size: file.size })
             .collect();
         let started = Sharing::start(self.island_window, shared, network.address);
-        if loopback && let Ok(sharing) = &started {
+        if (loopback || prints_address()) && let Ok(sharing) = &started {
             eprintln!("sharing at {}", sharing.url);
         }
         let Some((sharing, code)) = started.ok().and_then(|sharing| {
@@ -1429,20 +1457,90 @@ impl App {
             self.notify("Telefona gönderilemedi", "Bağlantı açılamadı", Icon::Warning);
             return;
         };
-        let name = match files.as_slice() {
+        let warning = network.public.then(|| "Ortak ağ: telefon ulaşamayabilir".to_owned());
+        self.begin_transfer(&files, code, sharing::describe(&network), warning);
+        self.sharing = Some(sharing);
+    }
+
+    fn begin_transfer(&mut self, files: &[DroppedFile], code: QrMatrix, network: String, warning: Option<String>) {
+        let name = match files {
             [only] => only.name().to_owned(),
             several => format!("{} dosya", several.len()),
         };
         self.island.start_transfer(Transfer {
             name,
-            summary: summary(&files),
+            summary: summary(files),
             total: files.iter().map(|file| file.size).sum(),
             code: Arc::new(code),
-            network: sharing::describe(&network),
-            warning: network.public.then(|| "Ortak ağ: telefon ulaşamayabilir".to_owned()),
+            network,
+            warning,
             stage: Stage::Waiting { until: self.now() + WAIT_MS },
+            direct: None,
         });
-        self.sharing = Some(sharing);
+    }
+
+    /// Starts the island's own network, with a new name and passphrase each
+    /// time, which the phone joins through a code.
+    fn start_direct(&mut self) {
+        let Some(random) = sharing::random(direct::RANDOM_BYTES) else {
+            self.notify("Doğrudan bağlantı kurulamadı", "Şifre üretilemedi", Icon::Warning);
+            return;
+        };
+        let (name, secret) = random.split_at(4);
+        let network = direct::network_name(name);
+        let passphrase = direct::passphrase(secret);
+        let link = DirectLink::start(self.island_window, network.clone(), passphrase.clone());
+        self.direct = Some((link, network, passphrase));
+        self.island.transfer_direct_preparing();
+        self.refresh();
+    }
+
+    fn on_direct(&mut self) {
+        let Some(events) = self.direct.as_ref().map(|(link, ..)| link.events()) else { return };
+        for event in events {
+            match event {
+                DirectEvent::Ready(address) => self.serve_direct(address),
+                DirectEvent::Joined => self.island.transfer_direct_joined(),
+                DirectEvent::Failed(reason) => self.direct_failed(reason),
+            }
+        }
+        self.refresh();
+    }
+
+    /// Serves the files again on the own network, under a new code.
+    fn serve_direct(&mut self, address: std::net::Ipv4Addr) {
+        let Some((_, network, passphrase)) = &self.direct else { return };
+        let (network, passphrase) = (network.clone(), passphrase.clone());
+        let shared = self
+            .shared_files
+            .iter()
+            .map(|file| SharedFile { path: file.path.clone(), name: file.name().to_owned(), size: file.size })
+            .collect();
+        let ready = Sharing::start(self.island_window, shared, address).ok().and_then(|sharing| {
+            let download = QrMatrix::encode(&sharing.url)?;
+            let join = QrMatrix::encode(&direct::join_code_text(&network, &passphrase))?;
+            Some((sharing, download, join))
+        });
+        match ready {
+            Some((sharing, download, join)) => {
+                if prints_address() {
+                    eprintln!("direct network {network} sharing at {}", sharing.url);
+                }
+                self.island.transfer_direct_ready(join, network, download);
+                self.sharing = Some(sharing);
+            }
+            None => self.direct_failed("Bağlantı açılamadı"),
+        }
+    }
+
+    fn direct_failed(&mut self, reason: &'static str) {
+        self.direct = None;
+        self.island.transfer_direct_failed();
+        // Without a network of the computer's either, there is nothing left to show.
+        if self.sharing.is_none() {
+            self.island.cancel_transfer();
+        }
+        self.notify("Doğrudan bağlantı kurulamadı", reason, Icon::Warning);
     }
 
     fn on_sharing(&mut self) {
@@ -1767,6 +1865,7 @@ impl App {
                     network: "Wi-Fi · Ev".into(),
                     warning: (step == 6).then(|| "Ortak ağ: telefon ulaşamayabilir".to_owned()),
                     stage: Stage::Waiting { until: now + WAIT_MS },
+                    direct: None,
                 });
                 let (style, permille) = match step {
                     7 => (ProgressStyle::Ring, 400),
@@ -1785,6 +1884,25 @@ impl App {
                 }
                 if step == 11 {
                     self.island.close_views();
+                }
+            }
+            // The island's own network: starting, its code, and the phone on it.
+            18..=20 => {
+                let file = |text: &str| QrMatrix::encode(text);
+                let (Some(waiting), Some(join), Some(download)) = (
+                    file("Islora"),
+                    file(&direct::join_code_text("Islora-K4FX", "abcdefghjkmn")),
+                    file("http://192.168.137.1:52731/q7m2k4vx9pd3hz6tbw5n"),
+                ) else {
+                    return;
+                };
+                self.begin_transfer(std::slice::from_ref(&photo), waiting, "Islora".into(), None);
+                self.island.transfer_direct_preparing();
+                if step >= 19 {
+                    self.island.transfer_direct_ready(join, "Islora-K4FX".into(), download);
+                }
+                if step == 20 {
+                    self.island.transfer_direct_joined();
                 }
             }
             12 => {
@@ -1961,6 +2079,11 @@ fn ask_running_copy_for_settings() {
     }
 }
 
+/// Tests read where the server listens, which nothing prints otherwise.
+fn prints_address() -> bool {
+    std::env::args().any(|a| a == "--print-address")
+}
+
 fn stored_progress_style() -> ProgressStyle {
     settings::read().map(|text| config::read_progress_style(&text)).unwrap_or_default()
 }
@@ -2032,6 +2155,9 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         MSG_IMAGING => {
             with_app(App::on_imaging);
+        }
+        MSG_DIRECT => {
+            with_app(App::on_direct);
         }
         WM_TIMER => {
             with_app(|app| app.on_timer(wparam.0));

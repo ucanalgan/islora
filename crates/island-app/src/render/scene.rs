@@ -14,11 +14,12 @@ use island_core::layout::{
 use island_core::convert::Target;
 use island_core::drop::{
     CONVERT_NOTE, DropView, HEADER, Rect, SHELF_BACK, SHELF_CLEAR, SHELF_FORWARD, SHELF_TILES,
-    TRANSFER_CODE, TRANSFER_STOP, TRANSFER_TEXT_LEFT, Zone, remove_button, thumbnail, tile_name,
+    TRANSFER_CODE, TRANSFER_DIRECT, TRANSFER_STOP, TRANSFER_TEXT_LEFT, Zone, remove_button, thumbnail,
+    tile_name,
 };
 use island_core::media::{RepeatMode, Sides, format_time};
 use island_core::shelf::ShelfView;
-use island_core::transfer::{Shown, TransferView};
+use island_core::transfer::{Direct, Shown, TransferView};
 use island_core::{
     Bubble, CalendarState, ConvertView, Frame, HomeView, Icon, Kind, Millis, PanelView, Pill,
     Presentation, ProgressStyle, TimerView,
@@ -550,11 +551,26 @@ impl Scene {
         let middle_y = TRANSFER_CODE.y + TRANSFER_CODE.height / 2.0;
         let title = match &transfer.shown {
             Shown::Waiting { left } => {
-                painting.codes.push(CodeRun { bounds: code, code: &transfer.code });
-                let stop = TRANSFER_STOP;
-                let bounds = canvas.bounds(stop.x + stop.width + 10.0, stop.y, canvas.width - stop.x - stop.width - 34.0, stop.height);
-                painting.texts.push(canvas.text(left, bounds, 12.0, false, 0.6, Align::Trailing));
-                "Telefona gönder"
+                // The time left shares the row under the name with the network.
+                let time = canvas.bounds(TRANSFER_TEXT_LEFT, 70.0, canvas.width - TRANSFER_TEXT_LEFT - 26.0, 18.0);
+                painting.texts.push(canvas.text(left, time, 12.0, false, 0.6, Align::Trailing));
+                match &transfer.direct {
+                    Some(Direct::Preparing) => {
+                        let icon = canvas.bounds(TRANSFER_CODE.x, middle_y - 30.0, TRANSFER_CODE.width, 40.0);
+                        painting.texts.push(canvas.icon(glyph(Icon::Wifi), icon, 30.0));
+                        let note = canvas.bounds(TRANSFER_CODE.x, middle_y + 14.0, TRANSFER_CODE.width, 20.0);
+                        painting.texts.push(canvas.text("Ağ kuruluyor…", note, 12.0, false, 0.7, Align::Center));
+                        "Doğrudan bağlan"
+                    }
+                    Some(Direct::Ready { code: join, .. }) => {
+                        painting.codes.push(CodeRun { bounds: code, code: join });
+                        "Telefonu bağla"
+                    }
+                    _ => {
+                        painting.codes.push(CodeRun { bounds: code, code: &transfer.code });
+                        "Telefona gönder"
+                    }
+                }
             }
             Shown::Sending { permille, .. } => {
                 let fraction = f32::from(*permille) / 1000.0;
@@ -604,15 +620,34 @@ impl Scene {
         painting.texts.push(canvas.text(title, canvas.bounds(left, 22.0, width, 24.0), 16.0, true, 1.0, Align::Leading));
         painting.texts.push(canvas.text(&transfer.summary, canvas.bounds(left, 47.0, width, 20.0), 13.0, false, 0.75, Align::Leading));
         let line = canvas.bounds(left, 70.0, width, 18.0);
+        // Room on the right of the row for the time left.
+        let line_beside_time = canvas.bounds(left, 70.0, width - 44.0, 18.0);
         let note = canvas.bounds(left, 89.0, width, 18.0);
         match &transfer.shown {
-            Shown::Waiting { .. } => {
-                painting.texts.push(canvas.text(&transfer.network, line, 12.0, false, 0.6, Align::Leading));
-                match &transfer.warning {
-                    Some(warning) => painting.colored.push((canvas.text(warning, note, 12.0, false, 1.0, Align::Leading), WARNING_COLOR)),
-                    None => painting.texts.push(canvas.text("Telefonun kamerasıyla okut", note, 12.0, false, 0.6, Align::Leading)),
+            Shown::Waiting { .. } => match &transfer.direct {
+                None => {
+                    painting.texts.push(canvas.text(&transfer.network, line_beside_time, 12.0, false, 0.6, Align::Leading));
+                    match &transfer.warning {
+                        Some(warning) => painting.colored.push((canvas.text(warning, note, 12.0, false, 1.0, Align::Leading), WARNING_COLOR)),
+                        None => painting.texts.push(canvas.text("Telefonun kamerasıyla okut", note, 12.0, false, 0.6, Align::Leading)),
+                    }
+                    let other = canvas.rect(TRANSFER_DIRECT);
+                    painting.bars.push(BarRun { bounds: other, opacity: 0.14 });
+                    painting.texts.push(canvas.text("Doğrudan bağlan", other, 11.5, true, 1.0, Align::Center));
                 }
-            }
+                Some(Direct::Preparing) => {
+                    painting.texts.push(canvas.text("Islora kendi ağını kuruyor", line_beside_time, 12.0, false, 0.6, Align::Leading));
+                    painting.texts.push(canvas.text("Telefon başka bir ağdaysa", note, 12.0, false, 0.6, Align::Leading));
+                }
+                Some(Direct::Ready { network, .. }) => {
+                    painting.texts.push(canvas.text(network, line_beside_time, 12.0, true, 0.9, Align::Leading));
+                    painting.texts.push(canvas.text("Kamerayla okut, bu ağa katıl", note, 12.0, false, 0.6, Align::Leading));
+                }
+                Some(Direct::Joined { network }) => {
+                    painting.texts.push(canvas.text(network, line_beside_time, 12.0, false, 0.6, Align::Leading));
+                    painting.colored.push((canvas.text("Bağlandı, şimdi bu kodu okut", note, 12.0, false, 1.0, Align::Leading), PHONE_COLOR));
+                }
+            },
             Shown::Sending { amount, .. } => {
                 painting.texts.push(canvas.text(amount, line, 12.0, false, 0.6, Align::Leading));
             }

@@ -21,6 +21,17 @@ pub enum Stage {
     Done { at: Millis },
 }
 
+/// The island's own network, for a phone that is not on the computer's.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Direct {
+    /// Windows is starting the network.
+    Preparing,
+    /// A code to join the network, shown until the phone is on it.
+    Ready { code: Arc<QrMatrix>, network: String },
+    /// The phone is on the network, so the download code shows.
+    Joined { network: String },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Transfer {
     /// The file's name, or how many there are, for the compact pill.
@@ -34,6 +45,7 @@ pub struct Transfer {
     /// Why the phone might not get through, such as a public network.
     pub warning: Option<String>,
     pub stage: Stage,
+    pub direct: Option<Direct>,
 }
 
 /// What the open view shows at this stage.
@@ -53,6 +65,7 @@ pub struct TransferView {
     pub warning: Option<String>,
     pub shown: Shown,
     pub style: ProgressStyle,
+    pub direct: Option<Direct>,
 }
 
 /// Minutes and seconds, rounded up so it never shows 0:00 while still open.
@@ -86,6 +99,7 @@ impl Transfer {
             warning: self.warning.clone(),
             shown: shown.clone(),
             style,
+            direct: self.direct.clone(),
         };
         let percent = (self.permille() / 10) as u8;
         let (leading, trailing, icon, badge, expires_at) = match shown {
@@ -145,6 +159,7 @@ mod tests {
             network: "Wi-Fi · Ev".into(),
             warning: None,
             stage,
+            direct: None,
         }
     }
 

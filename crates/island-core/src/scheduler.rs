@@ -5,7 +5,8 @@ use crate::media::{MediaSnapshot, PAUSED_LINGER_MS, TRACK_NOTICE_MS};
 use crate::schedule::{EVENT_LEAD_MS, Upcoming};
 use crate::shelf::{Shelf, ShelfView};
 use crate::timer::Timer;
-use crate::transfer::{DONE_MS, Stage, Transfer, WAIT_MS};
+use crate::qr::QrMatrix;
+use crate::transfer::{DONE_MS, Direct, Stage, Transfer, WAIT_MS};
 
 /// How long the clock stays up after a peek with nothing else to show.
 pub const PEEK_MS: Millis = 3_000;
@@ -283,6 +284,43 @@ impl Island {
         {
             transfer.stage = Stage::Sending { sent };
         }
+    }
+
+    /// The island's own network is on its way.
+    pub fn transfer_direct_preparing(&mut self) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.direct = Some(Direct::Preparing);
+            transfer.warning = None;
+        }
+    }
+
+    /// The network is up: a code to join it, and the download code that
+    /// works on it once the phone is there.
+    pub fn transfer_direct_ready(&mut self, join: QrMatrix, network: String, download: QrMatrix) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.direct = Some(Direct::Ready { code: std::sync::Arc::new(join), network: network.clone() });
+            transfer.code = std::sync::Arc::new(download);
+            transfer.network = network;
+        }
+    }
+
+    pub fn transfer_direct_joined(&mut self) {
+        if let Some(transfer) = &mut self.transfer
+            && let Some(Direct::Ready { network, .. }) = &transfer.direct
+        {
+            transfer.direct = Some(Direct::Joined { network: network.clone() });
+        }
+    }
+
+    /// The network could not be made, so the usual code stands again.
+    pub fn transfer_direct_failed(&mut self) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.direct = None;
+        }
+    }
+
+    pub fn transfer_is_direct(&self) -> bool {
+        self.transfer.as_ref().is_some_and(|transfer| transfer.direct.is_some())
     }
 
     /// The phone stopped before it had everything. The code waits again.
@@ -1976,7 +2014,33 @@ mod tests {
             network: "Wi-Fi · Ev".into(),
             warning: None,
             stage: Stage::Waiting { until: WAIT_MS },
+            direct: None,
         }
+    }
+
+    #[test]
+    fn the_own_network_shows_its_code_then_the_download_code() {
+        let code = |text: &str| crate::qr::QrMatrix::encode(text).expect("fits");
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        island.transfer_direct_preparing();
+        let view = |island: &mut Island| island.frame(0).activity.and_then(|a| a.transfer).and_then(|t| t.direct);
+        assert_eq!(view(&mut island), Some(Direct::Preparing));
+        island.transfer_direct_ready(code("WIFI:T:WPA;S:Islora-K4FX;P:x;;"), "Islora-K4FX".into(), code("http://192.168.137.1:5000/t"));
+        assert!(matches!(view(&mut island), Some(Direct::Ready { .. })));
+        island.transfer_direct_joined();
+        assert_eq!(view(&mut island), Some(Direct::Joined { network: "Islora-K4FX".into() }));
+        let shown = island.frame(0).activity.and_then(|a| a.transfer).expect("view");
+        assert_eq!(shown.network, "Islora-K4FX");
+    }
+
+    #[test]
+    fn a_network_that_fails_brings_back_the_usual_code() {
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        island.transfer_direct_preparing();
+        island.transfer_direct_failed();
+        assert!(!island.transfer_is_direct());
     }
 
     fn shelf_files() -> Vec<String> {

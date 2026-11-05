@@ -3,6 +3,7 @@ pub mod bluetooth;
 pub mod calendar;
 pub mod clipboard;
 pub mod clock_timers;
+pub mod direct_link;
 pub mod drives;
 pub mod focus;
 pub mod fullscreen;

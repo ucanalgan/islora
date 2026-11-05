@@ -230,6 +230,13 @@ fn random_bytes() -> io::Result<[u8; 13]> {
     Ok(bytes)
 }
 
+/// Random bytes from Windows' own generator, for names and passwords.
+pub fn random(count: usize) -> Option<Vec<u8>> {
+    let mut bytes = vec![0_u8; count];
+    unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }.ok().ok()?;
+    Some(bytes)
+}
+
 fn accept(listener: TcpListener, shared: Arc<Shared>) {
     for stream in listener.incoming() {
         if shared.stopped() {

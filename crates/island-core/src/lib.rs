@@ -5,6 +5,7 @@ pub mod activity;
 pub mod clock_timer;
 pub mod config;
 pub mod convert;
+pub mod direct;
 pub mod drop;
 pub mod files;
 pub mod focus;

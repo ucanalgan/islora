@@ -182,10 +182,17 @@ pub const CONVERT_NOTE: Rect = Rect { x: 24.0, y: 134.0, width: Pill::EXPANDED.w
 /// The code for the phone, or what replaces it once the phone is on its way.
 pub const TRANSFER_CODE: Rect = Rect { x: 20.0, y: 17.0, width: 136.0, height: 136.0 };
 pub const TRANSFER_TEXT_LEFT: f32 = 174.0;
-pub const TRANSFER_STOP: Rect = Rect { x: TRANSFER_TEXT_LEFT, y: 120.0, width: 90.0, height: 32.0 };
+pub const TRANSFER_STOP: Rect = Rect { x: TRANSFER_TEXT_LEFT, y: 120.0, width: 78.0, height: 32.0 };
 
 pub fn on_transfer_stop(x: f32, y: f32) -> bool {
     TRANSFER_STOP.contains(x, y)
+}
+
+/// Asks for the island's own network, for a phone on another network.
+pub const TRANSFER_DIRECT: Rect = Rect { x: TRANSFER_STOP.x + TRANSFER_STOP.width + 8.0, y: TRANSFER_STOP.y, width: 108.0, height: TRANSFER_STOP.height };
+
+pub fn on_transfer_direct(x: f32, y: f32) -> bool {
+    TRANSFER_DIRECT.contains(x, y)
 }
 
 #[cfg(test)]
@@ -271,7 +278,7 @@ mod tests {
         for target in Target::ALL {
             assert!(inside_pill(target.bounds()), "{target:?}");
         }
-        for rect in [SHELF_CLEAR, SHELF_BACK, SHELF_FORWARD, CONVERT_NOTE, TRANSFER_CODE, TRANSFER_STOP, HEADER] {
+        for rect in [SHELF_CLEAR, SHELF_BACK, SHELF_FORWARD, CONVERT_NOTE, TRANSFER_CODE, TRANSFER_STOP, TRANSFER_DIRECT, HEADER] {
             assert!(inside_pill(rect), "{rect:?}");
         }
     }
