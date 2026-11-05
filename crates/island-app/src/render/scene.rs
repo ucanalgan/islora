@@ -11,12 +11,22 @@ use island_core::layout::{
     SETTINGS_SHORTCUT_Y, StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS,
     TIMER_RING_RADIUS, TIMER_RING_WIDTH, TIMER_RING_X, TIMER_RING_Y, TimerButton, preset_center_x,
 };
+use island_core::convert::Target;
+use island_core::drop::{
+    CONVERT_NOTE, DropView, HEADER, Rect, SHELF_BACK, SHELF_CLEAR, SHELF_FORWARD, SHELF_TILES,
+    TRANSFER_CODE, TRANSFER_STOP, TRANSFER_TEXT_LEFT, Zone, remove_button, thumbnail, tile_name,
+};
 use island_core::media::{RepeatMode, format_time};
+use island_core::shelf::ShelfView;
+use island_core::transfer::{Shown, TransferView};
 use island_core::{
-    Bubble, CalendarState, Frame, HomeView, Icon, Kind, Millis, Pill, Presentation, TimerView,
+    Bubble, CalendarState, ConvertView, Frame, HomeView, Icon, Kind, Millis, PanelView, Pill,
+    Presentation, ProgressStyle, TimerView,
 };
 
-use super::text::{Align, BarRun, Bounds, Font, ImageRun, Painting, RingRun, TextRun};
+use super::text::{
+    Align, BarRun, Bounds, CodeRun, Font, ImageRun, OutlineRun, Painting, RingRun, ShapeRun, TextRun,
+};
 
 const ICON_NOTE: &str = "\u{E8D6}";
 const ICON_PLAY: &str = "\u{E768}";
@@ -29,6 +39,36 @@ const ICON_SETTINGS: &str = "\u{E713}";
 const ICON_SHUFFLE: &str = "\u{E8B1}";
 const ICON_REPEAT_ALL: &str = "\u{E8EE}";
 const ICON_REPEAT_ONE: &str = "\u{E8ED}";
+const ICON_DOCUMENT: &str = "\u{E8A5}";
+const ICON_FOLDER: &str = "\u{E8B7}";
+const ICON_CLOSE: &str = "\u{E8BB}";
+const ICON_BACK: &str = "\u{E76B}";
+const ICON_FORWARD: &str = "\u{E76C}";
+
+const SHELF_COLOR: [f32; 3] = [0.33, 0.58, 1.0];
+const PHONE_COLOR: [f32; 3] = [0.25, 0.82, 0.48];
+const CONVERT_COLOR: [f32; 3] = [0.68, 0.49, 1.0];
+const WARNING_COLOR: [f32; 3] = [1.0, 0.76, 0.28];
+
+fn zone_color(zone: Zone) -> [f32; 3] {
+    match zone {
+        Zone::Shelf => SHELF_COLOR,
+        Zone::Phone => PHONE_COLOR,
+        Zone::Convert => CONVERT_COLOR,
+    }
+}
+
+fn zone_icon(zone: Zone) -> Icon {
+    match zone {
+        Zone::Shelf => Icon::Shelf,
+        Zone::Phone => Icon::Phone,
+        Zone::Convert => Icon::Convert,
+    }
+}
+
+fn with_alpha([r, g, b]: [f32; 3], alpha: f32) -> [f32; 4] {
+    [r, g, b, alpha]
+}
 
 fn glyph(icon: Icon) -> &'static str {
     match icon {
@@ -56,6 +96,11 @@ fn glyph(icon: Icon) -> &'static str {
         Icon::Usb => "\u{E88E}",
         Icon::Monitor => "\u{E7F4}",
         Icon::Clipboard => "\u{E8C8}",
+        Icon::Phone => "\u{E8EA}",
+        Icon::Shelf => "\u{E7B8}",
+        Icon::Convert => "\u{E8AB}",
+        Icon::Check => "\u{E73E}",
+        Icon::Warning => "\u{E7BA}",
     }
 }
 
@@ -144,6 +189,11 @@ pub struct Scene {
     pub hideable: bool,
     pub fit: CompactFit,
     pub preview: Option<Arc<[u8]>>,
+    /// A view a drop opened, or the panel for files being dragged.
+    pub panel: Option<PanelView>,
+    pub transfer: Option<TransferView>,
+    /// The alert's file is shown in its folder, which a button on it offers.
+    pub reveal: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -200,7 +250,7 @@ impl Scene {
             let home = frame.home.as_ref().map(|home| HomeScene::new(home, clock));
             return Self {
                 presentation,
-                clock: home.is_none().then(|| clock.time.clone()),
+                clock: (home.is_none() && frame.panel.is_none()).then(|| clock.time.clone()),
                 leading: String::new(),
                 trailing: String::new(),
                 title: String::new(),
@@ -213,6 +263,9 @@ impl Scene {
                 hideable: false,
                 fit: DEFAULT_FIT,
                 preview: None,
+                panel: frame.panel.clone(),
+                transfer: None,
+                reveal: false,
             };
         };
         let media = activity.media.as_ref().map(|media| MediaScene {
@@ -248,6 +301,9 @@ impl Scene {
             hideable: activity.kind == Kind::Upcoming,
             fit: DEFAULT_FIT,
             preview: activity.preview.clone(),
+            panel: None,
+            transfer: activity.transfer.clone(),
+            reveal: activity.reveal && activity.file.is_some(),
         }
     }
 
@@ -310,6 +366,19 @@ impl Scene {
                 home.today.clear();
                 home.mode = StartMode::default();
             }
+            if let Some(transfer) = &mut scene.transfer {
+                transfer.shown = match transfer.shown {
+                    Shown::Waiting { .. } => Shown::Waiting { left: String::new() },
+                    Shown::Sending { .. } => Shown::Sending { permille: 0, amount: String::new() },
+                    Shown::Done => Shown::Done,
+                };
+            }
+            match &mut scene.panel {
+                Some(PanelView::Drop(view)) => view.hovered = None,
+                Some(PanelView::Shelf(view)) => view.items.iter_mut().for_each(|item| item.thumbnail = None),
+                Some(PanelView::Convert(view)) => view.busy = false,
+                None => {}
+            }
             scene.trailing.clear();
             scene
         };
@@ -322,16 +391,27 @@ impl Scene {
     }
 
     /// `corner` is how round the pill's corners look, in DIPs.
-    pub fn painting(&self, pill: Pill, scale: f32, corner: f32) -> Painting<'_> {
-        let canvas = Canvas { scale, width: pill.width / scale, height: pill.height / scale, corner };
+    /// `notch` says the top edge joins the screen's.
+    pub fn painting(&self, pill: Pill, scale: f32, corner: f32, notch: bool) -> Painting<'_> {
+        let canvas = Canvas { scale, width: pill.width / scale, height: pill.height / scale, corner, notch };
         if let Some(clock) = &self.clock {
             let mut painting = Painting::default();
             let bounds = canvas.bounds(0.0, 0.0, canvas.width, canvas.height);
             painting.texts.push(canvas.text(clock, bounds, COMPACT_CLOCK_SIZE, true, 1.0, Align::Center));
             return painting;
         }
+        if let Some(panel) = &self.panel {
+            return match panel {
+                PanelView::Drop(view) => drop_panel(view, &canvas),
+                PanelView::Shelf(view) => shelf_panel(view, &canvas),
+                PanelView::Convert(view) => convert_panel(view, &canvas),
+            };
+        }
         if let Some(home) = &self.home {
             return self.home_view(home, &canvas);
+        }
+        if let (Presentation::Expanded, Some(transfer)) = (self.presentation, &self.transfer) {
+            return self.expanded_transfer(transfer, &canvas);
         }
         if let (Presentation::Expanded, Some(timer)) = (self.presentation, self.timer) {
             return self.expanded_timer(timer, &canvas);
@@ -351,8 +431,26 @@ impl Scene {
         let mut painting = Painting::default();
         let height = canvas.height;
         let left = self.text_start();
-        if let Some(icon) = self.icon {
-            painting.texts.push(canvas.icon(glyph(icon), canvas.bounds(12.0, 0.0, 24.0, height), 15.0));
+        let sending = self.transfer.as_ref().and_then(|transfer| match transfer.shown {
+            Shown::Sending { permille, .. } => Some(permille),
+            _ => None,
+        });
+        if let Some(permille) = sending {
+            painting.rings.push(RingRun {
+                center_x: 24.0 * canvas.scale,
+                center_y: height / 2.0 * canvas.scale,
+                radius: 7.0 * canvas.scale,
+                width: 2.2 * canvas.scale,
+                fraction: f32::from(permille) / 1000.0,
+                opacity: 1.0,
+            });
+        } else if let Some(icon) = self.icon {
+            let run = canvas.icon(glyph(icon), canvas.bounds(12.0, 0.0, 24.0, height), 15.0);
+            if icon == Icon::Check {
+                painting.colored.push((run, PHONE_COLOR));
+            } else {
+                painting.texts.push(run);
+            }
         }
         let trailing = self.fit.trailing;
         let gap = if trailing > 0.0 { COMPACT_TEXT_GAP } else { 0.0 };
@@ -419,9 +517,101 @@ impl Scene {
         } else if let Some(icon) = self.icon {
             painting.texts.push(canvas.icon(glyph(icon), canvas.bounds(20.0, 0.0, 34.0, canvas.height), 22.0));
         }
-        let inner = canvas.width - left - 28.0;
+        const REVEAL_WIDTH: f32 = 64.0;
+        let button = if self.reveal { REVEAL_WIDTH + 10.0 } else { 0.0 };
+        let inner = canvas.width - left - 28.0 - button;
         painting.texts.push(canvas.text(&self.title, canvas.bounds(left, 12.0, inner, 22.0), 14.0, true, 1.0, Align::Leading));
         painting.texts.push(canvas.text(&self.detail, canvas.bounds(left, 33.0, inner, 20.0), 12.5, false, 0.7, Align::Leading));
+        if self.reveal {
+            let bounds = canvas.bounds(canvas.width - 22.0 - REVEAL_WIDTH, (canvas.height - 28.0) / 2.0, REVEAL_WIDTH, 28.0);
+            painting.bars.push(BarRun { bounds, opacity: 0.16 });
+            painting.texts.push(canvas.text("Göster", bounds, 12.5, true, 1.0, Align::Center));
+        }
+        painting
+    }
+
+    fn expanded_transfer<'a>(&'a self, transfer: &'a TransferView, canvas: &Canvas) -> Painting<'a> {
+        let mut painting = Painting::default();
+        let code = canvas.rect(TRANSFER_CODE);
+        let middle_x = TRANSFER_CODE.x + TRANSFER_CODE.width / 2.0;
+        let middle_y = TRANSFER_CODE.y + TRANSFER_CODE.height / 2.0;
+        let title = match &transfer.shown {
+            Shown::Waiting { left } => {
+                painting.codes.push(CodeRun { bounds: code, code: &transfer.code });
+                let stop = TRANSFER_STOP;
+                let bounds = canvas.bounds(stop.x + stop.width + 10.0, stop.y, canvas.width - stop.x - stop.width - 34.0, stop.height);
+                painting.texts.push(canvas.text(left, bounds, 12.0, false, 0.6, Align::Trailing));
+                "Telefona gönder"
+            }
+            Shown::Sending { permille, .. } => {
+                let fraction = f32::from(*permille) / 1000.0;
+                // Labels made while painting are sized by their height.
+                let percent = canvas.bounds(TRANSFER_CODE.x, middle_y - 47.0, TRANSFER_CODE.width, 94.0);
+                match transfer.style {
+                    ProgressStyle::Ring => {
+                        painting.rings.push(RingRun {
+                            center_x: middle_x * canvas.scale,
+                            center_y: middle_y * canvas.scale,
+                            radius: 54.0 * canvas.scale,
+                            width: 7.0 * canvas.scale,
+                            fraction,
+                            opacity: 1.0,
+                        });
+                        painting.owned_labels.push((format!("%{}", permille / 10), canvas.bounds(TRANSFER_CODE.x, middle_y - 36.0, TRANSFER_CODE.width, 72.0)));
+                    }
+                    ProgressStyle::Edge => {
+                        let whole = canvas.bounds(0.0, 0.0, canvas.width, canvas.height);
+                        let radius = canvas.corner * canvas.scale;
+                        painting.outlines.push(OutlineRun { bounds: whole, radius, width: 7.0 * canvas.scale, color: with_alpha(PHONE_COLOR, 0.22), fraction, dash: None, open_top: canvas.notch });
+                        painting.outlines.push(OutlineRun { bounds: whole, radius, width: 2.5 * canvas.scale, color: with_alpha(PHONE_COLOR, 1.0), fraction, dash: None, open_top: canvas.notch });
+                        painting.owned_labels.push((format!("%{}", permille / 10), percent));
+                    }
+                    ProgressStyle::Fill => {
+                        let reach = canvas.width * fraction;
+                        let filled = canvas.bounds(0.0, 0.0, reach, canvas.height);
+                        painting.shapes.push(ShapeRun { bounds: filled, radius: 0.0, fill: with_alpha(PHONE_COLOR, 0.26), border: None });
+                        // A brighter front edge, so it reads as moving rather than as a colour.
+                        let front = canvas.bounds(reach - 2.0, 0.0, 2.0, canvas.height);
+                        painting.shapes.push(ShapeRun { bounds: front, radius: 0.0, fill: with_alpha(PHONE_COLOR, 0.8), border: None });
+                        painting.owned_labels.push((format!("%{}", permille / 10), percent));
+                    }
+                }
+                "Gönderiliyor"
+            }
+            Shown::Done => {
+                let circle = canvas.bounds(middle_x - 40.0, middle_y - 40.0, 80.0, 80.0);
+                painting.shapes.push(ShapeRun { bounds: circle, radius: 40.0 * canvas.scale, fill: with_alpha(PHONE_COLOR, 1.0), border: None });
+                painting.texts.push(canvas.icon(glyph(Icon::Check), circle, 38.0));
+                "Gönderildi"
+            }
+        };
+
+        let left = TRANSFER_TEXT_LEFT;
+        let width = canvas.width - left - 26.0;
+        painting.texts.push(canvas.text(title, canvas.bounds(left, 22.0, width, 24.0), 16.0, true, 1.0, Align::Leading));
+        painting.texts.push(canvas.text(&transfer.summary, canvas.bounds(left, 47.0, width, 20.0), 13.0, false, 0.75, Align::Leading));
+        let line = canvas.bounds(left, 70.0, width, 18.0);
+        let note = canvas.bounds(left, 89.0, width, 18.0);
+        match &transfer.shown {
+            Shown::Waiting { .. } => {
+                painting.texts.push(canvas.text(&transfer.network, line, 12.0, false, 0.6, Align::Leading));
+                match &transfer.warning {
+                    Some(warning) => painting.colored.push((canvas.text(warning, note, 12.0, false, 1.0, Align::Leading), WARNING_COLOR)),
+                    None => painting.texts.push(canvas.text("Telefonun kamerasıyla okut", note, 12.0, false, 0.6, Align::Leading)),
+                }
+            }
+            Shown::Sending { amount, .. } => {
+                painting.texts.push(canvas.text(amount, line, 12.0, false, 0.6, Align::Leading));
+            }
+            Shown::Done => {
+                painting.texts.push(canvas.text(&transfer.network, line, 12.0, false, 0.6, Align::Leading));
+            }
+        }
+        if transfer.shown != Shown::Done {
+            let stop = canvas.rect(TRANSFER_STOP);
+            painting.bars.push(BarRun { bounds: stop, opacity: 0.14 });
+            painting.texts.push(canvas.text("Durdur", stop, 12.5, true, 1.0, Align::Center));
+        }
         painting
     }
 
@@ -593,7 +783,7 @@ impl Scene {
 
 /// What the small bubble beside the pill shows.
 pub fn bubble_painting(bubble: &Bubble, size: f32, scale: f32) -> Painting<'_> {
-    let canvas = Canvas { scale, width: size / scale, height: size / scale, corner: size / scale / 2.0 };
+    let canvas = Canvas { scale, width: size / scale, height: size / scale, corner: size / scale / 2.0, notch: false };
     let middle = canvas.width / 2.0;
     let mut painting = Painting::default();
     match bubble {
@@ -633,15 +823,129 @@ pub fn bubble_painting(bubble: &Bubble, size: f32, scale: f32) -> Painting<'_> {
     painting
 }
 
+/// The three places files can go, while they are dragged over the island.
+fn drop_panel<'a>(view: &'a DropView, canvas: &Canvas) -> Painting<'a> {
+    let mut painting = Painting::default();
+    painting.texts.push(canvas.text(&view.header, canvas.rect(HEADER), 13.0, true, 0.9, Align::Center));
+    for zone in Zone::ALL {
+        let area = zone.bounds();
+        let bounds = canvas.rect(area);
+        let color = zone_color(zone);
+        let refusal = view.refusal(zone);
+        let lit = view.hovered == Some(zone) && refusal.is_none();
+        let radius = 16.0 * canvas.scale;
+        if lit {
+            let glow = canvas.bounds(area.x - 3.0, area.y - 3.0, area.width + 6.0, area.height + 6.0);
+            painting.shapes.push(ShapeRun { bounds: glow, radius: radius + 3.0 * canvas.scale, fill: with_alpha(color, 0.16), border: None });
+        }
+        let fill = match (refusal, lit) {
+            (Some(_), _) => 0.05,
+            (None, true) => 0.34,
+            (None, false) => 0.14,
+        };
+        let edge = match (refusal, lit) {
+            (Some(_), _) => 0.25,
+            (None, true) => 1.0,
+            (None, false) => 0.6,
+        };
+        painting.shapes.push(ShapeRun { bounds, radius, fill: with_alpha(color, fill), border: None });
+        let width = 1.5 * canvas.scale;
+        // The shelf only holds on to where files are, which a dashed edge suggests.
+        let dash = (zone == Zone::Shelf).then_some(4.0);
+        painting.outlines.push(OutlineRun { bounds, radius, width, color: with_alpha(color, edge), fraction: 1.0, dash, open_top: false });
+
+        let opacity = if refusal.is_some() { 0.4 } else { 1.0 };
+        let icon = canvas.bounds(area.x, area.y + 16.0, area.width, 34.0);
+        painting.texts.push(TextRun { opacity, ..canvas.icon(glyph(zone_icon(zone)), icon, 22.0) });
+        let label = canvas.bounds(area.x + 6.0, area.y + 56.0, area.width - 12.0, 20.0);
+        painting.texts.push(canvas.text(zone.label(), label, 13.0, true, opacity, Align::Center));
+        let hint = refusal.unwrap_or(match zone {
+            Zone::Shelf => "Sonra sürükle",
+            Zone::Phone => "QR kod ile",
+            Zone::Convert => "JPG, PNG, küçült",
+        });
+        let note = canvas.bounds(area.x + 6.0, area.y + 78.0, area.width - 12.0, 18.0);
+        painting.texts.push(canvas.text(hint, note, 11.0, false, 0.6 * opacity, Align::Center));
+    }
+    painting
+}
+
+/// The files kept on the shelf, a few at a time.
+fn shelf_panel<'a>(view: &'a ShelfView, canvas: &Canvas) -> Painting<'a> {
+    let mut painting = Painting::default();
+    let title = canvas.bounds(24.0, SHELF_CLEAR.y, 220.0, SHELF_CLEAR.height);
+    painting.texts.push(canvas.text(&view.title, title, 14.0, true, 1.0, Align::Leading));
+    let clear = canvas.rect(SHELF_CLEAR);
+    painting.bars.push(BarRun { bounds: clear, opacity: 0.14 });
+    painting.texts.push(canvas.text("Temizle", clear, 12.0, true, 1.0, Align::Center));
+
+    for (slot, item) in view.items.iter().enumerate() {
+        let picture = thumbnail(slot);
+        match &item.thumbnail {
+            Some(encoded) => painting.images.push(ImageRun {
+                encoded,
+                x: picture.x * canvas.scale,
+                y: picture.y * canvas.scale,
+                size: picture.width * canvas.scale,
+                radius: 10.0 * canvas.scale,
+            }),
+            None => {
+                let bounds = canvas.rect(picture);
+                painting.shapes.push(ShapeRun { bounds, radius: 10.0 * canvas.scale, fill: [1.0, 1.0, 1.0, 0.1], border: None });
+                let folder = !item.name.contains('.');
+                painting.texts.push(canvas.icon(if folder { ICON_FOLDER } else { ICON_DOCUMENT }, bounds, 24.0));
+            }
+        }
+        painting.texts.push(canvas.text(&item.name, canvas.rect(tile_name(slot)), 11.0, false, 0.8, Align::Center));
+        let cross = canvas.rect(remove_button(slot));
+        painting.shapes.push(ShapeRun { bounds: cross, radius: cross.width / 2.0, fill: [0.24, 0.24, 0.26, 1.0], border: Some(([0.0, 0.0, 0.0, 1.0], canvas.scale)) });
+        painting.texts.push(canvas.icon(ICON_CLOSE, cross, 8.0));
+    }
+
+    if view.total > SHELF_TILES {
+        let back = view.first > 0;
+        let forward = view.first + SHELF_TILES < view.total;
+        painting.texts.push(TextRun { opacity: if back { 1.0 } else { 0.3 }, ..canvas.icon(ICON_BACK, canvas.rect(SHELF_BACK), 12.0) });
+        painting.texts.push(TextRun { opacity: if forward { 1.0 } else { 0.3 }, ..canvas.icon(ICON_FORWARD, canvas.rect(SHELF_FORWARD), 12.0) });
+        let place = canvas.bounds(SHELF_BACK.x + SHELF_BACK.width, SHELF_BACK.y, SHELF_FORWARD.x - SHELF_BACK.x - SHELF_BACK.width, SHELF_BACK.height);
+        painting.texts.push(canvas.text(&view.page, place, 11.5, false, 0.6, Align::Center));
+    }
+    painting
+}
+
+/// The formats pictures can be saved in.
+fn convert_panel<'a>(view: &'a ConvertView, canvas: &Canvas) -> Painting<'a> {
+    let mut painting = Painting::default();
+    painting.texts.push(canvas.text(&view.header, canvas.rect(HEADER), 13.0, true, 0.9, Align::Center));
+    let opacity = if view.busy { 0.4 } else { 1.0 };
+    for target in Target::ALL {
+        let area = target.bounds();
+        let bounds = canvas.rect(area);
+        painting.shapes.push(ShapeRun { bounds, radius: 14.0 * canvas.scale, fill: with_alpha(CONVERT_COLOR, 0.16 * opacity), border: None });
+        let label = canvas.bounds(area.x, area.y + 16.0, area.width, 26.0);
+        painting.texts.push(canvas.text(target.label(), label, 17.0, true, opacity, Align::Center));
+        let hint = canvas.bounds(area.x + 4.0, area.y + 46.0, area.width - 8.0, 18.0);
+        painting.texts.push(canvas.text(target.hint(), hint, 11.0, false, 0.6 * opacity, Align::Center));
+    }
+    let note = if view.busy { "Dönüştürülüyor…" } else { "Yeni dosya aslının yanına kaydedilir" };
+    painting.texts.push(canvas.text(note, canvas.rect(CONVERT_NOTE), 11.5, false, 0.6, Align::Center));
+    painting
+}
+
 /// Converts layout written in DIPs to the pixels the surface is drawn in.
 struct Canvas {
     scale: f32,
     width: f32,
     height: f32,
     corner: f32,
+    notch: bool,
 }
 
 impl Canvas {
+    fn rect(&self, rect: Rect) -> Bounds {
+        self.bounds(rect.x, rect.y, rect.width, rect.height)
+    }
+
     fn bounds(&self, x: f32, y: f32, width: f32, height: f32) -> Bounds {
         let scale = self.scale;
         Bounds { x: x * scale, y: y * scale, width: width * scale, height: height * scale }

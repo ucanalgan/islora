@@ -6,6 +6,7 @@ pub mod clock_timers;
 pub mod drives;
 pub mod focus;
 pub mod fullscreen;
+pub mod imaging;
 pub mod keys;
 pub mod media;
 pub mod network;
@@ -13,6 +14,7 @@ pub mod power;
 pub mod privacy;
 mod registry;
 pub mod screenshots;
+pub mod sharing;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 

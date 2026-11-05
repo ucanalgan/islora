@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::media::MediaSnapshot;
+use crate::transfer::TransferView;
 
 /// Milliseconds on a monotonic clock supplied by the caller.
 pub type Millis = u64;
@@ -12,12 +13,16 @@ pub enum Kind {
     Notification,
     TimerFinished,
     NowPlaying,
+    /// Files on their way to a phone, which the user is waiting on.
+    Transfer,
     Media,
     Camera,
     Focus,
     TimerRunning,
     ClockTimer,
     Upcoming,
+    /// Files kept on the shelf. Only ever a bubble, never the pill.
+    Shelf,
 }
 
 impl Kind {
@@ -54,6 +59,11 @@ pub enum Icon {
     Usb,
     Monitor,
     Clipboard,
+    Phone,
+    Shelf,
+    Convert,
+    Check,
+    Warning,
 }
 
 /// What an activity shows when it only gets the small bubble beside the pill.
@@ -103,6 +113,10 @@ pub struct Activity {
     pub preview: Option<Arc<[u8]>>,
     /// A file that a click on the alert opens.
     pub file: Option<String>,
+    /// Shows `file` in its folder on a click, instead of opening it.
+    pub reveal: bool,
+    /// Files on their way to a phone.
+    pub transfer: Option<TransferView>,
     /// A small confirmation, which uses the compact pill instead of an alert.
     pub brief: bool,
 }
@@ -125,6 +139,8 @@ impl Activity {
             timer: None,
             preview: None,
             file: None,
+            reveal: false,
+            transfer: None,
             brief: false,
         }
     }

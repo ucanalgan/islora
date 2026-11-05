@@ -1,15 +1,21 @@
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use island_core::clock_timer::{self, ClockTimer};
 use island_core::config;
+use island_core::convert::Target;
+use island_core::drop::{DropView, ShelfHit, Zone, on_transfer_stop, shelf_hit};
+use island_core::files::{DroppedFile, file_name, summary};
 use island_core::focus::{
     CHANGE_WAIT_MS, FocusReport, FocusStatus, FocusTracker, START_WAIT_MS,
 };
 use island_core::ics::{self, Event};
 use island_core::media::RepeatMode;
+use island_core::qr::QrMatrix;
+use island_core::transfer::{Stage, Transfer, WAIT_MS};
 use island_core::layout::{
     TIMER_PRESETS, on_event_hide, on_home_shortcut, on_progress_bar, on_settings_shortcut,
     preset_at, progress_fraction,
@@ -18,9 +24,9 @@ use island_core::settings_view::{
     Action, NOTICES, Page, SettingsState, is_calendar_address, stepped_preset, toggled_notice,
 };
 use island_core::{
-    Activity, CalendarState, FocusView, Frame, FullscreenWatch, Indicator, Island, IslandStyle,
-    Kind, Material, MediaButton, MediaSnapshot, Millis, Pill, Presentation, StartMode, Suppression,
-    SystemTracker, TimerButton, Upcoming,
+    Activity, CalendarState, FocusView, Frame, FullscreenWatch, Icon, Indicator, Island, IslandStyle,
+    Kind, Material, MediaButton, MediaSnapshot, Millis, PanelView, Pill, Presentation, ProgressStyle,
+    StartMode, Suppression, SystemTracker, TimerButton, Upcoming,
 };
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -31,6 +37,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
+use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     VIRTUAL_KEY, VK_ESCAPE, VK_SHIFT,
@@ -45,7 +52,7 @@ use crate::platform::settings_window::{
 };
 use crate::platform::tray::{self, Command, MSG_TRAY, Tray};
 use crate::platform::window::{self, Placement};
-use crate::platform::{autostart, hotkey, settings};
+use crate::platform::{autostart, drop_target, hotkey, settings, shell};
 use crate::render::{self, ClockText, Renderer, WaveMotion};
 use crate::sources::audio::{AudioWatch, DEVICE_MICROPHONE, MSG_AUDIO_DEVICE};
 use crate::sources::bluetooth::BluetoothWatch;
@@ -54,9 +61,11 @@ use crate::sources::clock_timers::{ClockTimerWatch, MSG_CLOCK_TIMERS};
 use crate::sources::drives::Drives;
 use crate::sources::focus::{self, FocusWatch, MSG_FOCUS, MSG_FOCUS_REFUSED};
 use crate::sources::fullscreen::{self, MSG_APPBAR, MSG_FRONT_CHANGED, MSG_WINDOW_DRAG, Presence};
+use crate::sources::imaging::{Imaging, MSG_IMAGING, Made};
 use crate::sources::media::{MSG_MEDIA, MediaSource};
 use crate::sources::power::{self, PowerEvent, PowerWatch};
 use crate::sources::privacy::{CameraWatch, MSG_CAMERA};
+use crate::sources::sharing::{self, MSG_SHARING, SharedFile, Sharing, SharingEvent};
 use crate::sources::keys::KeyEvent;
 use crate::sources::{IndicatorSink, MSG_INDICATOR, clipboard, keys, network, screenshots};
 
@@ -74,6 +83,7 @@ const TIMER_FOCUS_CHECK: usize = 9;
 const TIMER_CLOCK: usize = 10;
 const TIMER_LANGUAGE: usize = 11;
 const TIMER_FULLSCREEN: usize = 12;
+const TIMER_DRAG_LEAVE: usize = 13;
 
 /// When the pill looks settled. The compositor's own completion event only
 /// fires about 1.2 s after an animation starts, long after it visibly stopped.
@@ -102,6 +112,22 @@ const LANGUAGE_SETTLE_MS: u32 = 300;
 const FULLSCREEN_SETTLE_MS: u32 = 200;
 
 const NOTIFICATION_MS: Millis = 3_000;
+/// A converted picture can be shown in its folder, which takes a moment to decide.
+const CONVERTED_MS: Millis = 6_000;
+/// Moving from the top edge onto the panel leaves one window for the other,
+/// which must not close the panel in between.
+const DRAG_LEAVE_MS: u32 = 150;
+/// Pictures of files on the shelf, in DIPs, a little over what is drawn.
+const THUMBNAIL_DIPS: f32 = 72.0;
+
+static DROP_HANDLERS: drop_target::Handlers = drop_target::Handlers {
+    enter: |files, point| with_app(|app| app.on_drag_enter(files, point)).unwrap_or(false),
+    over: |point| with_app(|app| app.on_drag_over(point)).unwrap_or(false),
+    leave: || {
+        with_app(App::on_drag_leave);
+    },
+    drop: |point| with_app(|app| app.on_drop(point)).unwrap_or(false),
+};
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
@@ -123,7 +149,18 @@ enum OpenView {
     Focus,
     Event,
     Home,
+    Transfer,
+    Drop,
+    Shelf,
+    Convert,
     Other,
+}
+
+impl OpenView {
+    /// Views of an activity have a way to the home view in their corner.
+    fn has_home_shortcut(self) -> bool {
+        matches!(self, OpenView::Media | OpenView::Timer | OpenView::Focus | OpenView::Event | OpenView::Other)
+    }
 }
 
 struct App {
@@ -177,6 +214,22 @@ struct App {
     seekable_ms: Option<u64>,
     /// The file behind the alert on screen, which a click on it opens.
     alert_file: Option<String>,
+    /// Whether that click shows the file in its folder instead.
+    alert_reveals: bool,
+    /// Pictures just converted, which "show" selects in their folder.
+    converted: Vec<String>,
+    /// What is being dragged over the island, read when it arrived.
+    dragged: Vec<DroppedFile>,
+    drop_view: Option<DropView>,
+    /// The island itself is dragging files out, which it must not take back.
+    dragging_out: bool,
+    /// A file on the shelf under a pressed button, with where the press began.
+    pressed_file: Option<(usize, i32, i32)>,
+    /// Pictures waiting for a choice of format.
+    to_convert: Vec<String>,
+    sharing: Option<Sharing>,
+    imaging: Imaging,
+    progress_style: ProgressStyle,
     /// Which of the two optional buttons the player on screen offers.
     offers_shuffle: bool,
     offers_repeat: bool,
@@ -210,6 +263,9 @@ pub fn run() -> Result<()> {
         window::exclude_from_capture(island_window);
     }
     let edge_window = window::create_edge(Some(edge_proc))?;
+    for target in [island_window, edge_window] {
+        optional("drop", drop_target::register(target, &DROP_HANDLERS));
+    }
     let placement = window::place(island_window, edge_window, stored_style())?;
     let sound_wave = match argument_after("--wave").as_deref() {
         Some("still") => false,
@@ -299,6 +355,16 @@ pub fn run() -> Result<()> {
         shown_bubble: false,
         seekable_ms: None,
         alert_file: None,
+        alert_reveals: false,
+        converted: Vec::new(),
+        dragged: Vec::new(),
+        drop_view: None,
+        dragging_out: false,
+        pressed_file: None,
+        to_convert: Vec::new(),
+        sharing: None,
+        imaging: Imaging::new(island_window),
+        progress_style: stored_progress_style(),
         offers_shuffle: false,
         offers_repeat: false,
         scrub: None,
@@ -308,6 +374,25 @@ pub fn run() -> Result<()> {
     app.apply_material();
     if std::env::args().any(|a| a == "--demo") {
         app.toggle_demo();
+    }
+    // Tests send a file as if it were dropped, to this computer only.
+    if let Some(path) = argument_after("--send-file") {
+        let size = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
+        app.send_to_phone(vec![DroppedFile { path, size, is_folder: false }]);
+    }
+    // Tests convert a picture as if it were dropped and a format chosen.
+    if let Some(path) = argument_after("--convert-file") {
+        let target = match argument_after("--convert-to").as_deref() {
+            Some("png") => Target::Png,
+            Some("smaller") => Target::Smaller,
+            _ => Target::Jpg,
+        };
+        app.to_convert = vec![path];
+        app.start_convert(target);
+    }
+    // One still view of the drop panel and what follows it, for screenshots.
+    if let Some(step) = argument_after("--demo-drop").and_then(|step| step.parse().ok()) {
+        app.show_drop_demo(step);
     }
     if std::env::args().any(|a| a == "--demo-indicators") {
         app.indicator_demo_step = Some(0);
@@ -356,6 +441,10 @@ impl App {
     fn refresh(&mut self) {
         let now = self.now();
         let frame = self.island.frame(now);
+        // The code timed out, or the view with it was closed.
+        if self.sharing.is_some() && self.island.transfer_stage().is_none() {
+            self.sharing = None;
+        }
         if let Err(error) = self.present(&frame, now) {
             eprintln!("present failed: {error}");
         }
@@ -385,6 +474,10 @@ impl App {
         let media = frame.activity.as_ref().and_then(|activity| activity.media.as_ref());
         self.open_view = match &frame.activity {
             _ if frame.home.is_some() => OpenView::Home,
+            _ if matches!(frame.panel, Some(PanelView::Drop(_))) => OpenView::Drop,
+            _ if matches!(frame.panel, Some(PanelView::Shelf(_))) => OpenView::Shelf,
+            _ if matches!(frame.panel, Some(PanelView::Convert(_))) => OpenView::Convert,
+            Some(activity) if activity.kind == Kind::Transfer => OpenView::Transfer,
             Some(activity) if activity.media.is_some() => OpenView::Media,
             Some(activity) if activity.kind == Kind::Focus => OpenView::Focus,
             Some(activity) if activity.kind == Kind::Upcoming => OpenView::Event,
@@ -393,6 +486,7 @@ impl App {
         };
         self.seekable_ms = media.filter(|media| media.can_seek && media.duration_ms > 0).map(|media| media.duration_ms);
         self.alert_file = frame.activity.as_ref().and_then(|activity| activity.file.clone());
+        self.alert_reveals = frame.activity.as_ref().is_some_and(|activity| activity.reveal);
         self.offers_shuffle = media.is_some_and(|media| media.shuffle.is_some());
         self.offers_repeat = media.is_some_and(|media| media.repeat.is_some());
         let expanded = frame.presentation == Presentation::Expanded;
@@ -485,6 +579,10 @@ impl App {
                 self.cancel_timer(TIMER_LANGUAGE);
                 self.check_language();
             }
+            TIMER_DRAG_LEAVE => {
+                self.cancel_timer(TIMER_DRAG_LEAVE);
+                self.end_drag();
+            }
             TIMER_FULLSCREEN => {
                 self.cancel_timer(TIMER_FULLSCREEN);
                 self.fullscreen.front_changed(fullscreen::desktop_in_front());
@@ -532,11 +630,15 @@ impl App {
             return;
         }
         if let Some(file) = self.alert_file.take() {
-            screenshots::open(file);
+            if self.alert_reveals {
+                shell::reveal(std::mem::take(&mut self.converted));
+            } else {
+                screenshots::open(file);
+            }
         }
         if self.shown == Presentation::Expanded {
             let (pill_x, pill_y) = self.to_expanded_pill(x, y);
-            if self.open_view != OpenView::Home && on_home_shortcut(pill_x, pill_y) {
+            if self.open_view.has_home_shortcut() && on_home_shortcut(pill_x, pill_y) {
                 self.island.open_home();
                 self.refresh();
                 return;
@@ -601,6 +703,43 @@ impl App {
                             settings::remember("start_mode", mode.setting());
                             self.refresh();
                         }
+                        return;
+                    }
+                }
+                OpenView::Transfer => {
+                    let sending = matches!(self.island.transfer_stage(), Some(Stage::Waiting { .. } | Stage::Sending { .. }));
+                    if sending && on_transfer_stop(pill_x, pill_y) {
+                        self.island.cancel_transfer();
+                        self.sharing = None;
+                        self.refresh();
+                        return;
+                    }
+                }
+                OpenView::Drop => return,
+                OpenView::Shelf => {
+                    let shelf = self.island.shelf();
+                    match shelf_hit(pill_x, pill_y, shelf.first(), shelf.len()) {
+                        Some(ShelfHit::File(index)) => {
+                            self.pressed_file = Some((index, x, y));
+                            unsafe { SetCapture(self.island_window) };
+                            return;
+                        }
+                        Some(ShelfHit::Remove(index)) => self.island.remove_from_shelf(index),
+                        Some(ShelfHit::Clear) => self.island.clear_shelf(),
+                        Some(ShelfHit::Back) => self.island.scroll_shelf(-1),
+                        Some(ShelfHit::Forward) => self.island.scroll_shelf(1),
+                        None => {
+                            self.island.click(now);
+                            self.refresh();
+                            return;
+                        }
+                    }
+                    self.refresh();
+                    return;
+                }
+                OpenView::Convert => {
+                    if let Some(target) = Target::at(pill_x, pill_y) {
+                        self.start_convert(target);
                         return;
                     }
                 }
@@ -828,6 +967,7 @@ impl App {
 
     fn reload(&mut self) {
         apply_settings(&mut self.island);
+        self.progress_style = stored_progress_style();
         self.notices_off = stored_notices_off();
         self.calendar.refresh();
         self.sound_wave = stored_sound_wave();
@@ -871,6 +1011,7 @@ impl App {
             page,
             material: self.material,
             style: self.placement.style,
+            progress: self.progress_style,
             sound_wave: self.sound_wave,
             notices_off: self.notices_off.clone(),
             presets: self.island.presets(),
@@ -913,6 +1054,12 @@ impl App {
             Action::Open(chosen) => page = chosen,
             Action::Material(material) => self.choose_material(material),
             Action::Style(style) => self.choose_style(style),
+            Action::Progress(style) => {
+                self.progress_style = style;
+                settings::remember("progress_style", style.setting());
+                self.island.set_progress_style(style);
+                self.refresh();
+            }
             Action::SoundWave => {
                 self.sound_wave = !self.sound_wave;
                 settings::remember("sound_wave", if self.sound_wave { "on" } else { "off" });
@@ -1029,6 +1176,13 @@ impl App {
 
     /// Jumps on release only, so a drag sends the player a single command.
     fn on_button_up(&mut self, x: i32) {
+        if let Some((index, ..)) = self.pressed_file.take() {
+            let _ = unsafe { ReleaseCapture() };
+            if let Some(item) = self.island.shelf().items().get(index) {
+                shell::open(&item.path);
+            }
+            return;
+        }
         if self.scrub.take().is_none() {
             return;
         }
@@ -1057,6 +1211,7 @@ impl App {
     }
 
     fn on_capture_lost(&mut self) {
+        self.pressed_file = None;
         if self.scrub.take().is_some() {
             self.settle_hover();
             self.refresh();
@@ -1076,14 +1231,241 @@ impl App {
         self.refresh();
     }
 
-    fn on_pointer_moved(&mut self, x: i32) {
+    /// Returns files to drag out of the island, once a press on the shelf
+    /// has moved far enough to be a drag.
+    fn on_pointer_moved(&mut self, x: i32, y: i32) -> Option<Vec<String>> {
+        if let Some((index, start_x, start_y)) = self.pressed_file {
+            let (reach_x, reach_y) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+            if (x - start_x).abs() > reach_x || (y - start_y).abs() > reach_y {
+                self.pressed_file = None;
+                let _ = unsafe { ReleaseCapture() };
+                let path = self.island.shelf().items().get(index)?.path.clone();
+                self.dragging_out = true;
+                return Some(vec![path]);
+            }
+            return None;
+        }
         if self.scrub.is_some() {
             let (pill_x, _) = self.to_expanded_pill(x, 0);
             self.scrub = Some(progress_fraction(pill_x));
             self.refresh();
-            return;
+            return None;
         }
         self.track_pointer();
+        None
+    }
+
+    /// Files dragged out may have been moved, which the shelf then forgets.
+    fn after_drag_out(&mut self) {
+        self.dragging_out = false;
+        self.island.forget_missing(|path| std::path::Path::new(path).exists());
+        self.settle_hover();
+        self.refresh();
+    }
+
+    fn on_drag_enter(&mut self, files: Vec<DroppedFile>, point: POINT) -> bool {
+        if self.dragging_out || self.island.is_suppressed() {
+            return false;
+        }
+        self.cancel_timer(TIMER_DRAG_LEAVE);
+        if self.drop_view.is_none() || self.dragged != files {
+            self.drop_view = Some(DropView::for_files(&files));
+            self.dragged = files;
+            if let Some(view) = &self.drop_view {
+                self.island.drag_over(view.clone());
+            }
+            self.refresh();
+        }
+        self.on_drag_over(point)
+    }
+
+    /// Lights the zone under the pointer, and says whether it takes the files.
+    fn on_drag_over(&mut self, point: POINT) -> bool {
+        let zone = self.zone_at(point);
+        let Some(view) = &mut self.drop_view else { return false };
+        if view.hovered != zone {
+            view.hovered = zone;
+            self.island.drag_over(view.clone());
+            self.refresh();
+        }
+        zone.is_some()
+    }
+
+    fn zone_at(&self, point: POINT) -> Option<Zone> {
+        let view = self.drop_view.as_ref()?;
+        let mut client = point;
+        let _ = unsafe { ScreenToClient(self.island_window, &mut client) };
+        let (x, y) = self.to_expanded_pill(client.x, client.y);
+        view.accepting(x, y)
+    }
+
+    fn on_drag_leave(&mut self) {
+        if self.drop_view.is_some() {
+            self.set_timer(TIMER_DRAG_LEAVE, DRAG_LEAVE_MS);
+        }
+    }
+
+    fn end_drag(&mut self) {
+        self.drop_view = None;
+        self.dragged.clear();
+        self.island.drag_ended();
+        self.refresh();
+    }
+
+    fn on_drop(&mut self, point: POINT) -> bool {
+        self.cancel_timer(TIMER_DRAG_LEAVE);
+        let zone = self.zone_at(point);
+        let files = std::mem::take(&mut self.dragged);
+        self.drop_view = None;
+        self.island.drag_ended();
+        let now = self.now();
+        match zone {
+            Some(Zone::Shelf) => {
+                let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+                let added = self.island.drop_on_shelf(&paths, now);
+                let size = (THUMBNAIL_DIPS * self.placement.scale).ceil() as i32;
+                self.imaging.thumbnails(added, size);
+            }
+            Some(Zone::Phone) => self.send_to_phone(files),
+            Some(Zone::Convert) => {
+                let pictures: Vec<DroppedFile> = files.into_iter().filter(DroppedFile::is_image).collect();
+                self.to_convert = pictures.iter().map(|file| file.path.clone()).collect();
+                self.island.open_convert(summary(&pictures), now);
+            }
+            None => {}
+        }
+        self.refresh();
+        zone.is_some()
+    }
+
+    fn send_to_phone(&mut self, files: Vec<DroppedFile>) {
+        let files: Vec<DroppedFile> = files.into_iter().filter(|file| !file.is_folder).collect();
+        if files.is_empty() {
+            return;
+        }
+        // Tests reach the server from this computer, which needs no firewall rule.
+        let loopback = std::env::args().any(|a| a == "--share-loopback");
+        let network = if loopback { Some(sharing::loopback()) } else { sharing::local_network() };
+        let Some(network) = network else {
+            self.notify("Telefona gönderilemedi", "Bilgisayar bir ağa bağlı değil", Icon::Warning);
+            return;
+        };
+        // One send at a time: a new one takes over from the last.
+        self.sharing = None;
+        let shared = files
+            .iter()
+            .map(|file| SharedFile { path: file.path.clone(), name: file.name().to_owned(), size: file.size })
+            .collect();
+        let started = Sharing::start(self.island_window, shared, network.address);
+        if loopback && let Ok(sharing) = &started {
+            eprintln!("sharing at {}", sharing.url);
+        }
+        let Some((sharing, code)) = started.ok().and_then(|sharing| {
+            let code = QrMatrix::encode(&sharing.url)?;
+            Some((sharing, code))
+        }) else {
+            self.notify("Telefona gönderilemedi", "Bağlantı açılamadı", Icon::Warning);
+            return;
+        };
+        let name = match files.as_slice() {
+            [only] => only.name().to_owned(),
+            several => format!("{} dosya", several.len()),
+        };
+        self.island.start_transfer(Transfer {
+            name,
+            summary: summary(&files),
+            total: files.iter().map(|file| file.size).sum(),
+            code: Arc::new(code),
+            network: sharing::describe(&network),
+            warning: network.public.then(|| "Ortak ağ: telefon ulaşamayabilir".to_owned()),
+            stage: Stage::Waiting { until: self.now() + WAIT_MS },
+        });
+        self.sharing = Some(sharing);
+    }
+
+    fn on_sharing(&mut self) {
+        let Some(events) = self.sharing.as_ref().map(Sharing::events) else { return };
+        let now = self.now();
+        for event in events {
+            match event {
+                SharingEvent::Progress(sent) => self.island.transfer_progress(sent),
+                SharingEvent::BrokeOff => self.island.transfer_broke_off(now),
+                SharingEvent::Done => {
+                    self.island.transfer_done(now);
+                    self.sharing = None;
+                    if let Err(error) = self.renderer.bounce() {
+                        eprintln!("bounce failed: {error}");
+                    }
+                }
+                SharingEvent::Expired => {
+                    self.island.cancel_transfer();
+                    self.sharing = None;
+                }
+            }
+        }
+        self.refresh();
+    }
+
+    fn start_convert(&mut self, target: Target) {
+        if self.to_convert.is_empty() {
+            return;
+        }
+        self.island.set_converting(true);
+        self.imaging.convert(std::mem::take(&mut self.to_convert), target);
+        self.refresh();
+    }
+
+    fn on_imaging(&mut self) {
+        for made in self.imaging.results() {
+            match made {
+                Made::Thumbnail { path, picture } => self.island.set_thumbnail(&path, picture),
+                Made::Converted(done) => {
+                    self.island.set_converting(false);
+                    self.island.close_views();
+                    let now = self.now();
+                    match done.outputs.first() {
+                        Some(first) => {
+                            let title = match done.outputs.len() {
+                                1 => "Dönüştürüldü".to_owned(),
+                                count => format!("{count} görsel dönüştürüldü"),
+                            };
+                            let detail = match &done.failure {
+                                Some(reason) => format!("{} · {reason}", file_name(first)),
+                                None => file_name(first).to_owned(),
+                            };
+                            self.island.upsert(Activity {
+                                title,
+                                detail,
+                                icon: Some(Icon::Convert),
+                                preview: done.preview.clone(),
+                                file: Some(first.clone()),
+                                reveal: true,
+                                expires_at: Some(now + CONVERTED_MS),
+                                ..Activity::new(Kind::Notification)
+                            });
+                            self.converted = done.outputs;
+                        }
+                        None => {
+                            let reason = done.failure.unwrap_or_else(|| "Dönüştürülemedi".to_owned());
+                            self.notify("Dönüştürülemedi", &reason, Icon::Warning);
+                        }
+                    }
+                }
+            }
+        }
+        self.refresh();
+    }
+
+    fn notify(&mut self, title: &str, detail: &str, icon: Icon) {
+        let now = self.now();
+        self.island.upsert(Activity {
+            title: title.to_owned(),
+            detail: detail.to_owned(),
+            icon: Some(icon),
+            expires_at: Some(now + NOTIFICATION_MS),
+            ..Activity::new(Kind::Notification)
+        });
+        self.refresh();
     }
 
     fn track_pointer(&mut self) {
@@ -1268,6 +1650,83 @@ impl App {
         }
     }
 
+    /// Shows one view of the drop panel, the shelf, a conversion or a send,
+    /// with made-up files. Nothing is sent: the code leads nowhere.
+    fn show_drop_demo(&mut self, step: u32) {
+        let now = self.now();
+        let file = |path: &str, size| DroppedFile { path: path.into(), size, is_folder: false };
+        let photo = file(r"C:\Demo\Kapadokya.jpg", 2_516_582);
+        let report = file(r"C:\Demo\Rapor.pdf", 1_048_576);
+        // The pointer is said to rest on the island, which keeps every view open.
+        self.island.set_hovered(true, now);
+        match step {
+            0..=2 => {
+                let files = if step == 2 { vec![report] } else { vec![photo] };
+                let mut view = DropView::for_files(&files);
+                view.hovered = match step {
+                    1 => Some(Zone::Phone),
+                    2 => Some(Zone::Shelf),
+                    _ => None,
+                };
+                self.island.drag_over(view);
+            }
+            3 | 4 | 13 => {
+                let mut paths = demo_pictures(if step == 4 { 6 } else { 2 });
+                paths.push(report.path.clone());
+                let added = self.island.drop_on_shelf(&paths, now);
+                self.imaging.thumbnails(added, (THUMBNAIL_DIPS * self.placement.scale).ceil() as i32);
+                if step == 13 {
+                    self.island.close_views();
+                }
+            }
+            5 => self.island.open_convert(summary(std::slice::from_ref(&photo)), now),
+            6..=11 => {
+                let code = QrMatrix::encode("http://192.168.1.20:52731/q7m2k4vx9pd3hz6tbw5n");
+                let Some(code) = code else { return };
+                self.island.start_transfer(Transfer {
+                    name: photo.name().to_owned(),
+                    summary: summary(std::slice::from_ref(&photo)),
+                    total: photo.size,
+                    code: Arc::new(code),
+                    network: "Wi-Fi · Ev".into(),
+                    warning: (step == 6).then(|| "Ortak ağ: telefon ulaşamayabilir".to_owned()),
+                    stage: Stage::Waiting { until: now + WAIT_MS },
+                });
+                let (style, permille) = match step {
+                    7 => (ProgressStyle::Ring, 400),
+                    8 => (ProgressStyle::Edge, 600),
+                    9 => (ProgressStyle::Fill, 750),
+                    11 => (self.progress_style, 640),
+                    _ => (self.progress_style, 0),
+                };
+                self.island.set_progress_style(style);
+                if permille > 0 {
+                    self.island.transfer_progress(photo.size * permille / 1000);
+                }
+                if step == 10 {
+                    // Done stays for long enough to be photographed.
+                    self.island.transfer_done(now + 60_000);
+                }
+                if step == 11 {
+                    self.island.close_views();
+                }
+            }
+            12 => {
+                self.island.upsert(Activity {
+                    title: "Dönüştürüldü".into(),
+                    detail: "Kapadokya.png".into(),
+                    icon: Some(Icon::Convert),
+                    file: Some(r"C:\Demo\Kapadokya.png".into()),
+                    reveal: true,
+                    expires_at: Some(now + 60_000),
+                    ..Activity::new(Kind::Notification)
+                });
+            }
+            _ => {}
+        }
+        self.refresh();
+    }
+
     fn toggle_demo(&mut self) {
         if self.demo_step.take().is_some() {
             self.cancel_timer(TIMER_DEMO);
@@ -1322,6 +1781,20 @@ impl App {
         }
         self.refresh();
     }
+}
+
+/// Pictures Windows ships with, which stand in for the user's own files.
+fn demo_pictures(count: usize) -> Vec<String> {
+    let folders = [r"C:\Windows\Web\Wallpaper\Windows", r"C:\Windows\Web\Screen", r"C:\Windows\Web\4K\Wallpaper\Windows"];
+    let mut pictures: Vec<String> = folders
+        .iter()
+        .filter_map(|folder| std::fs::read_dir(folder).ok())
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path().to_string_lossy().into_owned()))
+        .filter(|path| island_core::files::is_image(path))
+        .collect();
+    pictures.truncate(count);
+    pictures
 }
 
 fn demo_track(title: &str, playing: bool, now: Millis) -> MediaSnapshot {
@@ -1386,8 +1859,13 @@ fn ask_running_copy_for_settings() {
     }
 }
 
+fn stored_progress_style() -> ProgressStyle {
+    settings::read().map(|text| config::read_progress_style(&text)).unwrap_or_default()
+}
+
 fn apply_settings(island: &mut Island) {
     let text = settings::read().unwrap_or_default();
+    island.set_progress_style(config::read_progress_style(&text));
     island.set_presets(config::read_presets(&text).unwrap_or(TIMER_PRESETS));
     island.set_track_notices(!config::read_notices_off(&text).iter().any(|name| name == "track_change"));
     if let Some(mode) = config::read_start_mode(&text) {
@@ -1434,11 +1912,24 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             with_app(App::on_capture_lost);
         }
         WM_MOUSEMOVE => {
-            let (x, _) = pointer_position(lparam);
-            with_app(|app| app.on_pointer_moved(x));
+            let (x, y) = pointer_position(lparam);
+            if let Some(Some(paths)) = with_app(|app| app.on_pointer_moved(x, y)) {
+                // The drag runs its own loop, during which the app must be free
+                // to answer the messages that arrive.
+                if let Err(error) = shell::drag_out(hwnd, &paths) {
+                    eprintln!("drag out failed: {error}");
+                }
+                with_app(App::after_drag_out);
+            }
         }
         WM_MOUSELEAVE => {
             with_app(App::on_pointer_left);
+        }
+        MSG_SHARING => {
+            with_app(App::on_sharing);
+        }
+        MSG_IMAGING => {
+            with_app(App::on_imaging);
         }
         WM_TIMER => {
             with_app(|app| app.on_timer(wparam.0));

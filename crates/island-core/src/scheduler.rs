@@ -1,8 +1,11 @@
 use crate::activity::{Activity, Bubble, Icon, Kind, Millis, TimerView};
-use crate::layout::{StartMode, TIMER_PRESETS};
+use crate::drop::DropView;
+use crate::layout::{ProgressStyle, StartMode, TIMER_PRESETS};
 use crate::media::{MediaSnapshot, PAUSED_LINGER_MS, TRACK_NOTICE_MS};
 use crate::schedule::{EVENT_LEAD_MS, Upcoming};
+use crate::shelf::{Shelf, ShelfView};
 use crate::timer::Timer;
+use crate::transfer::{DONE_MS, Stage, Transfer, WAIT_MS};
 
 /// How long the clock stays up after a peek with nothing else to show.
 pub const PEEK_MS: Millis = 3_000;
@@ -20,6 +23,10 @@ const CLOCK_TIMER_DONE_MS: Millis = 8_000;
 const END_GRACE_MS: Millis = 3_000;
 /// How many coming events the home view lists.
 const HOME_EVENTS: usize = 2;
+/// How long a view opened by a drop stays without the pointer on it. The
+/// pointer is on the island when the files land, but Windows only says so once
+/// it moves again.
+const DROP_VIEW_MS: Millis = 6_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Presentation {
@@ -71,6 +78,30 @@ pub enum FocusView {
     Paused { remaining: Millis, total: Millis, on_break: bool },
 }
 
+/// The choice of format for pictures dropped to be converted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConvertView {
+    pub header: String,
+    /// A conversion is running, so the choices wait.
+    pub busy: bool,
+}
+
+/// A view that a drop opened, which stays until it is closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Panel {
+    Shelf,
+    Convert(ConvertView),
+}
+
+/// What the expanded pill shows instead of an activity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PanelView {
+    /// Files are being dragged over the island.
+    Drop(DropView),
+    Shelf(ShelfView),
+    Convert(ConvertView),
+}
+
 /// What should be on screen right now.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
@@ -80,6 +111,7 @@ pub struct Frame {
     /// The next most important activity, shown as a bubble beside the pill.
     pub secondary: Option<Activity>,
     pub home: Option<HomeView>,
+    pub panel: Option<PanelView>,
     /// Something finished and deserves a sound. True for one frame only.
     pub chime: bool,
     /// When `Island::frame` must be called again even if nothing else happens.
@@ -119,6 +151,12 @@ pub struct Island {
     presets: [u64; TIMER_PRESETS.len()],
     /// Whether a new track is announced, which the user can turn off.
     announces_tracks: bool,
+    /// Files being dragged over the island right now.
+    dragging: Option<DropView>,
+    panel: Option<Panel>,
+    shelf: Shelf,
+    transfer: Option<Transfer>,
+    progress_style: ProgressStyle,
 }
 
 /// Whether a countdown is at its very end, on either side of it.
@@ -137,7 +175,150 @@ impl Island {
 
     /// Whether a view is open, which a small confirmation would only disturb.
     pub fn is_open(&self) -> bool {
-        self.expanded || self.home
+        self.expanded || self.home || self.panel.is_some() || self.dragging.is_some()
+    }
+
+    pub fn set_progress_style(&mut self, style: ProgressStyle) {
+        self.progress_style = style;
+    }
+
+    /// Files are being dragged over the island, which opens the drop panel.
+    pub fn drag_over(&mut self, view: DropView) {
+        self.dragging = Some(view);
+        self.collapse_at = None;
+    }
+
+    /// The files went elsewhere, or the drag was called off.
+    pub fn drag_ended(&mut self) {
+        self.dragging = None;
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.dragging.is_some()
+    }
+
+    /// Puts files on the shelf and shows it. Returns the ones that are new.
+    pub fn drop_on_shelf(&mut self, paths: &[String], now: Millis) -> Vec<String> {
+        let added = self.shelf.add(paths);
+        self.open_panel(Panel::Shelf, now);
+        added
+    }
+
+    pub fn open_shelf(&mut self, now: Millis) {
+        if !self.shelf.is_empty() {
+            self.open_panel(Panel::Shelf, now);
+            self.collapse_at = None;
+        }
+    }
+
+    pub fn shelf(&self) -> &Shelf {
+        &self.shelf
+    }
+
+    pub fn set_thumbnail(&mut self, path: &str, thumbnail: std::sync::Arc<[u8]>) {
+        self.shelf.set_thumbnail(path, thumbnail);
+    }
+
+    pub fn remove_from_shelf(&mut self, index: usize) {
+        self.shelf.remove(index);
+        self.close_empty_shelf();
+    }
+
+    pub fn clear_shelf(&mut self) {
+        self.shelf.clear();
+        self.close_empty_shelf();
+    }
+
+    pub fn scroll_shelf(&mut self, pages: i32) {
+        self.shelf.scroll(pages);
+    }
+
+    /// Forgets files on the shelf that were moved or deleted.
+    pub fn forget_missing(&mut self, exists: impl Fn(&str) -> bool) {
+        self.shelf.retain(exists);
+        self.close_empty_shelf();
+    }
+
+    fn close_empty_shelf(&mut self) {
+        if self.shelf.is_empty() && self.panel == Some(Panel::Shelf) {
+            self.close_expanded();
+        }
+    }
+
+    /// Offers formats for pictures that were dropped to be converted.
+    pub fn open_convert(&mut self, header: String, now: Millis) {
+        self.open_panel(Panel::Convert(ConvertView { header, busy: false }), now);
+    }
+
+    pub fn set_converting(&mut self, busy: bool) {
+        if let Some(Panel::Convert(view)) = &mut self.panel {
+            view.busy = busy;
+        }
+    }
+
+    fn open_panel(&mut self, panel: Panel, now: Millis) {
+        self.dragging = None;
+        self.home = false;
+        self.expanded = false;
+        self.focused = None;
+        self.panel = Some(panel);
+        self.collapse_at = (!self.hovered).then_some(now + DROP_VIEW_MS);
+    }
+
+    /// Shows the code for the phone, and keeps it open until it is answered.
+    pub fn start_transfer(&mut self, transfer: Transfer) {
+        self.dragging = None;
+        self.panel = None;
+        self.home = false;
+        self.transfer = Some(transfer);
+        self.expanded = true;
+        self.focused = Some(Kind::Transfer);
+        self.collapse_at = None;
+    }
+
+    /// How much has gone so far, in bytes.
+    pub fn transfer_progress(&mut self, sent: u64) {
+        if let Some(transfer) = &mut self.transfer
+            && !matches!(transfer.stage, Stage::Done { .. })
+        {
+            transfer.stage = Stage::Sending { sent };
+        }
+    }
+
+    /// The phone stopped before it had everything. The code waits again.
+    pub fn transfer_broke_off(&mut self, now: Millis) {
+        if let Some(transfer) = &mut self.transfer
+            && matches!(transfer.stage, Stage::Sending { .. })
+        {
+            transfer.stage = Stage::Waiting { until: now + WAIT_MS };
+        }
+    }
+
+    pub fn transfer_done(&mut self, now: Millis) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.stage = Stage::Done { at: now };
+        }
+    }
+
+    pub fn cancel_transfer(&mut self) {
+        if self.transfer.take().is_some() {
+            self.remove(Kind::Transfer);
+            if self.focused == Some(Kind::Transfer) {
+                self.close_expanded();
+            }
+        }
+    }
+
+    pub fn transfer_stage(&self) -> Option<Stage> {
+        self.transfer.as_ref().map(|transfer| transfer.stage)
+    }
+
+    /// The code stays open while it waits to be scanned or the files go, even
+    /// without the pointer on it: the user is busy with the phone.
+    fn held_open(&self) -> bool {
+        self.expanded
+            && self.focused == Some(Kind::Transfer)
+            && self.transfer.as_ref().is_some_and(|transfer| !matches!(transfer.stage, Stage::Done { .. }))
     }
 
     pub fn set_presets(&mut self, presets: [u64; TIMER_PRESETS.len()]) {
@@ -311,6 +492,8 @@ impl Island {
             self.focused = Some(kind);
             self.expanded = true;
             self.collapse_at = None;
+        } else {
+            self.open_shelf(now);
         }
     }
 
@@ -322,6 +505,7 @@ impl Island {
     fn close_expanded(&mut self) {
         self.expanded = false;
         self.home = false;
+        self.panel = None;
         self.focused = None;
         self.collapse_at = None;
     }
@@ -344,7 +528,7 @@ impl Island {
         self.expire(now);
         match self.top(now).map(|a| a.kind) {
             Some(kind) if kind.is_transient() => self.remove(kind),
-            _ if self.home => self.close_expanded(),
+            _ if self.home || self.panel.is_some() => self.close_expanded(),
             Some(_) if self.expanded => self.close_expanded(),
             Some(_) => {
                 self.expanded = true;
@@ -365,7 +549,7 @@ impl Island {
             self.peek_until = None;
         } else {
             self.update_derived(now);
-            if self.expanded || self.home {
+            if (self.expanded || self.home || self.panel.is_some()) && !self.held_open() {
                 self.collapse_at = Some(now + COLLAPSE_DELAY_MS);
             }
             if self.awake(now).is_none() {
@@ -382,7 +566,7 @@ impl Island {
             // This one waits to be answered, which the keyboard can do too.
             Some(Kind::TimerFinished) => self.remove(Kind::TimerFinished),
             Some(kind) if kind.is_transient() => {}
-            _ if self.home => self.close_expanded(),
+            _ if self.home || self.panel.is_some() => self.close_expanded(),
             Some(_) => {
                 self.expanded = !self.expanded;
                 self.collapse_at = self.expanded.then_some(now + KEYBOARD_EXPAND_MS);
@@ -433,9 +617,12 @@ impl Island {
 
         let presentation = match &top {
             _ if self.is_suppressed() => Presentation::Hidden,
+            // Nothing may cover the zones while something is carried to them.
+            _ if self.dragging.is_some() => Presentation::Expanded,
             Some(activity) if activity.level.is_some() => Presentation::Level,
             Some(activity) if activity.brief => Presentation::Compact,
             Some(activity) if activity.kind.is_transient() => Presentation::Alert,
+            _ if self.panel.is_some() => Presentation::Expanded,
             _ if self.home => Presentation::Expanded,
             Some(_) if self.expanded => Presentation::Expanded,
             Some(_) => Presentation::Compact,
@@ -443,21 +630,34 @@ impl Island {
             None => Presentation::Hidden,
         };
 
-        let in_home = self.home && !interrupted && presentation == Presentation::Expanded;
+        let expanded = presentation == Presentation::Expanded;
+        let panel = match (&self.dragging, &self.panel) {
+            (Some(view), _) if expanded => Some(PanelView::Drop(view.clone())),
+            (None, Some(Panel::Shelf)) if expanded && !interrupted => Some(PanelView::Shelf(self.shelf.view())),
+            (None, Some(Panel::Convert(view))) if expanded && !interrupted => Some(PanelView::Convert(view.clone())),
+            _ => None,
+        };
+        let in_home = self.home && panel.is_none() && !interrupted && expanded;
         let shows_bubble = matches!(
             presentation,
             Presentation::Compact | Presentation::Level | Presentation::Alert
         );
         // An interruption covers the pill only. Keeping the bubble means it does
         // not vanish and return on every volume step.
-        let secondary = if shows_bubble { self.long_lived(now).get(1).cloned().cloned() } else { None };
+        let secondary = if shows_bubble {
+            self.long_lived(now).get(1).cloned().cloned().or_else(|| self.shelf_bubble())
+        } else {
+            None
+        };
 
         let timer_in_pill = top
             .as_ref()
             .is_some_and(|a| matches!(a.kind, Kind::TimerRunning | Kind::ClockTimer | Kind::Focus));
+        let transfer_open = expanded && panel.is_none() && top.as_ref().is_some_and(|a| a.kind == Kind::Transfer);
+        let wake_at = self.next_deadline(now, timer_in_pill, transfer_open);
         Frame {
             presentation,
-            activity: if presentation == Presentation::Hidden || in_home { None } else { top },
+            activity: if presentation == Presentation::Hidden || in_home || panel.is_some() { None } else { top },
             secondary,
             home: in_home.then(|| HomeView {
                 coming: self
@@ -472,14 +672,41 @@ impl Island {
                 modes_offered: self.modes_offered,
                 presets: self.presets,
             }),
+            panel,
             chime: std::mem::take(&mut self.chime),
-            wake_at: self.next_deadline(now, timer_in_pill),
+            wake_at,
         }
+    }
+
+    /// Files on the shelf show as a bubble when nothing else wants it.
+    fn shelf_bubble(&self) -> Option<Activity> {
+        (!self.shelf.is_empty()).then(|| Activity {
+            badge: Some(Bubble::Count { value: self.shelf.len().to_string(), icon: Some(Icon::Shelf), ring: None }),
+            ..Activity::new(Kind::Shelf)
+        })
     }
 
     /// Keeps the activities that depend on time up to date, and raises what
     /// falls due: a finished timer, or an event that is starting.
     fn update_derived(&mut self, now: Millis) {
+        if let Some(transfer) = &self.transfer {
+            let (over, finished) = match transfer.stage {
+                Stage::Waiting { until } => (until <= now, false),
+                Stage::Done { at } => (at + DONE_MS <= now, true),
+                Stage::Sending { .. } => (false, false),
+            };
+            if over {
+                self.transfer = None;
+                if finished || self.focused == Some(Kind::Transfer) {
+                    self.close_expanded();
+                }
+            }
+        }
+        match &self.transfer {
+            Some(transfer) => self.upsert(transfer.activity(now, self.progress_style)),
+            None => self.remove(Kind::Transfer),
+        }
+
         if self.timer.is_some_and(|timer| timer.is_finished(now)) {
             self.timer = None;
             self.chime = true;
@@ -597,7 +824,7 @@ impl Island {
         self.activities.retain(|a| a.expires_at.is_none_or(|at| at > now));
     }
 
-    fn next_deadline(&self, now: Millis, timer_in_pill: bool) -> Option<Millis> {
+    fn next_deadline(&self, now: Millis, timer_in_pill: bool, transfer_open: bool) -> Option<Millis> {
         let expiries = self.activities.iter().filter_map(|a| a.expires_at);
         let dormancies = self.activities.iter().filter_map(|a| a.dormant_at).filter(|&at| at > now);
         let urgencies = self.activities.iter().filter_map(|a| a.urgent_at).filter(|&at| at > now);
@@ -626,6 +853,7 @@ impl Island {
             .chain(ticking.flatten())
             .chain(event_moments.flatten())
             .chain(self.schedule.first().map(|event| event.start))
+            .chain(self.transfer.as_ref().and_then(|transfer| transfer.next_moment(now, transfer_open)))
             .chain(self.collapse_at)
             .chain(self.peek_until)
             .min()
@@ -635,6 +863,7 @@ impl Island {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drop::DropView;
 
     fn activity(kind: Kind) -> Activity {
         Activity { title: format!("{kind:?}"), ..Activity::new(kind) }
@@ -1718,5 +1947,159 @@ mod tests {
         island.frame(0);
         island.upsert(activity(Kind::Media));
         assert_eq!(island.frame(0).presentation, Presentation::Compact);
+    }
+
+    fn drop_view() -> DropView {
+        DropView { header: "a.jpg · 1 KB".into(), hovered: None, phone_refusal: None, convert_refusal: None }
+    }
+
+    fn transfer() -> Transfer {
+        Transfer {
+            name: "a.jpg".into(),
+            summary: "a.jpg · 1 KB".into(),
+            total: 1000,
+            code: std::sync::Arc::new(crate::qr::QrMatrix::encode("http://10.0.0.2:5000/x").expect("fits")),
+            network: "Wi-Fi · Ev".into(),
+            warning: None,
+            stage: Stage::Waiting { until: WAIT_MS },
+        }
+    }
+
+    fn shelf_files() -> Vec<String> {
+        vec![r"C:\a\bir.txt".to_owned(), r"C:\a\iki.png".to_owned()]
+    }
+
+    #[test]
+    fn dragging_files_opens_the_drop_panel_over_anything() {
+        let mut island = Island::new();
+        island.upsert(Activity { level: Some(40), ..activity(Kind::Alert) });
+        island.drag_over(drop_view());
+        let frame = island.frame(0);
+        assert_eq!(frame.presentation, Presentation::Expanded);
+        assert!(matches!(frame.panel, Some(PanelView::Drop(_))));
+        assert!(frame.activity.is_none());
+        island.drag_ended();
+        assert_eq!(island.frame(0).presentation, Presentation::Level);
+    }
+
+    #[test]
+    fn the_shelf_shows_what_landed_then_steps_aside() {
+        let mut island = Island::new();
+        island.drag_over(drop_view());
+        assert_eq!(island.drop_on_shelf(&shelf_files(), 0).len(), 2);
+        let frame = island.frame(0);
+        match frame.panel {
+            Some(PanelView::Shelf(view)) => assert_eq!(view.total, 2),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(frame.wake_at, Some(DROP_VIEW_MS));
+        assert_eq!(island.frame(DROP_VIEW_MS).presentation, Presentation::Hidden);
+    }
+
+    #[test]
+    fn the_shelf_is_a_bubble_beside_whatever_shows() {
+        let mut island = Island::new();
+        island.drop_on_shelf(&shelf_files(), 0);
+        island.close_views();
+        island.peek(10);
+        let frame = island.frame(10);
+        assert_eq!(frame.presentation, Presentation::Compact);
+        assert_eq!(second(&frame), Some(Kind::Shelf));
+        // A second lasting activity has the bubble first.
+        island.upsert(activity(Kind::Media));
+        island.set_camera(Some("Teams".into()));
+        assert_eq!(second(&island.frame(20)), Some(Kind::Camera));
+    }
+
+    #[test]
+    fn clicking_the_shelf_bubble_opens_the_shelf() {
+        let mut island = Island::new();
+        island.drop_on_shelf(&shelf_files(), 0);
+        island.close_views();
+        island.upsert(activity(Kind::Media));
+        island.click_secondary(10);
+        assert!(matches!(island.frame(10).panel, Some(PanelView::Shelf(_))));
+        island.click(20);
+        assert!(island.frame(20).panel.is_none());
+    }
+
+    #[test]
+    fn emptying_the_shelf_closes_it() {
+        let mut island = Island::new();
+        island.drop_on_shelf(&shelf_files(), 0);
+        island.remove_from_shelf(0);
+        assert!(island.frame(0).panel.is_some());
+        island.clear_shelf();
+        let frame = island.frame(0);
+        assert!(frame.panel.is_none());
+        assert!(frame.secondary.is_none());
+    }
+
+    #[test]
+    fn the_convert_choice_waits_while_it_works() {
+        let mut island = Island::new();
+        island.open_convert("a.png · 1 KB".into(), 0);
+        island.set_converting(true);
+        match island.frame(0).panel {
+            Some(PanelView::Convert(view)) => assert!(view.busy),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_code_stays_open_while_the_user_is_busy_with_the_phone() {
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        island.set_hovered(true, 0);
+        island.set_hovered(false, 100);
+        let frame = island.frame(10_000);
+        assert_eq!(frame.presentation, Presentation::Expanded);
+        assert_eq!(frame.activity.map(|a| a.kind), Some(Kind::Transfer));
+        // The countdown on screen moves once a second.
+        assert_eq!(frame.wake_at, Some(11_000));
+    }
+
+    #[test]
+    fn a_finished_transfer_says_so_and_closes() {
+        let mut island = Island::new();
+        island.upsert(activity(Kind::Media));
+        island.start_transfer(transfer());
+        island.transfer_progress(500);
+        let sending = island.frame(1_000);
+        assert_eq!(sending.activity.as_ref().map(|a| a.trailing.as_str()), Some("%50"));
+        assert_eq!(sending.wake_at, None);
+        island.transfer_done(2_000);
+        let done = island.frame(2_000);
+        assert_eq!(done.activity.map(|a| a.leading), Some("Gönderildi".to_owned()));
+        assert_eq!(done.wake_at, Some(2_000 + DONE_MS));
+        let after = island.frame(2_000 + DONE_MS);
+        assert_eq!(after.presentation, Presentation::Compact);
+        assert_eq!(after.activity.map(|a| a.kind), Some(Kind::Media));
+        assert_eq!(island.transfer_stage(), None);
+    }
+
+    #[test]
+    fn an_unanswered_code_gives_up() {
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        assert_eq!(island.frame(WAIT_MS).presentation, Presentation::Hidden);
+        assert_eq!(island.transfer_stage(), None);
+    }
+
+    #[test]
+    fn a_download_that_broke_off_waits_again() {
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        island.transfer_progress(100);
+        island.transfer_broke_off(60_000);
+        assert_eq!(island.transfer_stage(), Some(Stage::Waiting { until: 60_000 + WAIT_MS }));
+    }
+
+    #[test]
+    fn stopping_the_transfer_closes_its_view() {
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        island.cancel_transfer();
+        assert_eq!(island.frame(0).presentation, Presentation::Hidden);
     }
 }

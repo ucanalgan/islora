@@ -57,6 +57,8 @@ const LEAVE_SCALE: f32 = 0.92;
 /// The dip the island gives under a click, as a pressed thing would.
 const PRESS_SCALE: f32 = 0.97;
 const PRESS_TIME: Duration = Duration::from_millis(280);
+const BOUNCE_SCALE: f32 = 1.04;
+const BOUNCE_TIME: Duration = Duration::from_millis(420);
 const BUBBLE_START_SCALE: f32 = 0.6;
 
 const WAVE_BARS: usize = 4;
@@ -667,6 +669,18 @@ impl Renderer {
         self.root.StartAnimation(h!("Scale"), &animation)
     }
 
+    /// A small hop when something finished, such as files reaching a phone.
+    pub fn bounce(&self) -> Result<()> {
+        let rest = Vector3 { X: 1.0, Y: 1.0, Z: 1.0 };
+        let animation = self.compositor.CreateVector3KeyFrameAnimation()?;
+        animation.InsertKeyFrame(0.0, rest)?;
+        animation.InsertKeyFrame(0.35, Vector3 { X: BOUNCE_SCALE, Y: BOUNCE_SCALE, Z: 1.0 })?;
+        animation.InsertKeyFrame(0.7, Vector3 { X: 0.99, Y: 0.99, Z: 1.0 })?;
+        animation.InsertKeyFrame(1.0, rest)?;
+        animation.SetDuration(TimeSpan::from(BOUNCE_TIME))?;
+        self.root.StartAnimation(h!("Scale"), &animation)
+    }
+
     /// Fits the compact pill to the scene. Only measures when its text changed.
     fn fit_compact(&mut self, scene: &mut Scene) {
         let key = scene.fit_key();
@@ -880,7 +894,7 @@ impl Renderer {
 
     /// Updates running time without any fade, which would flicker every second.
     fn repaint_front(&mut self, scene: &Scene, pill: Pill) -> Result<()> {
-        let painting = scene.painting(pill, self.scale, self.corner(pill));
+        let painting = scene.painting(pill, self.scale, self.corner(pill), self.style == IslandStyle::Notch);
         match &self.layers[self.front].surface {
             Some(surface) => self.painter.draw(surface, &painting),
             None => self.cross_fade(scene, pill, false),
@@ -888,7 +902,7 @@ impl Renderer {
     }
 
     fn cross_fade(&mut self, scene: &Scene, pill: Pill, resized: bool) -> Result<()> {
-        let painting = scene.painting(pill, self.scale, self.corner(pill));
+        let painting = scene.painting(pill, self.scale, self.corner(pill), self.style == IslandStyle::Notch);
         let surface = self.painter.create_surface(pill.width, pill.height)?;
         self.painter.draw(&surface, &painting)?;
 

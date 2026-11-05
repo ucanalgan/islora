@@ -1,7 +1,7 @@
 //! What the settings window shows and where, in DIPs. Nothing here draws, so the
 //! layout and what each click means can be tested without a window.
 
-use crate::layout::{IslandStyle, Material, StartMode};
+use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode};
 
 pub const WINDOW_WIDTH: f32 = 760.0;
 pub const WINDOW_HEIGHT: f32 = 540.0;
@@ -21,7 +21,7 @@ const PRESET_STEP: u64 = 5;
 const LONGEST_PRESET: u64 = 720;
 
 /// Where the small picture of the island goes on the appearance page.
-pub const PREVIEW: Rect = Rect { x: LEFT, y: TOP, width: WIDTH, height: 112.0 };
+pub const PREVIEW: Rect = Rect { x: LEFT, y: TOP, width: WIDTH, height: 96.0 };
 /// The box for the calendar address, which Windows draws itself.
 pub const ADDRESS_FIELD: Rect = Rect { x: LEFT, y: TOP + 26.0, width: WIDTH, height: 40.0 };
 
@@ -90,6 +90,7 @@ pub enum Action {
     Open(Page),
     Material(Material),
     Style(IslandStyle),
+    Progress(ProgressStyle),
     SoundWave,
     Notice(usize),
     Preset { index: usize, longer: bool },
@@ -142,6 +143,7 @@ pub struct SettingsState {
     pub page: Page,
     pub material: Material,
     pub style: IslandStyle,
+    pub progress: ProgressStyle,
     pub sound_wave: bool,
     pub notices_off: Vec<String>,
     pub presets: [u64; 4],
@@ -247,26 +249,31 @@ pub fn view(state: &SettingsState) -> View {
 
 fn appearance(view: &mut View, state: &SettingsState) {
     view.caption("Seçimlerin gerçek island'a da hemen uygulanır", PREVIEW.y + PREVIEW.height + 6.0);
-    view.caption("Tasarım", 214.0);
+    view.caption("Tasarım", 200.0);
     view.choices(
-        236.0,
+        222.0,
         [
             (Action::Material(Material::Black), state.material == Material::Black, "Siyah"),
             (Action::Material(Material::Glass), state.material == Material::Glass, "Cam"),
         ],
     );
-    view.caption("Biçim", 288.0);
+    view.caption("Biçim", 274.0);
     view.choices(
-        310.0,
+        296.0,
         [
             (Action::Style(IslandStyle::Island), state.style == IslandStyle::Island, "Island"),
             (Action::Style(IslandStyle::Notch), state.style == IslandStyle::Notch, "Notch"),
         ],
     );
-    let row = Rect { x: LEFT, y: 366.0, width: WIDTH, height: ROW_HEIGHT };
+    view.caption("Telefona gönderirken ilerleme", 348.0);
+    view.choices(
+        370.0,
+        ProgressStyle::ALL.map(|style| (Action::Progress(style), state.progress == style, style.label())),
+    );
+    let row = Rect { x: LEFT, y: 424.0, width: WIDTH, height: ROW_HEIGHT };
     view.control(Action::SoundWave, Look::Switch { on: state.sound_wave }, row, "Ses dalgası");
-    view.caption("Kapalıyken sabit çubuklar görünür. Enerji tasarrufunda dalga kendiliğinden durur", 416.0);
-    view.caption("Cam, enerji tasarrufunda ve Windows şeffaflığı kapalıyken Siyah görünür", 438.0);
+    view.caption("Kapalıyken sabit çubuklar görünür. Enerji tasarrufunda dalga kendiliğinden durur", 474.0);
+    view.caption("Cam, enerji tasarrufunda ve Windows şeffaflığı kapalıyken Siyah görünür", 496.0);
 }
 
 fn notices(view: &mut View, state: &SettingsState) {
@@ -384,6 +391,7 @@ mod tests {
             page,
             material: Material::Black,
             style: IslandStyle::Island,
+            progress: ProgressStyle::Ring,
             sound_wave: true,
             notices_off: Vec::new(),
             presets: [5, 15, 25, 45],
@@ -469,6 +477,7 @@ mod tests {
         current.material = Material::Glass;
         current.style = IslandStyle::Notch;
         current.sound_wave = false;
+        current.progress = ProgressStyle::Fill;
         let view = view(&current);
         let look = |action| view.controls.iter().find(|control| control.action == action).unwrap().look;
         assert_eq!(look(Action::Material(Material::Glass)), Look::Choice { selected: true });
@@ -476,6 +485,8 @@ mod tests {
         assert_eq!(look(Action::Style(IslandStyle::Notch)), Look::Choice { selected: true });
         assert_eq!(look(Action::Style(IslandStyle::Island)), Look::Choice { selected: false });
         assert_eq!(look(Action::SoundWave), Look::Switch { on: false });
+        assert_eq!(look(Action::Progress(ProgressStyle::Fill)), Look::Choice { selected: true });
+        assert_eq!(look(Action::Progress(ProgressStyle::Ring)), Look::Choice { selected: false });
     }
 
     #[test]

@@ -9,7 +9,9 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
+    D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND,
+    D2D1_COMBINE_MODE_INTERSECT, D2D1_DASH_STYLE_CUSTOM, D2D1_DEFAULT_FLATTENING_TOLERANCE,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap, ID2D1Brush,
@@ -40,6 +42,8 @@ use windows::Win32::System::WinRT::Composition::{
 };
 use windows::core::{Error, Interface, PCWSTR, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
+
+use island_core::qr::{QUIET_ZONE, QrMatrix};
 
 const TEXT_FONT: PCWSTR = w!("Segoe UI Variable Text");
 const ICON_FONT: PCWSTR = w!("Segoe Fluent Icons");
@@ -115,6 +119,27 @@ pub struct ShapeRun {
     pub border: Option<([f32; 4], f32)>,
 }
 
+/// A line along the inside of a rounded rectangle, from the middle of its top
+/// edge clockwise to `fraction` of the way round. With `dash` it goes all the
+/// way round in dashes this many line widths long.
+pub struct OutlineRun {
+    pub bounds: Bounds,
+    pub radius: f32,
+    pub width: f32,
+    pub color: [f32; 4],
+    pub fraction: f32,
+    pub dash: Option<f32>,
+    /// Leaves out the top edge, which a notch shares with the screen, and
+    /// runs from its top right corner round to its top left one instead.
+    pub open_top: bool,
+}
+
+/// A code for a phone to scan, dark on white, as large as fits in `bounds`.
+pub struct CodeRun<'a> {
+    pub bounds: Bounds,
+    pub code: &'a QrMatrix,
+}
+
 /// A circle filled clockwise from the top to `fraction`, from 0 to 1.
 pub struct RingRun {
     pub center_x: f32,
@@ -137,7 +162,14 @@ pub struct ImageRun<'a> {
 #[derive(Default)]
 pub struct Painting<'a> {
     pub shapes: Vec<ShapeRun>,
+    /// Shapes kept inside a rounded rectangle and its radius, drawn after the
+    /// others. The island clips its content itself; other targets need this.
+    pub clipped: Vec<(ShapeRun, Bounds, f32)>,
+    pub outlines: Vec<OutlineRun>,
+    pub codes: Vec<CodeRun<'a>>,
     pub texts: Vec<TextRun<'a>>,
+    /// Text in a colour of its own, red, green and blue from 0 to 1.
+    pub colored: Vec<(TextRun<'a>, [f32; 3])>,
     pub bars: Vec<BarRun>,
     pub rings: Vec<RingRun>,
     pub images: Vec<ImageRun<'a>>,
@@ -267,6 +299,15 @@ impl Painter {
                 }
             }
         }
+        for (shape, outer, radius) in &painting.clipped {
+            unsafe { self.draw_clipped(dc, shape, *outer, *radius)? };
+        }
+        for outline in &painting.outlines {
+            unsafe { self.draw_outline(dc, outline)? };
+        }
+        for code in &painting.codes {
+            unsafe { self.draw_code(dc, code)? };
+        }
         for bar in &painting.bars {
             let color = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: bar.opacity };
             let radius = bar.bounds.height / 2.0;
@@ -285,9 +326,11 @@ impl Painter {
                 eprintln!("artwork failed: {error}");
             }
         }
-        for run in &painting.texts {
+        let white = painting.texts.iter().map(|run| (run, [1.0, 1.0, 1.0]));
+        let colored = painting.colored.iter().map(|(run, color)| (run, *color));
+        for (run, [r, g, b]) in white.chain(colored) {
             let format = self.format(run)?;
-            let color = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: run.opacity };
+            let color = D2D1_COLOR_F { r, g, b, a: run.opacity };
             let utf16: Vec<u16> = run.text.encode_utf16().collect();
             unsafe {
                 let brush = dc.CreateSolidColorBrush(&color, None)?;
@@ -353,6 +396,117 @@ impl Painter {
             layout.SetTypography(&typography, whole)?;
             let origin = Vector2 { X: bounds.x, Y: bounds.y };
             dc.DrawTextLayout(origin, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+        Ok(())
+    }
+
+    unsafe fn draw_clipped(&self, dc: &ID2D1DeviceContext, shape: &ShapeRun, outer: Bounds, radius: f32) -> Result<()> {
+        let [r, g, b, a] = shape.fill;
+        unsafe {
+            let factory = dc.GetFactory()?;
+            let rounded = D2D1_ROUNDED_RECT { rect: outer.rect(), radiusX: radius, radiusY: radius };
+            let within = factory.CreateRoundedRectangleGeometry(&rounded)?;
+            let part = factory.CreateRectangleGeometry(&shape.bounds.rect())?;
+            let path = factory.CreatePathGeometry()?;
+            let sink = path.Open()?;
+            within.CombineWithGeometry(&part, D2D1_COMBINE_MODE_INTERSECT, None, D2D1_DEFAULT_FLATTENING_TOLERANCE, &sink)?;
+            sink.Close()?;
+            let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a }, None)?;
+            dc.FillGeometry(&path, &brush, None);
+        }
+        Ok(())
+    }
+
+    unsafe fn draw_outline(&self, dc: &ID2D1DeviceContext, outline: &OutlineRun) -> Result<()> {
+        if outline.fraction <= 0.0 || outline.width <= 0.0 {
+            return Ok(());
+        }
+        let half = outline.width / 2.0;
+        let (left, top) = (outline.bounds.x + half, outline.bounds.y + half);
+        let (right, bottom) = (outline.bounds.x + outline.bounds.width - half, outline.bounds.y + outline.bounds.height - half);
+        let radius = (outline.radius - half).clamp(0.0, ((right - left).min(bottom - top) / 2.0).max(0.0));
+        let middle = (left + right) / 2.0;
+        let corner = |x: f32, y: f32| D2D1_ARC_SEGMENT {
+            point: Vector2 { X: x, Y: y },
+            size: D2D_SIZE_F { width: radius, height: radius },
+            rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            arcSize: D2D1_ARC_SIZE_SMALL,
+        };
+        let point = |x: f32, y: f32| Vector2 { X: x, Y: y };
+        unsafe {
+            let factory = dc.GetFactory()?;
+            let path = factory.CreatePathGeometry()?;
+            let sink = path.Open()?;
+            let around = if outline.open_top {
+                sink.BeginFigure(point(right, top), D2D1_FIGURE_BEGIN_HOLLOW);
+                sink.AddLine(point(right, bottom - radius));
+                sink.AddArc(&corner(right - radius, bottom));
+                sink.AddLine(point(left + radius, bottom));
+                sink.AddArc(&corner(left, bottom - radius));
+                sink.AddLine(point(left, top));
+                let straight = 2.0 * (bottom - top - radius) + (right - left - 2.0 * radius);
+                straight + std::f32::consts::PI * radius
+            } else {
+                sink.BeginFigure(point(middle, top), D2D1_FIGURE_BEGIN_HOLLOW);
+                sink.AddLine(point(right - radius, top));
+                sink.AddArc(&corner(right, top + radius));
+                sink.AddLine(point(right, bottom - radius));
+                sink.AddArc(&corner(right - radius, bottom));
+                sink.AddLine(point(left + radius, bottom));
+                sink.AddArc(&corner(left, bottom - radius));
+                sink.AddLine(point(left, top + radius));
+                sink.AddArc(&corner(left + radius, top));
+                sink.AddLine(point(middle, top));
+                let straight = 2.0 * (right - left - 2.0 * radius) + 2.0 * (bottom - top - 2.0 * radius);
+                straight + std::f32::consts::TAU * radius
+            };
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close()?;
+            // Dash lengths count in line widths.
+            let (dashes, cap) = match outline.dash {
+                Some(dash) => (vec![dash, dash * 0.8], D2D1_CAP_STYLE_FLAT),
+                None if outline.fraction >= 0.999 => (Vec::new(), D2D1_CAP_STYLE_FLAT),
+                None => (vec![around * outline.fraction / outline.width, around / outline.width + 4.0], D2D1_CAP_STYLE_ROUND),
+            };
+            let properties = D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: cap,
+                endCap: cap,
+                dashCap: cap,
+                dashStyle: if dashes.is_empty() { Default::default() } else { D2D1_DASH_STYLE_CUSTOM },
+                ..Default::default()
+            };
+            let stroke = factory.CreateStrokeStyle(&properties, (!dashes.is_empty()).then_some(dashes.as_slice()))?;
+            let [r, g, b, a] = outline.color;
+            let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a }, None)?;
+            dc.DrawGeometry(&path, &brush, outline.width, &stroke);
+        }
+        Ok(())
+    }
+
+    /// Modules are drawn on whole pixels without smoothing, as soft edges
+    /// between them make a code harder for a camera to read.
+    unsafe fn draw_code(&self, dc: &ID2D1DeviceContext, run: &CodeRun) -> Result<()> {
+        let modules = run.code.size() + QUIET_ZONE * 2;
+        let module = (run.bounds.width.min(run.bounds.height) / modules as f32).floor().max(1.0);
+        let side = module * modules as f32;
+        let left = (run.bounds.x + (run.bounds.width - side) / 2.0).round();
+        let top = (run.bounds.y + (run.bounds.height - side) / 2.0).round();
+        unsafe {
+            let paper = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
+            let card = Bounds { x: left, y: top, width: side, height: side }.rect();
+            dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: card, radiusX: module * 1.5, radiusY: module * 1.5 }, &paper);
+            let ink = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, None)?;
+            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            for y in 0..run.code.size() {
+                let row_top = top + (QUIET_ZONE + y) as f32 * module;
+                for (start, length) in run.code.runs(y) {
+                    let x = left + (QUIET_ZONE + start) as f32 * module;
+                    let rect = Bounds { x, y: row_top, width: length as f32 * module, height: module }.rect();
+                    dc.FillRectangle(&rect, &ink);
+                }
+            }
+            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         }
         Ok(())
     }

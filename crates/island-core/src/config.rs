@@ -1,6 +1,6 @@
 //! The settings file: one `key = "value"` per line, `#` for comments.
 
-use crate::layout::{IslandStyle, Material, StartMode, TIMER_PRESETS};
+use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS};
 
 const LONGEST_PRESET_MINUTES: u64 = 720;
 
@@ -85,9 +85,24 @@ pub fn read_island_style(text: &str) -> Option<IslandStyle> {
     }
 }
 
+/// The ring is the default, so anything else unknown reads as the ring.
+pub fn read_progress_style(text: &str) -> ProgressStyle {
+    let value = read_value(text, "progress_style");
+    ProgressStyle::ALL.into_iter().find(|style| value.as_deref() == Some(style.setting())).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_progress_style_is_read_by_its_name() {
+        assert_eq!(read_progress_style("progress_style = \"edge\""), ProgressStyle::Edge);
+        assert_eq!(read_progress_style("progress_style = \"fill\""), ProgressStyle::Fill);
+        assert_eq!(read_progress_style("progress_style = \"ring\""), ProgressStyle::Ring);
+        assert_eq!(read_progress_style("progress_style = \"spiral\""), ProgressStyle::Ring);
+        assert_eq!(read_progress_style(""), ProgressStyle::Ring);
+    }
 
     #[test]
     fn turned_off_notices_are_listed_by_name() {

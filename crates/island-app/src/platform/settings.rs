@@ -59,6 +59,12 @@ const MATERIAL_SETTINGS: &str = "
 material = \"black\"
 ";
 
+const PROGRESS_SETTINGS: &str = "
+# Telefona gönderirken açık görünümde ilerleme: ring halka, edge kenar ışığı,
+# fill dolgu. Küçük pill her durumda küçük bir halka gösterir.
+progress_style = \"ring\"
+";
+
 /// Whether this is the very first start on this account.
 pub fn is_first_run() -> bool {
     path().is_some_and(|path| !path.exists())
@@ -79,7 +85,7 @@ pub fn read() -> Option<String> {
     let path = path()?;
     if !path.exists() {
         std::fs::create_dir_all(path.parent()?).ok()?;
-        let text = format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{WAVE_SETTINGS}{MATERIAL_SETTINGS}");
+        let text = format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{WAVE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}");
         std::fs::write(&path, text).ok()?;
     }
     let mut text = std::fs::read_to_string(&path).ok()?;
@@ -90,6 +96,7 @@ pub fn read() -> Option<String> {
         ("keyboard_language", LATER_NOTICES),
         ("sound_wave", WAVE_SETTINGS),
         ("material", MATERIAL_SETTINGS),
+        ("progress_style", PROGRESS_SETTINGS),
     ];
     for (setting, section) in sections {
         if !text.contains(setting) {

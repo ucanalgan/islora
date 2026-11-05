@@ -31,6 +31,7 @@ The file is not signed, so SmartScreen may warn you the first time. Choose **Mor
 - **Music:** cover, title, artist, progress and playback buttons for any player that reports to Windows, such as Spotify or a browser. You can seek, shuffle and repeat when the player allows it.
 - **Timers:** Islora's own countdown, Windows Focus sessions in both directions, and running timers from the Clock app. Clock timers are read-only, as Windows offers no public way to create them.
 - **Calendar:** events from a private iCal address, as a bubble 30 minutes before they start, in the pill 5 minutes before, and as an alert when they begin.
+- **Files:** drag files to the top of the screen and three places open. **Raf** keeps them at hand to drag somewhere else later. **Telefona gönder** shows a code that a phone camera scans to download them over your network, with no app or account on the phone. **Dönüştür** saves pictures as JPG or PNG, or makes them smaller, next to the original.
 - **System changes:** volume, brightness, Caps Lock, Num Lock, charger, low battery, Energy Saver, Bluetooth, sound output, microphone, camera, internet, Wi-Fi, VPN, airplane mode, USB drives, displays, screenshots, copied items, track changes and keyboard language.
 
 Two things can run at once: the main one sits in the pill and the second in a bubble beside it.
@@ -44,6 +45,7 @@ The island hides during fullscreen apps and leaves itself out of screenshots, sc
 | Open the island | Press `Win+Alt+Space`, or move the pointer to the middle of the top screen edge. If that shortcut is taken, `Ctrl+Shift+Alt+Space` is used instead. |
 | Expand or collapse it | Click the pill. Moving the pointer away also collapses it. |
 | Switch to the second thing | Click the bubble. |
+| Keep, send or convert files | Drag them to the middle of the top screen edge, or onto the island, and drop them on one of the three places. Files on the shelf wait in a bubble beside the island: click it to drag them out again. |
 | Start a timer or see your next events | Open the home view with the timer icon or by pressing the shortcut twice. |
 | Change settings | Open Islora again from the Start menu or its exe, or use the gear in the home view or the tray menu. The window works with the keyboard too: Tab and the arrows move, Enter or Space press, Esc closes. |
 
@@ -59,15 +61,20 @@ The settings window opens by itself on first run, and changes apply at once. Eve
 | `material` | `black`, or `glass` for a frosted view of what is behind the pill. Glass turns black in Energy Saver and with Windows transparency off. | `black` |
 | `island_style` | `island` floats below the top edge, `notch` is attached to it. | `island` |
 | `notices_off` | Notices to hide, separated by commas. The file lists the names. | empty |
+| `progress_style` | How the open view shows a send to a phone: `ring`, `edge` for light running along the island's edge, or `fill`. | `ring` |
 | `sound_wave` | `off` stills the wave in the small pill, which is lighter on the system. Energy Saver stills it too. | `on` |
 
 ## Privacy
 
-Islora has no account and no telemetry. Its only network request downloads the calendar address you set, every 15 minutes. It never reads what you copy, only whether it was text, an image or a file, and it skips copies marked by password managers. From the Clock app's settings it reads the timers and nothing else.
+Islora has no account and no telemetry. On its own it makes one kind of network request: it downloads the calendar address you set, every 15 minutes.
+
+While you send files to a phone, and only then, Islora runs a small web server on your computer that only devices on the same network can reach. It answers only at an address with a one-time code in it, which the QR code carries, offers only the files you dropped, and stops once they are downloaded or after 5 minutes without a download. The files go straight from your computer to the phone and never through the internet.
+
+The shelf keeps where your files are, never copies, and forgets them when Islora quits. Converted pictures are saved next to the original, which is left as it was. It never reads what you copy, only whether it was text, an image or a file, and it skips copies marked by password managers. From the Clock app's settings it reads the timers and nothing else.
 
 ## System load
 
-Islora is written in Rust with no runtime or web view. Nothing polls: every source waits for a Windows event, and shape animations run in the Windows compositor, so the app itself does no work per frame. With nothing to show, v0.0.1 used 0 ms of CPU over 15 seconds and 7.4 MB of private memory. The exe is 3.2 MB.
+Islora is written in Rust with no runtime or web view. Nothing polls: every source waits for a Windows event, and shape animations run in the Windows compositor, so the app itself does no work per frame. With nothing to show, v0.0.3 used 0 ms of CPU over 15 seconds and about 8 MB of private memory, the same as before files could be dropped on it. The web server for a phone and the picture work run only while they are needed.
 
 The exception is the sound wave in the small pill while music plays. It loops, so the compositor (`dwm.exe`) redraws it on every frame, which costs about half a CPU core at 144 Hz. Turn off **Ses dalgası** in the settings to stop it. It also stops by itself while Windows Energy Saver is on.
 
@@ -76,6 +83,8 @@ The exception is the sound wave in the small pill while music plays. It loops, s
 - App notifications are not shown yet.
 - Only the primary display is used.
 - The Windows volume flyout and notification banners still appear beside the island.
+- The first time you send to a phone, Windows asks whether Islora may use the network. Allow it on private networks, or the phone cannot connect. On a network Windows treats as public, phones usually cannot connect at all.
+- Converting HEIC pictures needs Microsoft's HEIF Image Extensions, and AVIF the AV1 Video Extension, both free in the Microsoft Store.
 - Some notices are unit tested but have not been checked against real events yet. The [release notes](https://github.com/ucanalgan/islora/releases/latest) list them.
 
 ## Building

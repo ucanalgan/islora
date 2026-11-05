@@ -90,6 +90,39 @@ impl Material {
     }
 }
 
+/// How the open view shows that files are on their way to a phone. The
+/// compact pill always uses a small ring, as there is no room for more.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProgressStyle {
+    /// The code turns into a ring that fills.
+    #[default]
+    Ring,
+    /// Light runs along the edge of the island.
+    Edge,
+    /// The island fills from left to right.
+    Fill,
+}
+
+impl ProgressStyle {
+    pub const ALL: [ProgressStyle; 3] = [ProgressStyle::Ring, ProgressStyle::Edge, ProgressStyle::Fill];
+
+    pub fn setting(self) -> &'static str {
+        match self {
+            ProgressStyle::Ring => "ring",
+            ProgressStyle::Edge => "edge",
+            ProgressStyle::Fill => "fill",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ProgressStyle::Ring => "Halka",
+            ProgressStyle::Edge => "Kenar ışığı",
+            ProgressStyle::Fill => "Dolgu",
+        }
+    }
+}
+
 /// The shortcut to the home view inside the expanded media view.
 pub const HOME_SHORTCUT_X: f32 = 362.0;
 pub const HOME_SHORTCUT_Y: f32 = 36.0;

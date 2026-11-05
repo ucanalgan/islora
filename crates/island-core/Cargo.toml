@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 chrono = "0.4"
 chrono-tz = "0.10"
+qrcodegen = "1.8"
 rrule = "0.14"

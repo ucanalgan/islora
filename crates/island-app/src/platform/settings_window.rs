@@ -5,7 +5,7 @@
 use std::mem::size_of;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use island_core::{IslandStyle, Material};
+use island_core::{IslandStyle, Material, ProgressStyle};
 use island_core::settings_view::{
     ADDRESS_FIELD, Action, Control, Focus, Look, PREVIEW, Page, Rect, SIDEBAR_WIDTH, SettingsState,
     View, WINDOW_HEIGHT, WINDOW_WIDTH, view,
@@ -37,7 +37,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Error, HSTRING, Interface, PCWSTR, Result, w};
 
-use crate::render::{Align, BarRun, Bounds, Font, Painter, Painting, ShapeRun, TextRun};
+use crate::render::{
+    Align, BarRun, Bounds, Font, OutlineRun, Painter, Painting, RingRun, ShapeRun, TextRun,
+};
 
 const CLASS: PCWSTR = w!("IsloraSettings");
 /// Sent to a running island by a second start of the app.
@@ -519,74 +521,106 @@ impl SettingsWindow {
         });
     }
 
-    /// A small scene with the pill on it, in the look chosen below.
+    /// A small scene with the island on it, in the look chosen below: music
+    /// playing, and beside it the open view of a send to a phone, in the
+    /// progress style chosen.
     fn preview(&self, painting: &mut Painting<'_>) {
         const PILL_WIDTH: f32 = 176.0;
         const PILL_HEIGHT: f32 = 36.0;
+        const CARD_WIDTH: f32 = 184.0;
+        const CARD_HEIGHT: f32 = 64.0;
+        const GAP: f32 = 22.0;
+        /// How far the send in the picture has got.
+        const SENT: f32 = 0.64;
+        const GREEN: [f32; 3] = [0.25, 0.82, 0.48];
         let scale = self.scale;
         let scene = PREVIEW;
+        let place = |x: f32, y: f32, width: f32, height: f32| self.bounds(Rect { x: scene.x + x, y: scene.y + y, width, height });
         let shape = |x: f32, y: f32, width: f32, height: f32, radius: f32, fill: [f32; 4]| ShapeRun {
-            bounds: self.bounds(Rect { x: scene.x + x, y: scene.y + y, width, height }),
+            bounds: place(x, y, width, height),
             radius: radius * scale,
             fill,
             border: None,
         };
+        let text = |text: &'static str, bounds: Bounds, size: f32, bold: bool, opacity: f32, align: Align, font: Font| TextRun {
+            text,
+            bounds,
+            size: size * scale,
+            bold,
+            opacity,
+            align,
+            font,
+            even_digits: false,
+        };
+        let green = |alpha: f32| [GREEN[0], GREEN[1], GREEN[2], alpha];
         painting.shapes.push(shape(0.0, 0.0, scene.width, scene.height, 12.0, [0.204, 0.314, 0.486, 1.0]));
-        painting.shapes.push(shape(70.0, 26.0, 70.0, 70.0, 35.0, [0.91, 0.725, 0.227, 1.0]));
-        painting.shapes.push(shape(scene.width - 160.0, 14.0, 88.0, 88.0, 44.0, [0.184, 0.659, 0.604, 1.0]));
+        painting.shapes.push(shape(40.0, 26.0, 60.0, 60.0, 30.0, [0.91, 0.725, 0.227, 1.0]));
+        painting.shapes.push(shape(scene.width - 120.0, 10.0, 76.0, 76.0, 38.0, [0.184, 0.659, 0.604, 1.0]));
 
-        let left = (scene.width - PILL_WIDTH) / 2.0;
+        let left = (scene.width - PILL_WIDTH - GAP - CARD_WIDTH) / 2.0;
+        let card_left = left + PILL_WIDTH + GAP;
         let notch = self.state.style == IslandStyle::Notch;
-        // The notch starts above the scene, which is then painted over, so that
-        // its top corners stay square against the edge.
-        let (top, height, radius) = if notch {
-            (-16.0, PILL_HEIGHT + 16.0, 14.0)
-        } else {
-            (12.0, PILL_HEIGHT, PILL_HEIGHT / 2.0)
-        };
         let glass = self.state.material == Material::Glass;
-        let pill = ShapeRun {
-            border: glass.then_some(([1.0, 1.0, 1.0, 0.3], scale)),
-            ..shape(left, top, PILL_WIDTH, height, radius, if glass { [0.05, 0.05, 0.09, 0.62] } else { [0.0, 0.0, 0.0, 1.0] })
-        };
-        painting.shapes.push(pill);
-        painting.shapes.push(shape(left - 2.0, -18.0, PILL_WIDTH + 4.0, 18.0, 0.0, BACKGROUND));
+        let fill = if glass { [0.05, 0.05, 0.09, 0.62] } else { [0.0, 0.0, 0.0, 1.0] };
+        let border = glass.then_some(([1.0, 1.0, 1.0, 0.3], scale));
+        // A notch starts above the scene, which is then painted over, so that
+        // its top corners stay square against the edge.
+        let (top, above) = if notch { (0.0, 16.0) } else { (12.0, 0.0) };
+        let pill_radius = if notch { 14.0 } else { PILL_HEIGHT / 2.0 };
+        let card_radius = if notch { 16.0 } else { 22.0 };
+        painting.shapes.push(ShapeRun { border, ..shape(left, top - above, PILL_WIDTH, PILL_HEIGHT + above, pill_radius, fill) });
+        painting.shapes.push(ShapeRun { border, ..shape(card_left, top - above, CARD_WIDTH, CARD_HEIGHT + above, card_radius, fill) });
+        painting.shapes.push(shape(left - 2.0, -18.0, PILL_WIDTH + GAP + CARD_WIDTH + 4.0, 18.0, 0.0, BACKGROUND));
 
-        let middle = if notch { PILL_HEIGHT / 2.0 } else { top + PILL_HEIGHT / 2.0 };
-        let line = |x: f32, width: f32| {
-            self.bounds(Rect { x: scene.x + left + x, y: scene.y + middle - 12.0, width, height: 24.0 })
-        };
-        painting.texts.push(TextRun {
-            text: ICON_MUSIC,
-            bounds: line(16.0, 22.0),
-            size: 15.0 * scale,
-            bold: false,
-            opacity: 1.0,
-            align: Align::Center,
-            font: Font::Icons,
-            even_digits: false,
-        });
-        painting.texts.push(TextRun {
-            text: "Kısa Şarkı",
-            bounds: line(46.0, 84.0),
-            size: 13.0 * scale,
-            bold: true,
-            opacity: 1.0,
-            align: Align::Leading,
-            font: Font::Text,
-            even_digits: false,
-        });
+        let middle = top + PILL_HEIGHT / 2.0;
+        let line = |x: f32, width: f32| place(left + x, middle - 12.0, width, 24.0);
+        painting.texts.push(text(ICON_MUSIC, line(16.0, 22.0), 15.0, false, 1.0, Align::Center, Font::Icons));
+        painting.texts.push(text("Kısa Şarkı", line(46.0, 84.0), 13.0, true, 1.0, Align::Leading, Font::Text));
         let heights = if self.state.sound_wave { [6.0, 12.0, 15.0, 9.0] } else { [4.0; 4] };
         let opacity = if self.state.sound_wave { 1.0 } else { 0.6 };
         for (index, bar) in heights.into_iter().enumerate() {
-            let bounds = self.bounds(Rect {
-                x: scene.x + left + 136.0 + index as f32 * 6.0,
-                y: scene.y + middle - bar / 2.0,
-                width: 3.0,
-                height: bar,
-            });
+            let bounds = place(left + 136.0 + index as f32 * 6.0, middle - bar / 2.0, 3.0, bar);
             painting.bars.push(BarRun { bounds, opacity });
         }
+
+        // The open view of a send, as the chosen style shows it.
+        let center = top + CARD_HEIGHT / 2.0;
+        let whole = place(card_left, top, CARD_WIDTH, CARD_HEIGHT);
+        let shape_bounds = place(card_left, top - above, CARD_WIDTH, CARD_HEIGHT + above);
+        let percent_small = place(card_left + 10.0, center - 10.0, 48.0, 20.0);
+        let percent_large = place(card_left + 4.0, center - 13.0, 60.0, 26.0);
+        match self.state.progress {
+            ProgressStyle::Ring => {
+                let point = place(card_left + 34.0, center, 0.0, 0.0);
+                painting.rings.push(RingRun {
+                    center_x: point.x,
+                    center_y: point.y,
+                    radius: 19.0 * scale,
+                    width: 3.5 * scale,
+                    fraction: SENT,
+                    opacity: 1.0,
+                });
+                painting.texts.push(text("%64", percent_small, 10.5, true, 1.0, Align::Center, Font::Text));
+            }
+            ProgressStyle::Edge => {
+                let radius = card_radius * scale;
+                painting.outlines.push(OutlineRun { bounds: whole, radius, width: 5.0 * scale, color: green(0.25), fraction: SENT, dash: None, open_top: notch });
+                painting.outlines.push(OutlineRun { bounds: whole, radius, width: 2.0 * scale, color: green(1.0), fraction: SENT, dash: None, open_top: notch });
+                painting.texts.push(text("%64", percent_large, 15.0, true, 1.0, Align::Center, Font::Text));
+            }
+            ProgressStyle::Fill => {
+                let radius = card_radius * scale;
+                let reach = CARD_WIDTH * SENT;
+                let filled = ShapeRun { bounds: place(card_left, top, reach, CARD_HEIGHT), radius: 0.0, fill: green(0.26), border: None };
+                let front = ShapeRun { bounds: place(card_left + reach - 2.0, top, 2.0, CARD_HEIGHT), radius: 0.0, fill: green(0.8), border: None };
+                painting.clipped.push((filled, shape_bounds, radius));
+                painting.clipped.push((front, shape_bounds, radius));
+                painting.texts.push(text("%64", percent_large, 15.0, true, 1.0, Align::Center, Font::Text));
+            }
+        }
+        let words = CARD_WIDTH - 76.0;
+        painting.texts.push(text("Gönderiliyor", place(card_left + 66.0, center - 17.0, words, 17.0), 11.5, true, 1.0, Align::Leading, Font::Text));
+        painting.texts.push(text("Kapadokya.jpg", place(card_left + 66.0, center + 1.0, words, 16.0), 10.5, false, 0.6, Align::Leading, Font::Text));
     }
 }
 
