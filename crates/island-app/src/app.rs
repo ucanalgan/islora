@@ -13,7 +13,7 @@ use island_core::focus::{
     CHANGE_WAIT_MS, FocusReport, FocusStatus, FocusTracker, START_WAIT_MS,
 };
 use island_core::ics::{self, Event};
-use island_core::media::RepeatMode;
+use island_core::media::{RepeatMode, Sides};
 use island_core::qr::QrMatrix;
 use island_core::transfer::{Stage, Transfer, WAIT_MS};
 use island_core::layout::{
@@ -84,6 +84,7 @@ const TIMER_CLOCK: usize = 10;
 const TIMER_LANGUAGE: usize = 11;
 const TIMER_FULLSCREEN: usize = 12;
 const TIMER_DRAG_LEAVE: usize = 13;
+const TIMER_SCREEN_CLIP: usize = 14;
 
 /// When the pill looks settled. The compositor's own completion event only
 /// fires about 1.2 s after an animation starts, long after it visibly stopped.
@@ -105,6 +106,12 @@ const NETWORK_QUIET_AFTER_WAKE_MS: Millis = 20_000;
 const CLIPBOARD_QUIET_MS: Millis = 800;
 /// A screenshot lands on the clipboard too, around when its file appears.
 const CLIPBOARD_QUIET_AFTER_SCREENSHOT_MS: Millis = 3_000;
+/// How long after its shortcut a screen clip may land on the clipboard: the
+/// user still has to choose what to clip.
+const SCREEN_CLIP_WAIT_MS: Millis = 60_000;
+/// The Snipping Tool may save the clip as a file too, whose notice has the
+/// picture, so the clipboard waits this long to see if one comes.
+const SCREEN_CLIP_SETTLE_MS: u32 = 1_200;
 /// Windows switches language a moment after the shortcut's last key comes up.
 const LANGUAGE_SETTLE_MS: u32 = 300;
 /// A window opened from the bare desktop counts as full screen for a moment, as
@@ -197,6 +204,8 @@ struct App {
     network_quiet_until: Millis,
     /// Until when a change of the clipboard is left unsaid.
     clipboard_quiet_until: Millis,
+    /// Until when a picture on the clipboard counts as a screen clip.
+    clip_expected_until: Millis,
     /// One preset step in milliseconds. Tests shorten it from minutes to seconds.
     preset_unit: Millis,
     tracker: SystemTracker,
@@ -230,6 +239,8 @@ struct App {
     sharing: Option<Sharing>,
     imaging: Imaging,
     progress_style: ProgressStyle,
+    /// What the open music view shows, for buttons that depend on the player.
+    shown_media: Option<MediaSnapshot>,
     /// Which of the two optional buttons the player on screen offers.
     offers_shuffle: bool,
     offers_repeat: bool,
@@ -341,6 +352,7 @@ pub fn run() -> Result<()> {
         notices_off: stored_notices_off(),
         network_quiet_until: 0,
         clipboard_quiet_until: 0,
+        clip_expected_until: 0,
         preset_unit: if std::env::args().any(|a| a == "--short-timers") { 1_000 } else { 60_000 },
         tracker,
         indicators,
@@ -355,6 +367,7 @@ pub fn run() -> Result<()> {
         shown_bubble: false,
         seekable_ms: None,
         alert_file: None,
+        shown_media: None,
         alert_reveals: false,
         converted: Vec::new(),
         dragged: Vec::new(),
@@ -487,6 +500,7 @@ impl App {
         self.seekable_ms = media.filter(|media| media.can_seek && media.duration_ms > 0).map(|media| media.duration_ms);
         self.alert_file = frame.activity.as_ref().and_then(|activity| activity.file.clone());
         self.alert_reveals = frame.activity.as_ref().is_some_and(|activity| activity.reveal);
+        self.shown_media = media.cloned();
         self.offers_shuffle = media.is_some_and(|media| media.shuffle.is_some());
         self.offers_repeat = media.is_some_and(|media| media.repeat.is_some());
         let expanded = frame.presentation == Presentation::Expanded;
@@ -579,6 +593,10 @@ impl App {
                 self.cancel_timer(TIMER_LANGUAGE);
                 self.check_language();
             }
+            TIMER_SCREEN_CLIP => {
+                self.cancel_timer(TIMER_SCREEN_CLIP);
+                self.show_indicator(Indicator::ScreenClip);
+            }
             TIMER_DRAG_LEAVE => {
                 self.cancel_timer(TIMER_DRAG_LEAVE);
                 self.end_drag();
@@ -658,7 +676,7 @@ impl App {
                         _ => true,
                     });
                     if let Some(button) = button {
-                        self.media.press(button);
+                        self.press_media(button, now);
                         return;
                     }
                 }
@@ -751,6 +769,28 @@ impl App {
         }
         self.island.click(now);
         self.refresh();
+    }
+
+    /// Beside play, a button skips a track, or jumps within a video that has
+    /// none to skip, or does nothing if the player takes neither.
+    fn press_media(&mut self, button: MediaButton, now: Millis) {
+        let Some(media) = &self.shown_media else {
+            self.media.press(button);
+            return;
+        };
+        let forward = button == MediaButton::Next;
+        match (button, media.sides()) {
+            (MediaButton::Previous | MediaButton::Next, Sides::Jumps) => {
+                let target = media.jump_target(forward, now);
+                self.media.seek(target);
+                self.island.seek_media(target, now);
+                self.refresh();
+            }
+            (MediaButton::Previous | MediaButton::Next, Sides::Unavailable) => {}
+            (MediaButton::Previous, _) if !media.can_previous => {}
+            (MediaButton::Next, _) if !media.can_next => {}
+            _ => self.media.press(button),
+        }
     }
 
     fn start_preset(&mut self, index: usize, now: Millis) {
@@ -946,6 +986,11 @@ impl App {
         }
         if let Some(indicator) = clipboard::copied() {
             self.clipboard_quiet_until = now + CLIPBOARD_QUIET_MS;
+            if matches!(indicator, Indicator::Copied { what: "Görsel" }) && now < self.clip_expected_until {
+                self.clip_expected_until = 0;
+                self.set_timer(TIMER_SCREEN_CLIP, SCREEN_CLIP_SETTLE_MS);
+                return;
+            }
             self.show_indicator(indicator);
         }
     }
@@ -1530,6 +1575,8 @@ impl App {
     fn show_indicator(&mut self, indicator: Indicator) {
         if matches!(indicator, Indicator::Screenshot { .. }) {
             self.clipboard_quiet_until = self.now() + CLIPBOARD_QUIET_AFTER_SCREENSHOT_MS;
+            // The file's notice, with its picture, stands for the clip as well.
+            self.cancel_timer(TIMER_SCREEN_CLIP);
         }
         let turned_off = indicator.setting().is_some_and(|name| self.is_turned_off(name));
         if turned_off || (indicator.is_brief() && self.island.is_open()) {
@@ -1680,7 +1727,8 @@ impl App {
                 }
             }
             5 => self.island.open_convert(summary(std::slice::from_ref(&photo)), now),
-            6..=11 => {
+            // 16 is the code without a warning, as most networks show it.
+            6..=11 | 16 => {
                 let code = QrMatrix::encode("http://192.168.1.20:52731/q7m2k4vx9pd3hz6tbw5n");
                 let Some(code) = code else { return };
                 self.island.start_transfer(Transfer {
@@ -1722,6 +1770,24 @@ impl App {
                     ..Activity::new(Kind::Notification)
                 });
             }
+            14 => {
+                // A browser video: no tracks to skip, so the sides jump instead.
+                let video = MediaSnapshot {
+                    is_music: false,
+                    can_previous: false,
+                    can_next: false,
+                    can_seek: true,
+                    shuffle: None,
+                    repeat: None,
+                    duration_ms: 500_000,
+                    ..demo_track("Uzun bir video", true, now)
+                };
+                // Real updates would wipe out the made-up video, as in the demo.
+                self.demo_step = Some(0);
+                self.island.upsert_media(video, now);
+                self.island.click(now);
+            }
+            15 => self.show_indicator(Indicator::ScreenClip),
             _ => {}
         }
         self.refresh();
@@ -1811,6 +1877,9 @@ fn demo_track(title: &str, playing: bool, now: Millis) -> MediaSnapshot {
         sampled_at: now,
         can_seek: false,
         artwork: None,
+        is_music: true,
+        can_previous: true,
+        can_next: true,
     }
 }
 
@@ -2004,6 +2073,9 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                 }
                 Some(KeyEvent::LanguageKey) => {
                     with_app(|app| app.set_timer(TIMER_LANGUAGE, LANGUAGE_SETTLE_MS));
+                }
+                Some(KeyEvent::ScreenClip) => {
+                    with_app(|app| app.clip_expected_until = app.now() + SCREEN_CLIP_WAIT_MS);
                 }
                 None => {}
             }

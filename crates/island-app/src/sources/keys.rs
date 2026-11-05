@@ -3,6 +3,7 @@
 //! low-level hook it adds no delay to other apps' typing: Windows sends a copy
 //! here instead of waiting for us.
 
+use std::cell::Cell;
 use std::mem::size_of;
 
 use island_core::Indicator;
@@ -11,7 +12,7 @@ use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::Globalization::LCIDToLocaleName;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, GetKeyboardLayout, VK_CAPITAL, VK_CONTROL, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RWIN,
-    VK_SHIFT, VK_SPACE,
+    VK_SHIFT, VK_SNAPSHOT, VK_SPACE,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK,
@@ -24,11 +25,20 @@ const USAGE_PAGE_GENERIC: u16 = 0x01;
 const USAGE_KEYBOARD: u16 = 0x06;
 const LANGUAGE_MASK: usize = 0xFFFF;
 const LONGEST_LOCALE_NAME: usize = 85;
+const VK_S: u16 = 0x53;
+
+thread_local! {
+    /// Whether the Windows key and Shift are down, followed from the same
+    /// input, as asking Windows about another app's keys is not reliable.
+    static HELD: Cell<(bool, bool)> = const { Cell::new((false, false)) };
+}
 
 pub enum KeyEvent {
     Lock(Indicator),
     /// A key from the shortcuts that switch language, so it may have changed.
     LanguageKey,
+    /// Win+Shift+S or Print Screen: a screen clip is on its way to the clipboard.
+    ScreenClip,
 }
 
 pub fn start(hwnd: HWND) -> Result<()> {
@@ -41,7 +51,8 @@ pub fn start(hwnd: HWND) -> Result<()> {
     unsafe { RegisterRawInputDevices(&[keyboard], size_of::<RAWINPUTDEVICE>() as u32) }
 }
 
-/// Decodes `WM_INPUT`. Acts when the key is released, as holding it down repeats.
+/// Decodes `WM_INPUT`. Acts when the key is released, as holding it down
+/// repeats, except for the screen clip shortcut, which acts at once.
 pub fn key_event(lparam: LPARAM) -> Option<KeyEvent> {
     let mut input = RAWINPUT::default();
     let mut size = size_of::<RAWINPUT>() as u32;
@@ -59,10 +70,19 @@ pub fn key_event(lparam: LPARAM) -> Option<KeyEvent> {
     }
 
     let keyboard = unsafe { input.data.keyboard };
-    if u32::from(keyboard.Flags) & RI_KEY_BREAK == 0 {
-        return None;
-    }
     let key = keyboard.VKey;
+    let released = u32::from(keyboard.Flags) & RI_KEY_BREAK != 0;
+    let (mut windows, mut shift) = HELD.get();
+    if key == VK_LWIN.0 || key == VK_RWIN.0 {
+        windows = !released;
+    } else if key == VK_SHIFT.0 {
+        shift = !released;
+    }
+    HELD.set((windows, shift));
+    if !released {
+        let clip = (key == VK_S && windows && shift) || key == VK_SNAPSHOT.0;
+        return clip.then_some(KeyEvent::ScreenClip);
+    }
     if key == VK_CAPITAL.0 {
         Some(KeyEvent::Lock(Indicator::CapsLock { on: is_toggled(VK_CAPITAL.0) }))
     } else if key == VK_NUMLOCK.0 {

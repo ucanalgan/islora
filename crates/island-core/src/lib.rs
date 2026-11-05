@@ -14,6 +14,7 @@ pub mod ics;
 pub mod indicator;
 pub mod layout;
 pub mod media;
+pub mod media_kind;
 pub mod qr;
 pub mod schedule;
 pub mod scheduler;

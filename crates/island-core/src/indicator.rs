@@ -40,6 +40,8 @@ pub enum Indicator {
     Display { added: bool, count: u32 },
     /// `image` is the encoded file, when it could be read in time.
     Screenshot { path: String, image: Option<Arc<[u8]>> },
+    /// A screen clip that went only to the clipboard, without a file.
+    ScreenClip,
     /// `what` says the kind of content, never the content itself.
     Copied { what: &'static str },
     BatterySaver { on: bool },
@@ -60,7 +62,7 @@ impl Indicator {
             Indicator::AirplaneMode { .. } => Some("airplane"),
             Indicator::Usb { .. } => Some("usb"),
             Indicator::Display { .. } => Some("display"),
-            Indicator::Screenshot { .. } => Some("screenshot"),
+            Indicator::Screenshot { .. } | Indicator::ScreenClip => Some("screenshot"),
             Indicator::Copied { .. } => Some("clipboard"),
             Indicator::BatterySaver { .. } => Some("battery_saver"),
             Indicator::KeyboardLanguage { .. } => Some("keyboard_language"),
@@ -85,6 +87,10 @@ impl Indicator {
                 file: Some(path),
                 expires_at: Some(now + SCREENSHOT_MS),
                 ..notice(Icon::Camera, "Ekran görüntüsü", "Açmak için tıkla", now)
+            },
+            Indicator::ScreenClip => Activity {
+                expires_at: Some(now + SCREENSHOT_MS),
+                ..notice(Icon::Camera, "Ekran alıntısı", "Panoya kopyalandı", now)
             },
             Indicator::Copied { what } => brief(Icon::Clipboard, "Kopyalandı", what, now),
             Indicator::BatterySaver { on } => {
@@ -431,6 +437,15 @@ mod tests {
         assert_eq!(activity.file.as_deref(), Some("a.png"));
         assert_eq!(activity.expires_at, Some(1_000 + SCREENSHOT_MS));
         assert!(!activity.brief);
+    }
+
+    #[test]
+    fn a_screen_clip_is_a_screenshot_notice_without_a_file() {
+        let activity = Indicator::ScreenClip.into_activity(1_000);
+        assert_eq!((activity.title.as_str(), activity.detail.as_str()), ("Ekran alıntısı", "Panoya kopyalandı"));
+        assert_eq!(activity.file, None);
+        assert!(!activity.brief);
+        assert_eq!(Indicator::ScreenClip.setting(), Some("screenshot"));
     }
 
     #[test]

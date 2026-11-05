@@ -3,12 +3,12 @@
 //! WinRT calls here can take a while, so they run on their own thread, which
 //! blocks on a channel and costs nothing until something actually changes.
 
-use std::iter::once;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use island_core::media::RepeatMode;
+use island_core::media_kind::{self, ArtShape, Reported, Signals, art_shape, display_artist};
 use island_core::{MediaButton, MediaSnapshot, Millis};
 use windows::Foundation::TypedEventHandler;
 use windows::Media::Control::{
@@ -32,6 +32,9 @@ const TICKS_PER_MS: i64 = 10_000;
 const EPOCH_GAP_SECONDS: u64 = 11_644_473_600;
 /// Refuses absurd thumbnails rather than holding them in memory.
 const MAX_ARTWORK_BYTES: u64 = 8 * 1024 * 1024;
+/// Browsers name a new track before they swap its picture, sometimes without
+/// saying so, so the picture is read once more this long after a change.
+const ARTWORK_SETTLE: Duration = Duration::from_millis(1_500);
 
 enum Signal {
     SessionChanged,
@@ -121,11 +124,32 @@ impl Drop for Tracked {
     }
 }
 
-#[derive(Default)]
 struct Metadata {
     title: String,
+    /// As the player gave it, which the decision about music needs.
     artist: String,
+    album: bool,
+    /// Fields only music apps fill in: a track number or count, a genre, an
+    /// album artist.
+    music_details: bool,
+    /// What the player says it plays, if it says.
+    reported: Option<MediaPlaybackType>,
     artwork: Option<Arc<[u8]>>,
+    art: ArtShape,
+}
+
+impl Default for Metadata {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            artist: String::new(),
+            album: false,
+            music_details: false,
+            reported: None,
+            artwork: None,
+            art: ArtShape::None,
+        }
+    }
 }
 
 struct Worker {
@@ -156,14 +180,32 @@ impl Worker {
 
         let mut tracked: Option<Tracked> = None;
         let mut metadata = Metadata::default();
+        let mut look_again: Option<Instant> = None;
 
-        while let Ok(first) = self.inbox.recv() {
-            // Players send bursts of events; handle each burst once.
-            let (mut session_changed, mut metadata_changed) = (false, false);
+        loop {
+            // Asleep until something happens, or until the picture is due a second look.
+            let first = match look_again {
+                Some(at) => match self.inbox.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                    Ok(signal) => Some(signal),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                },
+                None => match self.inbox.recv() {
+                    Ok(signal) => Some(signal),
+                    Err(_) => break,
+                },
+            };
+            // Players send bursts of events; handle each burst once. A second
+            // look at the picture is a metadata change of its own.
+            let mut session_changed = false;
+            let mut metadata_changed = first.is_none();
+            if first.is_none() {
+                look_again = None;
+            }
             let mut timeline_changed = false;
             let mut presses = Vec::new();
             let mut seek = None;
-            for signal in once(first).chain(self.inbox.try_iter()) {
+            for signal in first.into_iter().chain(self.inbox.try_iter()) {
                 match signal {
                     Signal::SessionChanged => session_changed = true,
                     Signal::MetadataChanged => metadata_changed = true,
@@ -190,7 +232,11 @@ impl Worker {
                 press(session, button);
             }
             if metadata_changed {
+                let before = metadata.title.clone();
                 metadata = read_metadata(session, &metadata).unwrap_or_default();
+                if metadata.title != before {
+                    look_again = Some(Instant::now() + ARTWORK_SETTLE);
+                }
             }
             // Reading now would still return the old position. The player
             // reports the new one by itself, unless it refused.
@@ -244,22 +290,48 @@ impl Worker {
             position_ms += (since_update as f32 * rate) as i64;
         }
 
-        // Browsers report everything as music, so what really tells a video from
-        // a song is the player offering these at all.
         let controls = info.Controls()?;
-        let video = info.PlaybackType().and_then(|kind| kind.Value()) == Ok(MediaPlaybackType::Video);
+        let kind = info.PlaybackType().and_then(|kind| kind.Value()).ok().or(metadata.reported);
+        let reported = match kind {
+            Some(MediaPlaybackType::Video) => Reported::Video,
+            Some(MediaPlaybackType::Music) => Reported::Music,
+            _ => Reported::Unknown,
+        };
+        let video = reported == Reported::Video;
+        let shuffle = !video && controls.IsShuffleEnabled()?;
+        let repeat = !video && controls.IsRepeatEnabled()?;
+        let can_previous = controls.IsPreviousEnabled()?;
+        let can_next = controls.IsNextEnabled()?;
+        let can_seek = controls.IsPlaybackPositionEnabled()?;
+        let duration_ms = ((end - start).max(0) / TICKS_PER_MS) as u64;
+        let is_music = media_kind::is_music(&Signals {
+            reported,
+            title: &metadata.title,
+            artist: &metadata.artist,
+            album: metadata.album,
+            music_details: metadata.music_details,
+            shuffle_or_repeat: shuffle || repeat,
+            channels: controls.IsChannelUpEnabled()? || controls.IsChannelDownEnabled()?,
+            tracks: can_previous || can_next,
+            live: duration_ms == 0 && !can_seek,
+            duration_ms,
+            art: metadata.art,
+        });
         Ok(Some(MediaSnapshot {
             new_position,
-            shuffle: (!video && controls.IsShuffleEnabled()?).then(|| shuffle_of(&info)),
-            repeat: (!video && controls.IsRepeatEnabled()?).then(|| repeat_of(&info)),
+            shuffle: shuffle.then(|| shuffle_of(&info)),
+            repeat: repeat.then(|| repeat_of(&info)),
+            is_music,
+            can_previous,
+            can_next,
             title: metadata.title.clone(),
-            artist: metadata.artist.clone(),
+            artist: display_artist(&metadata.artist).to_owned(),
             playing,
             position_ms: position_ms as u64,
-            duration_ms: ((end - start).max(0) / TICKS_PER_MS) as u64,
+            duration_ms,
             rate,
             sampled_at: self.clock.elapsed().as_millis() as Millis,
-            can_seek: controls.IsPlaybackPositionEnabled()?,
+            can_seek,
             artwork: metadata.artwork.clone(),
         }))
     }
@@ -321,14 +393,26 @@ fn read_metadata(session: &Session, previous: &Metadata) -> Result<Metadata> {
     let properties = session.TryGetMediaPropertiesAsync()?.join()?;
     let title = properties.Title()?.to_string();
     let artist = properties.Artist()?.to_string();
+    let album = properties.AlbumTitle().is_ok_and(|album| !album.is_empty());
+    let music_details = properties.TrackNumber().unwrap_or(0) > 0
+        || properties.AlbumTrackCount().unwrap_or(0) > 0
+        || properties.AlbumArtist().is_ok_and(|artist| !artist.is_empty())
+        || properties.Genres().and_then(|genres| genres.Size()).unwrap_or(0) > 0;
+    let reported = properties.PlaybackType().and_then(|kind| kind.Value()).ok();
 
-    // Players often report the text first and the image a moment later.
+    // The picture is read every time, as players often send the new text
+    // with the old picture and the new picture only afterwards. An unchanged
+    // picture keeps its old copy, so nothing repaints for it.
     let same_track = title == previous.title && artist == previous.artist;
-    let artwork = match &previous.artwork {
-        Some(artwork) if same_track => Some(artwork.clone()),
-        _ => read_artwork(&properties),
+    let artwork = match (read_artwork(&properties), &previous.artwork) {
+        (Some(fresh), Some(known)) if fresh == *known => Some(known.clone()),
+        (Some(fresh), _) => Some(fresh),
+        // A picture that is late for the same track keeps the one it had.
+        (None, Some(known)) if same_track => Some(known.clone()),
+        (None, _) => None,
     };
-    Ok(Metadata { title, artist, artwork })
+    let art = artwork.as_deref().map_or(ArtShape::None, art_shape);
+    Ok(Metadata { title, artist, album, music_details, reported, artwork, art })
 }
 
 fn read_artwork(properties: &Properties) -> Option<Arc<[u8]>> {

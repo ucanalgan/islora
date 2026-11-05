@@ -382,7 +382,9 @@ impl Island {
         let new_track = before.is_some_and(|before| !before.is_same_track(snapshot));
         let up = self.activities.iter().find(|a| a.kind == Kind::NowPlaying && a.title == snapshot.title);
         let expires_at = up.and_then(|notice| notice.expires_at).unwrap_or(now + TRACK_NOTICE_MS);
-        if (new_track || up.is_some()) && snapshot.playing && self.announces_tracks && !self.is_open() {
+        // Only songs: the next video in a browser is no news.
+        let news = (new_track || up.is_some()) && snapshot.playing && snapshot.is_music;
+        if news && self.announces_tracks && !self.is_open() {
             self.upsert(snapshot.track_notice(expires_at));
         }
     }
@@ -1791,6 +1793,9 @@ mod tests {
             new_position: true,
             shuffle: None,
             repeat: None,
+            is_music: true,
+            can_previous: true,
+            can_next: true,
         }
     }
 
@@ -1856,6 +1861,15 @@ mod tests {
         island.click(0);
         island.upsert_media(track("İki", true), 500);
         assert_eq!(island.frame(500).presentation, Presentation::Expanded);
+    }
+
+    #[test]
+    fn a_new_video_is_not_announced() {
+        let mut island = Island::new();
+        let video = |title: &str| MediaSnapshot { is_music: false, ..track(title, true) };
+        island.upsert_media(video("Bir"), 0);
+        island.upsert_media(video("İki"), 1_000);
+        assert_eq!(island.frame(1_000).activity.map(|a| a.kind), Some(Kind::Media));
     }
 
     #[test]

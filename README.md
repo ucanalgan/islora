@@ -12,8 +12,12 @@ A live island for Windows 11. Islora shows what your PC is doing in a small blac
     <td><img src="assets/screenshots/timer.png" alt="Expanded running timer"></td>
   </tr>
   <tr>
+    <td><img src="assets/screenshots/drop.png" alt="Files dragged to the island, over the three places they can go"></td>
+    <td><img src="assets/screenshots/phone.png" alt="A QR code for a phone to download a file over the local network"></td>
+  </tr>
+  <tr>
     <td><img src="assets/screenshots/glass.png" alt="The glass material, showing the colours behind it"></td>
-    <td><img src="assets/screenshots/settings.png" alt="The settings window on its appearance page"></td>
+    <td><img src="assets/screenshots/settings.png" alt="The settings window on its appearance page, with the progress style for sending"></td>
   </tr>
 </table>
 
@@ -28,11 +32,11 @@ The file is not signed, so SmartScreen may warn you the first time. Choose **Mor
 
 ## What it shows
 
-- **Music:** cover, title, artist, progress and playback buttons for any player that reports to Windows, such as Spotify or a browser. You can seek, shuffle and repeat when the player allows it.
+- **Music and video:** cover, title, artist, progress and playback buttons for any player that reports to Windows, such as Spotify, or YouTube and YouTube Music in a browser. You can seek, shuffle and repeat when the player allows it. Where a player has no previous or next, as for a single video, the buttons beside play jump 10 seconds back and 30 forward. Songs are told from videos by what comes with them, such as an album, a square cover, the controls on offer and the title, not by which app or site plays them, so a new song is announced and the next video is not.
 - **Timers:** Islora's own countdown, Windows Focus sessions in both directions, and running timers from the Clock app. Clock timers are read-only, as Windows offers no public way to create them.
 - **Calendar:** events from a private iCal address, as a bubble 30 minutes before they start, in the pill 5 minutes before, and as an alert when they begin.
 - **Files:** drag files to the top of the screen and three places open. **Raf** keeps them at hand to drag somewhere else later. **Telefona gönder** shows a code that a phone camera scans to download them over your network, with no app or account on the phone. **Dönüştür** saves pictures as JPG or PNG, or makes them smaller, next to the original.
-- **System changes:** volume, brightness, Caps Lock, Num Lock, charger, low battery, Energy Saver, Bluetooth, sound output, microphone, camera, internet, Wi-Fi, VPN, airplane mode, USB drives, displays, screenshots, copied items, track changes and keyboard language.
+- **System changes:** volume, brightness, Caps Lock, Num Lock, charger, low battery, Energy Saver, Bluetooth, sound output, microphone, camera, internet, Wi-Fi, VPN, airplane mode, USB drives, displays, screenshots and screen clips, copied items, new songs and keyboard language.
 
 Two things can run at once: the main one sits in the pill and the second in a bubble beside it.
 
@@ -70,7 +74,9 @@ Islora has no account and no telemetry. On its own it makes one kind of network 
 
 While you send files to a phone, and only then, Islora runs a small web server on your computer that only devices on the same network can reach. It answers only at an address with a one-time code in it, which the QR code carries, offers only the files you dropped, and stops once they are downloaded or after 5 minutes without a download. The files go straight from your computer to the phone and never through the internet.
 
-The shelf keeps where your files are, never copies, and forgets them when Islora quits. Converted pictures are saved next to the original, which is left as it was. It never reads what you copy, only whether it was text, an image or a file, and it skips copies marked by password managers. From the Clock app's settings it reads the timers and nothing else.
+The shelf keeps where your files are, never copies, and forgets them when Islora quits. Converted pictures are saved next to the original, which is left as it was.
+
+Islora never reads what you copy, only whether it was text, an image or a file, and it skips copies marked by password managers. Of the keyboard it notices only Caps Lock, Num Lock, the language shortcut and the screen clip shortcut, and keeps nothing you type. From the Clock app's settings it reads the timers and nothing else.
 
 ## System load
 
@@ -84,6 +90,8 @@ The exception is the sound wave in the small pill while music plays. It loops, s
 - Only the primary display is used.
 - The Windows volume flyout and notification banners still appear beside the island.
 - The first time you send to a phone, Windows asks whether Islora may use the network. Allow it on private networks, or the phone cannot connect. On a network Windows treats as public, phones usually cannot connect at all.
+- Telling songs from videos rests on what each site sends. A page that sends nothing counts as a video, and an odd title can be misread.
+- A screen clip shows a preview only when the Snipping Tool saves it as a file. Otherwise the island says it was copied.
 - Converting HEIC pictures needs Microsoft's HEIF Image Extensions, and AVIF the AV1 Video Extension, both free in the Microsoft Store.
 - Some notices are unit tested but have not been checked against real events yet. The [release notes](https://github.com/ucanalgan/islora/releases/latest) list them.
 

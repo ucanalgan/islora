@@ -7,6 +7,9 @@ use crate::activity::{Activity, Icon, Kind, Millis};
 pub const PAUSED_LINGER_MS: Millis = 30_000;
 /// How long a new track is announced for.
 pub const TRACK_NOTICE_MS: Millis = 3_000;
+/// How far the buttons beside play jump in a player without tracks to skip.
+pub const JUMP_BACK_MS: u64 = 10_000;
+pub const JUMP_FORWARD_MS: u64 = 30_000;
 /// Players report their position roughly. A difference this small is that, not
 /// a jump, and following it would make the time on screen twitch.
 const POSITION_NOISE_MS: u64 = 3_000;
@@ -16,6 +19,18 @@ pub enum RepeatMode {
     Off,
     All,
     One,
+}
+
+/// What the buttons either side of play do, which depends on what the player
+/// offers rather than on which app it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sides {
+    /// The previous and next track, as in music players and playlists.
+    Tracks,
+    /// Back and forward within what plays, as for a single video.
+    Jumps,
+    /// Nothing the player accepts, so the buttons only show what they would be.
+    Unavailable,
 }
 
 impl RepeatMode {
@@ -48,6 +63,12 @@ pub struct MediaSnapshot {
     pub sampled_at: Millis,
     /// Whether the player accepts jumps to a position.
     pub can_seek: bool,
+    /// A song rather than a video or a recording. Browsers call everything
+    /// music, so this rests on what came with it: an album, or a player that
+    /// can shuffle and repeat.
+    pub is_music: bool,
+    pub can_previous: bool,
+    pub can_next: bool,
     /// Encoded image as the player supplied it.
     pub artwork: Option<Arc<[u8]>>,
 }
@@ -67,6 +88,26 @@ impl MediaSnapshot {
     /// Progress from 0 to 1, or `None` for sources without a known length.
     pub fn progress_at(&self, now: Millis) -> Option<f32> {
         (self.duration_ms > 0).then(|| self.position_at(now) as f32 / self.duration_ms as f32)
+    }
+
+    pub fn sides(&self) -> Sides {
+        if self.can_previous || self.can_next {
+            Sides::Tracks
+        } else if self.can_seek && self.duration_ms > 0 {
+            Sides::Jumps
+        } else {
+            Sides::Unavailable
+        }
+    }
+
+    /// Where a jump back or forward lands, within the track.
+    pub fn jump_target(&self, forward: bool, now: Millis) -> u64 {
+        let position = self.position_at(now);
+        if forward {
+            (position + JUMP_FORWARD_MS).min(self.duration_ms)
+        } else {
+            position.saturating_sub(JUMP_BACK_MS)
+        }
     }
 
     pub fn is_same_track(&self, other: &MediaSnapshot) -> bool {
@@ -139,7 +180,32 @@ mod tests {
             new_position: true,
             shuffle: None,
             repeat: None,
+            is_music: true,
+            can_previous: true,
+            can_next: true,
         }
+    }
+
+    #[test]
+    fn the_buttons_follow_what_the_player_offers() {
+        assert_eq!(snapshot(true).sides(), Sides::Tracks);
+        let video = MediaSnapshot { can_previous: false, can_next: false, ..snapshot(true) };
+        assert_eq!(video.sides(), Sides::Jumps);
+        let live = MediaSnapshot { can_seek: false, ..video.clone() };
+        assert_eq!(live.sides(), Sides::Unavailable);
+        // Only next, as at the start of a playlist, still means tracks.
+        let first = MediaSnapshot { can_previous: false, ..snapshot(true) };
+        assert_eq!(first.sides(), Sides::Tracks);
+    }
+
+    #[test]
+    fn jumps_stay_within_the_track() {
+        let paused = snapshot(false);
+        assert_eq!(paused.jump_target(false, 5_000), 0);
+        assert_eq!(paused.jump_target(true, 5_000), 40_000);
+        let near_end = MediaSnapshot { position_ms: 90_000, ..paused };
+        assert_eq!(near_end.jump_target(true, 5_000), 100_000);
+        assert_eq!(near_end.jump_target(false, 5_000), 80_000);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use island_core::drop::{
     CONVERT_NOTE, DropView, HEADER, Rect, SHELF_BACK, SHELF_CLEAR, SHELF_FORWARD, SHELF_TILES,
     TRANSFER_CODE, TRANSFER_STOP, TRANSFER_TEXT_LEFT, Zone, remove_button, thumbnail, tile_name,
 };
-use island_core::media::{RepeatMode, format_time};
+use island_core::media::{RepeatMode, Sides, format_time};
 use island_core::shelf::ShelfView;
 use island_core::transfer::{Shown, TransferView};
 use island_core::{
@@ -39,6 +39,11 @@ const ICON_SETTINGS: &str = "\u{E713}";
 const ICON_SHUFFLE: &str = "\u{E8B1}";
 const ICON_REPEAT_ALL: &str = "\u{E8EE}";
 const ICON_REPEAT_ONE: &str = "\u{E8ED}";
+const ICON_VIDEO: &str = "\u{E714}";
+const ICON_BACK_10: &str = "\u{ED3C}";
+const ICON_FORWARD_30: &str = "\u{ED3D}";
+/// A button the player does not take, shown so the row keeps its shape.
+const UNAVAILABLE_OPACITY: f32 = 0.35;
 const ICON_DOCUMENT: &str = "\u{E8A5}";
 const ICON_FOLDER: &str = "\u{E8B7}";
 const ICON_CLOSE: &str = "\u{E8BB}";
@@ -159,6 +164,10 @@ pub struct MediaScene {
     pub playing: bool,
     pub shuffle: Option<bool>,
     pub repeat: Option<RepeatMode>,
+    pub sides: Sides,
+    pub is_music: bool,
+    pub can_previous: bool,
+    pub can_next: bool,
     /// Only tracked where it is drawn, so the compact view never repaints for it.
     pub timing: Option<Timing>,
 }
@@ -273,6 +282,10 @@ impl Scene {
             playing: media.playing,
             shuffle: media.shuffle,
             repeat: media.repeat,
+            sides: media.sides(),
+            is_music: media.is_music,
+            can_previous: media.can_previous,
+            can_next: media.can_next,
             timing: (presentation == Presentation::Expanded)
                 .then(|| media.progress_at(now).map(|progress| {
                     let progress = scrub.unwrap_or(progress);
@@ -760,15 +773,19 @@ impl Scene {
         }
 
         for button in MediaButton::TRANSPORT {
-            let (glyph, size) = match button {
-                MediaButton::Previous => (ICON_PREVIOUS, 19.0),
-                MediaButton::PlayPause if media.playing => (ICON_PAUSE, 25.0),
-                MediaButton::PlayPause => (ICON_PLAY, 25.0),
-                _ => (ICON_NEXT, 19.0),
+            let (glyph, size, opacity) = match (button, media.sides) {
+                (MediaButton::PlayPause, _) if media.playing => (ICON_PAUSE, 25.0, 1.0),
+                (MediaButton::PlayPause, _) => (ICON_PLAY, 25.0, 1.0),
+                (MediaButton::Previous, Sides::Jumps) => (ICON_BACK_10, 21.0, 1.0),
+                (MediaButton::Previous, Sides::Tracks) if media.can_previous => (ICON_PREVIOUS, 19.0, 1.0),
+                (MediaButton::Previous, _) => (ICON_PREVIOUS, 19.0, UNAVAILABLE_OPACITY),
+                (_, Sides::Jumps) => (ICON_FORWARD_30, 21.0, 1.0),
+                (_, Sides::Tracks) if media.can_next => (ICON_NEXT, 19.0, 1.0),
+                _ => (ICON_NEXT, 19.0, UNAVAILABLE_OPACITY),
             };
             let half = 21.0;
             let bounds = canvas.bounds(button.center_x() - half, MEDIA_BUTTON_Y - half, half * 2.0, half * 2.0);
-            painting.texts.push(canvas.icon(glyph, bounds, size));
+            painting.texts.push(TextRun { opacity, ..canvas.icon(glyph, bounds, size) });
         }
         if let Some(on) = media.shuffle {
             canvas.mode_button(&mut painting, MediaButton::Shuffle, ICON_SHUFFLE, on);
@@ -997,7 +1014,10 @@ impl Canvas {
                 size: size * self.scale,
                 radius: radius * self.scale,
             }),
-            None => painting.texts.push(self.icon(ICON_NOTE, self.bounds(x, y, size, size), size * 0.62)),
+            None => {
+                let glyph = if media.is_music { ICON_NOTE } else { ICON_VIDEO };
+                painting.texts.push(self.icon(glyph, self.bounds(x, y, size, size), size * 0.62));
+            }
         }
     }
 }
