@@ -1,6 +1,6 @@
 use crate::activity::{Activity, Bubble, Icon, Kind, Millis, TimerView};
 use crate::drop::DropView;
-use crate::layout::{ProgressStyle, StartMode, TIMER_PRESETS};
+use crate::layout::{ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout};
 use crate::media::{MediaSnapshot, PAUSED_LINGER_MS, TRACK_NOTICE_MS};
 use crate::schedule::{EVENT_LEAD_MS, Upcoming};
 use crate::shelf::{Shelf, ShelfView};
@@ -111,6 +111,9 @@ pub struct Frame {
     pub activity: Option<Activity>,
     /// The next most important activity, shown as a bubble beside the pill.
     pub secondary: Option<Activity>,
+    /// What shares the pill with `activity` when a task sits side by side
+    /// with what lasts: the task beside music, or music under the open code.
+    pub companion: Option<Activity>,
     pub home: Option<HomeView>,
     pub panel: Option<PanelView>,
     /// Something finished and deserves a sound. True for one frame only.
@@ -158,6 +161,20 @@ pub struct Island {
     shelf: Shelf,
     transfer: Option<Transfer>,
     progress_style: ProgressStyle,
+    task_layout: TaskLayout,
+    /// What the last frame put in the bubble and beside the activity in the
+    /// pill, which a click there opens.
+    bubble_kind: Option<Kind>,
+    companion_kind: Option<Kind>,
+}
+
+/// Volume or brightness as a ring in the bubble, while a view stays open.
+fn level_bubble(level: &Activity) -> Activity {
+    let percent = level.level.unwrap_or(0);
+    Activity {
+        badge: Some(Bubble::Count { value: percent.to_string(), icon: level.icon, ring: Some(percent) }),
+        ..level.clone()
+    }
 }
 
 /// Whether a countdown is at its very end, on either side of it.
@@ -177,6 +194,10 @@ impl Island {
     /// Whether a view is open, which a small confirmation would only disturb.
     pub fn is_open(&self) -> bool {
         self.expanded || self.home || self.panel.is_some() || self.dragging.is_some()
+    }
+
+    pub fn set_task_layout(&mut self, layout: TaskLayout) {
+        self.task_layout = layout;
     }
 
     pub fn set_progress_style(&mut self, style: ProgressStyle) {
@@ -316,6 +337,38 @@ impl Island {
     pub fn transfer_direct_failed(&mut self) {
         if let Some(transfer) = &mut self.transfer {
             transfer.direct = None;
+        }
+    }
+
+    /// Wi-Fi went off with nothing else to connect the computer, or came back.
+    pub fn transfer_offline(&mut self, offline: bool) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.offline = offline;
+        }
+    }
+
+    /// A phone opened the code's page, so it found its way.
+    pub fn transfer_visited(&mut self) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.nudge_at = None;
+        }
+    }
+
+    /// What may stand in the phone's way, if anything.
+    pub fn transfer_warning(&mut self, warning: Option<String>) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.warning = warning;
+        }
+    }
+
+    /// Windows' Mobile Hotspot is on: the files are served there instead, for
+    /// a phone that is already on it.
+    pub fn transfer_hotspot(&mut self, download: QrMatrix, network: String) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.direct = Some(Direct::Hotspot { network: network.clone() });
+            transfer.code = std::sync::Arc::new(download);
+            transfer.network = network;
+            transfer.warning = None;
         }
     }
 
@@ -527,14 +580,27 @@ impl Island {
 
     /// A click on the bubble opens what it stands for.
     pub fn click_secondary(&mut self, now: Millis) {
-        self.update_derived(now);
-        if let Some(kind) = self.long_lived(now).get(1).map(|a| a.kind) {
-            self.focused = Some(kind);
-            self.expanded = true;
-            self.collapse_at = None;
-        } else {
-            self.open_shelf(now);
+        match self.bubble_kind {
+            Some(Kind::Shelf) | None => self.open_shelf(now),
+            // Volume set aside while a view stays open needs no view of its own.
+            Some(kind) if kind.is_transient() => {}
+            Some(kind) => self.open_kind(kind),
         }
+    }
+
+    /// A click on what shares the pill opens it.
+    pub fn click_companion(&mut self) {
+        if let Some(kind) = self.companion_kind {
+            self.open_kind(kind);
+        }
+    }
+
+    fn open_kind(&mut self, kind: Kind) {
+        self.home = false;
+        self.panel = None;
+        self.focused = Some(kind);
+        self.expanded = true;
+        self.collapse_at = None;
     }
 
     /// Closes whatever is open, once a choice made in it has been carried out.
@@ -653,6 +719,17 @@ impl Island {
             self.expanded = false;
             self.focused = None;
         }
+        let lasting: Vec<Activity> = self.long_lived(now).into_iter().cloned().collect();
+
+        // Volume and brightness never cover a code waiting to be scanned or a
+        // view a drop opened: they go in the bubble while it stays open.
+        let task_open = self.dragging.is_some()
+            || self.panel.is_some()
+            || (self.expanded && lasting.first().is_some_and(|a| a.kind == Kind::Transfer));
+        let (top, level) = match top {
+            Some(level) if level.level.is_some() && task_open => (lasting.first().cloned(), Some(level)),
+            top => (top, None),
+        };
         let interrupted = top.as_ref().is_some_and(|a| a.kind.is_transient());
 
         let presentation = match &top {
@@ -678,27 +755,51 @@ impl Island {
             _ => None,
         };
         let in_home = self.home && panel.is_none() && !interrupted && expanded;
-        let shows_bubble = matches!(
-            presentation,
-            Presentation::Compact | Presentation::Level | Presentation::Alert
-        );
-        // An interruption covers the pill only. Keeping the bubble means it does
-        // not vanish and return on every volume step.
-        let secondary = if shows_bubble {
-            self.long_lived(now).get(1).cloned().cloned().or_else(|| self.shelf_bubble())
-        } else {
-            None
+        let transfer_shown = top.as_ref().is_some_and(|a| a.kind == Kind::Transfer) && panel.is_none() && !in_home;
+        let transfer_open = expanded && transfer_shown;
+
+        // Side by side, the task rides in the music pill, and music rides
+        // under the open code. Anything else that lasts keeps to the bubble.
+        let shared = self.task_layout == TaskLayout::Shared;
+        let music_in_pill = top.as_ref().is_some_and(|a| a.media.is_some() && !a.kind.is_transient());
+        let companion = match presentation {
+            Presentation::Compact if shared && music_in_pill => lasting.iter().find(|a| a.kind == Kind::Transfer).cloned(),
+            Presentation::Expanded if shared && transfer_open => {
+                lasting.iter().find(|a| a.kind != Kind::Transfer && a.media.is_some()).cloned()
+            }
+            _ => None,
         };
+
+        // An interruption covers the pill only. Keeping the bubble means it does
+        // not vanish and return on every volume step. The open code keeps what
+        // lasts in view beside it, unless music already shows under it.
+        let shows_bubble = level.is_some()
+            || (transfer_open && companion.is_none())
+            || matches!(presentation, Presentation::Compact | Presentation::Level | Presentation::Alert);
+        let secondary = match &level {
+            _ if !shows_bubble => None,
+            Some(level) => Some(level_bubble(level)),
+            None => lasting
+                .iter()
+                .skip(1)
+                .find(|a| companion.as_ref().is_none_or(|c| c.kind != a.kind))
+                .cloned()
+                .or_else(|| self.shelf_bubble()),
+        };
+        self.bubble_kind = secondary.as_ref().map(|a| a.kind);
+        self.companion_kind = companion.as_ref().map(|a| a.kind);
 
         let timer_in_pill = top
             .as_ref()
             .is_some_and(|a| matches!(a.kind, Kind::TimerRunning | Kind::ClockTimer | Kind::Focus));
-        let transfer_open = expanded && panel.is_none() && top.as_ref().is_some_and(|a| a.kind == Kind::Transfer);
-        let wake_at = self.next_deadline(now, timer_in_pill, transfer_open);
+        // The time left only shows while the task has the pill or is open.
+        let transfer_counts = transfer_shown && matches!(presentation, Presentation::Compact | Presentation::Expanded);
+        let wake_at = self.next_deadline(now, timer_in_pill, transfer_counts);
         Frame {
             presentation,
             activity: if presentation == Presentation::Hidden || in_home || panel.is_some() { None } else { top },
             secondary,
+            companion,
             home: in_home.then(|| HomeView {
                 coming: self
                     .schedule
@@ -834,37 +935,50 @@ impl Island {
         }
     }
 
+    /// Activities in the order they claim the island, the dormant ones too if
+    /// asked. A short task leaves the pill to what lasts and takes the place
+    /// right after it, unless it is set to come to the front or was opened.
+    fn ranked(&self, now: Millis, dormant: bool) -> Vec<&Activity> {
+        let mut ranked: Vec<&Activity> = self
+            .activities
+            .iter()
+            .filter(|a| dormant || a.dormant_at.is_none_or(|at| at > now))
+            .collect();
+        ranked.sort_by_key(|a| a.order(now, self.focused));
+        if self.task_layout != TaskLayout::Front && self.focused != Some(Kind::Transfer) {
+            let lasting: Vec<usize> = (0..ranked.len()).filter(|&i| !ranked[i].kind.is_transient()).collect();
+            if let [first, second, ..] = lasting[..]
+                && ranked[first].kind == Kind::Transfer
+            {
+                let task = ranked.remove(first);
+                ranked.insert(second, task);
+            }
+        }
+        ranked
+    }
+
     /// Everything that lasts, most important first.
     fn long_lived(&self, now: Millis) -> Vec<&Activity> {
         let peeking = self.peek_until.is_some() || self.hovered;
-        let mut lasting: Vec<&Activity> = self
-            .activities
-            .iter()
-            .filter(|a| !a.kind.is_transient())
-            .filter(|a| peeking || a.dormant_at.is_none_or(|at| at > now))
-            .collect();
-        lasting.sort_by_key(|a| a.order(now, self.focused));
-        lasting
+        self.ranked(now, peeking).into_iter().filter(|a| !a.kind.is_transient()).collect()
     }
 
     /// The highest priority activity that shows without being asked for.
     fn awake(&self, now: Millis) -> Option<&Activity> {
-        let awake = self.activities.iter().filter(|a| a.dormant_at.is_none_or(|at| at > now));
-        awake.min_by_key(|a| a.order(now, self.focused))
+        self.ranked(now, false).first().copied()
     }
 
     /// What is on display, which includes dormant activities during a peek.
     fn top(&self, now: Millis) -> Option<&Activity> {
         let peeking = self.peek_until.is_some() || self.hovered;
-        let any = self.activities.iter().min_by_key(|a| a.order(now, self.focused));
-        self.awake(now).or(if peeking { any } else { None })
+        self.awake(now).or_else(|| if peeking { self.ranked(now, true).first().copied() } else { None })
     }
 
     fn expire(&mut self, now: Millis) {
         self.activities.retain(|a| a.expires_at.is_none_or(|at| at > now));
     }
 
-    fn next_deadline(&self, now: Millis, timer_in_pill: bool, transfer_open: bool) -> Option<Millis> {
+    fn next_deadline(&self, now: Millis, timer_in_pill: bool, transfer_counts: bool) -> Option<Millis> {
         let expiries = self.activities.iter().filter_map(|a| a.expires_at);
         let dormancies = self.activities.iter().filter_map(|a| a.dormant_at).filter(|&at| at > now);
         let urgencies = self.activities.iter().filter_map(|a| a.urgent_at).filter(|&at| at > now);
@@ -893,7 +1007,7 @@ impl Island {
             .chain(ticking.flatten())
             .chain(event_moments.flatten())
             .chain(self.schedule.first().map(|event| event.start))
-            .chain(self.transfer.as_ref().and_then(|transfer| transfer.next_moment(now, transfer_open)))
+            .chain(self.transfer.as_ref().and_then(|transfer| transfer.next_moment(now, transfer_counts)))
             .chain(self.collapse_at)
             .chain(self.peek_until)
             .min()
@@ -984,6 +1098,8 @@ mod tests {
         let mut island = Island::new();
         island.upsert_media(snapshot(true), 0);
         island.start_timer(25 * MINUTE, 0);
+        // A click lands on what the last frame drew.
+        island.frame(0);
         island.click_secondary(0);
         let frame = island.frame(0);
         assert_eq!(frame.presentation, Presentation::Expanded);
@@ -2015,7 +2131,44 @@ mod tests {
             warning: None,
             stage: Stage::Waiting { until: WAIT_MS },
             direct: None,
+            offline: false,
+            nudge_at: Some(crate::transfer::NUDGE_MS),
         }
+    }
+
+    #[test]
+    fn a_phone_that_found_the_page_stops_the_suggestion() {
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        let nudged = |island: &mut Island| island.frame(crate::transfer::NUDGE_MS).activity.and_then(|a| a.transfer).is_some_and(|t| t.nudge);
+        assert!(nudged(&mut island));
+        island.transfer_visited();
+        assert!(!nudged(&mut island));
+    }
+
+    #[test]
+    fn the_hotspot_serves_the_download_code_without_a_join_code() {
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        island.transfer_warning(Some("Güvenlik duvarı bu ağda engelliyor".into()));
+        let download = crate::qr::QrMatrix::encode("http://192.168.137.1:5000/t").expect("fits");
+        island.transfer_hotspot(download, "Mobil etkin nokta".into());
+        let view = island.frame(0).activity.and_then(|a| a.transfer).expect("view");
+        assert_eq!(view.direct, Some(Direct::Hotspot { network: "Mobil etkin nokta".into() }));
+        assert_eq!(view.network, "Mobil etkin nokta");
+        assert_eq!(view.warning, None);
+        assert!(island.transfer_is_direct());
+    }
+
+    #[test]
+    fn without_wifi_the_send_waits_for_it() {
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        island.transfer_offline(true);
+        let view = island.frame(0).activity.and_then(|a| a.transfer).expect("view");
+        assert!(view.offline);
+        island.transfer_offline(false);
+        assert!(!island.frame(0).activity.and_then(|a| a.transfer).expect("view").offline);
     }
 
     #[test]
@@ -2095,6 +2248,7 @@ mod tests {
         island.drop_on_shelf(&shelf_files(), 0);
         island.close_views();
         island.upsert(activity(Kind::Media));
+        assert_eq!(second(&island.frame(10)), Some(Kind::Shelf));
         island.click_secondary(10);
         assert!(matches!(island.frame(10).panel, Some(PanelView::Shelf(_))));
         island.click(20);
@@ -2179,5 +2333,162 @@ mod tests {
         island.start_transfer(transfer());
         island.cancel_transfer();
         assert_eq!(island.frame(0).presentation, Presentation::Hidden);
+    }
+
+    /// Music playing and a code that was shown and then closed.
+    fn music_and_a_closed_code(layout: TaskLayout) -> Island {
+        let mut island = Island::new();
+        island.set_task_layout(layout);
+        island.upsert_media(snapshot(true), 0);
+        island.start_transfer(transfer());
+        island.click(0);
+        island
+    }
+
+    fn bubble(frame: &Frame) -> Option<Bubble> {
+        frame.secondary.as_ref().map(|a| a.bubble())
+    }
+
+    #[test]
+    fn by_default_music_keeps_the_pill_and_the_send_waits_in_the_bubble() {
+        let mut island = music_and_a_closed_code(TaskLayout::Bubble);
+        let frame = island.frame(0);
+        assert_eq!(frame.presentation, Presentation::Compact);
+        assert_eq!(shown(&frame), Some(Kind::Media));
+        assert_eq!(bubble(&frame), Some(Bubble::Symbol(Icon::Phone)));
+        assert!(frame.companion.is_none());
+        // The time left is not on screen, so nothing wakes every second.
+        assert_eq!(frame.wake_at, Some(WAIT_MS));
+        // The bubble opens the code again.
+        island.click_secondary(0);
+        let open = island.frame(0);
+        assert_eq!(open.presentation, Presentation::Expanded);
+        assert_eq!(shown(&open), Some(Kind::Transfer));
+    }
+
+    #[test]
+    fn the_send_has_the_bubble_before_other_lasting_things() {
+        let mut island = music_and_a_closed_code(TaskLayout::Bubble);
+        island.start_timer(25 * MINUTE, 0);
+        let frame = island.frame(0);
+        assert_eq!(shown(&frame), Some(Kind::Media));
+        assert_eq!(second(&frame), Some(Kind::Transfer));
+    }
+
+    #[test]
+    fn alone_the_send_has_the_pill_and_counts_down_there() {
+        let mut island = Island::new();
+        island.start_transfer(transfer());
+        island.click(0);
+        let frame = island.frame(1_500);
+        assert_eq!(frame.presentation, Presentation::Compact);
+        assert_eq!(shown(&frame), Some(Kind::Transfer));
+        assert_eq!(frame.activity.as_ref().map(|a| a.trailing.as_str()), Some("4:59"));
+        assert_eq!(frame.wake_at, Some(2_000));
+    }
+
+    #[test]
+    fn in_front_the_send_takes_the_pill_and_music_the_bubble() {
+        let mut island = music_and_a_closed_code(TaskLayout::Front);
+        let frame = island.frame(0);
+        assert_eq!(shown(&frame), Some(Kind::Transfer));
+        assert_eq!(second(&frame), Some(Kind::Media));
+        assert_eq!(frame.wake_at, Some(1_000));
+    }
+
+    #[test]
+    fn side_by_side_the_send_rides_in_the_music_pill() {
+        let mut island = music_and_a_closed_code(TaskLayout::Shared);
+        let frame = island.frame(0);
+        assert_eq!(shown(&frame), Some(Kind::Media));
+        assert_eq!(frame.companion.as_ref().map(|a| a.kind), Some(Kind::Transfer));
+        assert_eq!(second(&frame), None);
+        // The bubble stays free for something else that lasts.
+        island.start_timer(25 * MINUTE, 0);
+        assert_eq!(second(&island.frame(0)), Some(Kind::TimerRunning));
+        // A click on the send's side of the pill opens the code again, with
+        // the music under it.
+        island.click_companion();
+        let open = island.frame(0);
+        assert_eq!(open.presentation, Presentation::Expanded);
+        assert_eq!(shown(&open), Some(Kind::Transfer));
+        assert_eq!(open.companion.as_ref().map(|a| a.kind), Some(Kind::Media));
+        assert_eq!(second(&open), None);
+    }
+
+    #[test]
+    fn side_by_side_without_music_the_send_keeps_to_the_bubble() {
+        let mut island = Island::new();
+        island.set_task_layout(TaskLayout::Shared);
+        island.start_timer(25 * MINUTE, 0);
+        island.start_transfer(transfer());
+        // The open code has no music to show under it, so the timer stays beside.
+        assert_eq!(second(&island.frame(0)), Some(Kind::TimerRunning));
+        island.click(0);
+        let frame = island.frame(0);
+        assert_eq!(shown(&frame), Some(Kind::TimerRunning));
+        assert!(frame.companion.is_none());
+        assert_eq!(second(&frame), Some(Kind::Transfer));
+    }
+
+    #[test]
+    fn the_open_code_keeps_music_in_view() {
+        for layout in [TaskLayout::Bubble, TaskLayout::Front] {
+            let mut island = Island::new();
+            island.set_task_layout(layout);
+            island.upsert_media(snapshot(true), 0);
+            island.start_transfer(transfer());
+            let frame = island.frame(0);
+            assert_eq!(frame.presentation, Presentation::Expanded, "{layout:?}");
+            assert_eq!(shown(&frame), Some(Kind::Transfer), "{layout:?}");
+            assert_eq!(second(&frame), Some(Kind::Media), "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn volume_goes_in_the_bubble_while_the_code_is_open() {
+        let mut island = Island::new();
+        island.upsert_media(snapshot(true), 0);
+        island.start_transfer(transfer());
+        island.upsert(Activity { level: Some(40), icon: Some(Icon::Volume), expires_at: Some(1_500), ..activity(Kind::Alert) });
+        let frame = island.frame(0);
+        assert_eq!(frame.presentation, Presentation::Expanded);
+        assert_eq!(shown(&frame), Some(Kind::Transfer));
+        assert_eq!(bubble(&frame), Some(Bubble::Count { value: "40".into(), icon: Some(Icon::Volume), ring: Some(40) }));
+        // A click on it opens nothing.
+        island.click_secondary(0);
+        assert_eq!(shown(&island.frame(0)), Some(Kind::Transfer));
+        // Once it is gone, music is back in the bubble.
+        assert_eq!(second(&island.frame(1_500)), Some(Kind::Media));
+    }
+
+    #[test]
+    fn volume_goes_in_the_bubble_while_the_shelf_is_open() {
+        let mut island = Island::new();
+        island.drop_on_shelf(&shelf_files(), 0);
+        island.upsert(Activity { level: Some(70), icon: Some(Icon::Brightness), ..activity(Kind::Alert) });
+        let frame = island.frame(0);
+        assert_eq!(frame.presentation, Presentation::Expanded);
+        assert!(matches!(frame.panel, Some(PanelView::Shelf(_))));
+        assert_eq!(bubble(&frame), Some(Bubble::Count { value: "70".into(), icon: Some(Icon::Brightness), ring: Some(70) }));
+    }
+
+    #[test]
+    fn volume_still_covers_a_closed_pill() {
+        let mut island = music_and_a_closed_code(TaskLayout::Bubble);
+        island.upsert(Activity { level: Some(40), icon: Some(Icon::Volume), ..activity(Kind::Alert) });
+        assert_eq!(island.frame(0).presentation, Presentation::Level);
+    }
+
+    #[test]
+    fn a_finished_send_ticks_in_the_bubble_then_leaves() {
+        let mut island = music_and_a_closed_code(TaskLayout::Bubble);
+        island.transfer_progress(500);
+        assert_eq!(bubble(&island.frame(0)), Some(Bubble::Count { value: "50".into(), icon: None, ring: Some(50) }));
+        island.transfer_done(1_000);
+        let done = island.frame(1_000);
+        assert_eq!(shown(&done), Some(Kind::Media));
+        assert_eq!(bubble(&done), Some(Bubble::Symbol(Icon::Check)));
+        assert_eq!(second(&island.frame(1_000 + DONE_MS)), None);
     }
 }

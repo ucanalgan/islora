@@ -1,7 +1,7 @@
 //! What the settings window shows and where, in DIPs. Nothing here draws, so the
 //! layout and what each click means can be tested without a window.
 
-use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode};
+use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TaskLayout};
 
 pub const WINDOW_WIDTH: f32 = 760.0;
 pub const WINDOW_HEIGHT: f32 = 540.0;
@@ -20,7 +20,7 @@ const STEP_SIZE: f32 = 32.0;
 const PRESET_STEP: u64 = 5;
 const LONGEST_PRESET: u64 = 720;
 
-/// Where the small picture of the island goes on the appearance page.
+/// Where the small picture of the island goes on the appearance and layout pages.
 pub const PREVIEW: Rect = Rect { x: LEFT, y: TOP, width: WIDTH, height: 96.0 };
 /// The box for the calendar address, which Windows draws itself.
 pub const ADDRESS_FIELD: Rect = Rect { x: LEFT, y: TOP + 26.0, width: WIDTH, height: 40.0 };
@@ -49,6 +49,7 @@ pub const NOTICES: [(&str, &str); 16] = [
 pub enum Page {
     #[default]
     Appearance,
+    Layout,
     Notices,
     Calendar,
     Durations,
@@ -56,17 +57,23 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 5] =
-        [Page::Appearance, Page::Notices, Page::Calendar, Page::Durations, Page::General];
+    pub const ALL: [Page; 6] =
+        [Page::Appearance, Page::Layout, Page::Notices, Page::Calendar, Page::Durations, Page::General];
 
     pub fn label(self) -> &'static str {
         match self {
             Page::Appearance => "Görünüm",
+            Page::Layout => "Düzen",
             Page::Notices => "Bildirimler",
             Page::Calendar => "Takvim",
             Page::Durations => "Süreler",
             Page::General => "Genel",
         }
+    }
+
+    /// Whether this page shows the small picture of the island.
+    pub fn has_preview(self) -> bool {
+        matches!(self, Page::Appearance | Page::Layout)
     }
 }
 
@@ -90,6 +97,7 @@ pub enum Action {
     Open(Page),
     Material(Material),
     Style(IslandStyle),
+    Layout(TaskLayout),
     Progress(ProgressStyle),
     SoundWave,
     Notice(usize),
@@ -143,6 +151,7 @@ pub struct SettingsState {
     pub page: Page,
     pub material: Material,
     pub style: IslandStyle,
+    pub layout: TaskLayout,
     pub progress: ProgressStyle,
     pub sound_wave: bool,
     pub notices_off: Vec<String>,
@@ -239,6 +248,7 @@ pub fn view(state: &SettingsState) -> View {
     });
     match state.page {
         Page::Appearance => appearance(&mut view, state),
+        Page::Layout => layout(&mut view, state),
         Page::Notices => notices(&mut view, state),
         Page::Calendar => calendar(&mut view, state),
         Page::Durations => durations(&mut view, state),
@@ -265,15 +275,33 @@ fn appearance(view: &mut View, state: &SettingsState) {
             (Action::Style(IslandStyle::Notch), state.style == IslandStyle::Notch, "Notch"),
         ],
     );
-    view.caption("Telefona gönderirken ilerleme", 348.0);
+    let row = Rect { x: LEFT, y: 352.0, width: WIDTH, height: ROW_HEIGHT };
+    view.control(Action::SoundWave, Look::Switch { on: state.sound_wave }, row, "Ses dalgası");
+    view.caption("Kapalıyken sabit çubuklar görünür. Enerji tasarrufunda dalga kendiliğinden durur", 402.0);
+    view.caption("Cam, enerji tasarrufunda ve Windows şeffaflığı kapalıyken Siyah görünür", 424.0);
+}
+
+/// How a short task shares the island with music, and how a send shows.
+fn layout(view: &mut View, state: &SettingsState) {
+    view.caption("Müzik çalarken telefona gönderilen bir dosya", PREVIEW.y + PREVIEW.height + 6.0);
+    view.caption("Kısa bir iş, süren bir şeyle birlikteyken", 200.0);
+    view.choices(222.0, TaskLayout::ALL.map(|layout| (Action::Layout(layout), state.layout == layout, layout.label())));
+    view.caption(layout_note(state.layout), 272.0);
+    view.caption("Telefona gönderirken açık görünümde ilerleme", 312.0);
     view.choices(
-        370.0,
+        334.0,
         ProgressStyle::ALL.map(|style| (Action::Progress(style), state.progress == style, style.label())),
     );
-    let row = Rect { x: LEFT, y: 424.0, width: WIDTH, height: ROW_HEIGHT };
-    view.control(Action::SoundWave, Look::Switch { on: state.sound_wave }, row, "Ses dalgası");
-    view.caption("Kapalıyken sabit çubuklar görünür. Enerji tasarrufunda dalga kendiliğinden durur", 474.0);
-    view.caption("Cam, enerji tasarrufunda ve Windows şeffaflığı kapalıyken Siyah görünür", 496.0);
+    view.caption("Kapalıyken ilerleme her zaman küçük bir halkadır", 384.0);
+}
+
+/// One line on what the chosen layout does.
+pub fn layout_note(layout: TaskLayout) -> &'static str {
+    match layout {
+        TaskLayout::Bubble => "Müzik pill'de kalır, iş yanındaki baloncukta görünür",
+        TaskLayout::Shared => "Tek pill ikisini gösterir: solda müzik, sağda iş",
+        TaskLayout::Front => "İş pill'i alır, müzik yandaki baloncuğa geçer",
+    }
 }
 
 fn notices(view: &mut View, state: &SettingsState) {
@@ -391,6 +419,7 @@ mod tests {
             page,
             material: Material::Black,
             style: IslandStyle::Island,
+            layout: TaskLayout::Bubble,
             progress: ProgressStyle::Ring,
             sound_wave: true,
             notices_off: Vec::new(),
@@ -412,7 +441,7 @@ mod tests {
             let view = view(&state(page));
             let mut rects: Vec<Rect> = view.controls.iter().map(|control| control.bounds).collect();
             rects.extend(view.labels.iter().map(|label| label.bounds));
-            if page == Page::Appearance {
+            if page.has_preview() {
                 rects.push(PREVIEW);
             }
             if page == Page::Calendar {
@@ -477,7 +506,6 @@ mod tests {
         current.material = Material::Glass;
         current.style = IslandStyle::Notch;
         current.sound_wave = false;
-        current.progress = ProgressStyle::Fill;
         let view = view(&current);
         let look = |action| view.controls.iter().find(|control| control.action == action).unwrap().look;
         assert_eq!(look(Action::Material(Material::Glass)), Look::Choice { selected: true });
@@ -485,8 +513,25 @@ mod tests {
         assert_eq!(look(Action::Style(IslandStyle::Notch)), Look::Choice { selected: true });
         assert_eq!(look(Action::Style(IslandStyle::Island)), Look::Choice { selected: false });
         assert_eq!(look(Action::SoundWave), Look::Switch { on: false });
-        assert_eq!(look(Action::Progress(ProgressStyle::Fill)), Look::Choice { selected: true });
-        assert_eq!(look(Action::Progress(ProgressStyle::Ring)), Look::Choice { selected: false });
+    }
+
+    #[test]
+    fn the_layout_page_offers_each_layout_by_name_and_the_progress_style() {
+        let mut current = state(Page::Layout);
+        current.layout = TaskLayout::Shared;
+        current.progress = ProgressStyle::Fill;
+        let view = view(&current);
+        let choice = |action| view.controls.iter().find(|control| control.action == action).unwrap();
+        for layout in TaskLayout::ALL {
+            let control = choice(Action::Layout(layout));
+            assert_eq!(control.label, layout.label());
+            assert_eq!(control.look, Look::Choice { selected: layout == TaskLayout::Shared });
+        }
+        assert_eq!(choice(Action::Progress(ProgressStyle::Fill)).look, Look::Choice { selected: true });
+        assert!(view.labels.iter().any(|label| label.text == layout_note(TaskLayout::Shared)));
+        // The appearance page no longer has the progress choice.
+        let appearance = super::view(&state(Page::Appearance));
+        assert!(appearance.controls.iter().all(|control| !matches!(control.action, Action::Progress(_))));
     }
 
     #[test]

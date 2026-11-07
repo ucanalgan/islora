@@ -515,7 +515,8 @@ impl Painter {
         let center = Vector2 { X: ring.center_x, Y: ring.center_y };
         let full = D2D1_ELLIPSE { point: center, radiusX: ring.radius, radiusY: ring.radius };
         unsafe {
-            let track = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.22 }, None)?;
+            // The track fades with the ring, so a ring on its way out leaves nothing.
+            let track = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.22 * ring.opacity }, None)?;
             dc.DrawEllipse(&full, &track, ring.width, None);
 
             let white = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: ring.opacity }, None)?;

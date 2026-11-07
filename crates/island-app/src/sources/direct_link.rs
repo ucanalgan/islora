@@ -43,8 +43,13 @@ pub enum DirectEvent {
     Ready(Ipv4Addr),
     /// A phone joined.
     Joined,
+    /// Wi-Fi is off, so no network of the island's own either.
+    RadioOff,
     Failed(&'static str),
 }
+
+/// What Windows says when Wi-Fi is off.
+const RADIO_OFF: &str = "Wi-Fi kapalı";
 
 pub struct DirectLink {
     stop: Sender<()>,
@@ -89,6 +94,10 @@ fn run(network: &str, passphrase: &str, stopped: &Receiver<()>, report: &dyn Fn(
     let before = direct_adapters();
     let publisher = match start(network, passphrase) {
         Ok(publisher) => publisher,
+        Err(RADIO_OFF) => {
+            report(DirectEvent::RadioOff);
+            return;
+        }
         Err(reason) => {
             report(DirectEvent::Failed(reason));
             return;
@@ -158,11 +167,17 @@ fn start(network: &str, passphrase: &str) -> Result<WiFiDirectAdvertisementPubli
 
 fn reason(error: WiFiDirectError) -> &'static str {
     match error {
-        WiFiDirectError::RadioNotAvailable => "Wi-Fi kapalı",
+        WiFiDirectError::RadioNotAvailable => RADIO_OFF,
         // The Mobile Hotspot, or another Wi-Fi Direct link, has the card.
         WiFiDirectError::ResourceInUse => "Wi-Fi kartı meşgul, Mobil erişim noktası açık olabilir",
         _ => "Bu Wi-Fi kartı kendi ağını kuramıyor",
     }
+}
+
+/// The computer's address on Windows' Mobile Hotspot, which runs on a Wi-Fi
+/// Direct adapter too. Only asked while no network of the island's own is up.
+pub fn hotspot_address() -> Option<Ipv4Addr> {
+    direct_adapters().into_iter().find_map(|(_, address)| address)
 }
 
 /// Adapters Windows uses for Wi-Fi Direct, with their index and IPv4 address

@@ -5,6 +5,7 @@ pub mod clipboard;
 pub mod clock_timers;
 pub mod direct_link;
 pub mod drives;
+pub mod firewall;
 pub mod focus;
 pub mod fullscreen;
 pub mod imaging;
@@ -24,6 +25,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 pub const MSG_INDICATOR: u32 = WM_APP + 5;
+/// The computer's network changed, once it settled.
+pub const MSG_NETWORK_CHANGED: u32 = WM_APP + 22;
 
 /// Lets callbacks on any thread raise an indicator. They arrive on system
 /// threads, while the island may only be touched from the UI thread.
@@ -37,6 +40,14 @@ impl IndicatorSink {
     pub fn channel(hwnd: HWND) -> (Self, Receiver<Indicator>) {
         let (sender, receiver) = mpsc::channel();
         (Self { sender, window: hwnd.0 as isize }, receiver)
+    }
+
+    /// Tells the island the network changed, for a send waiting on Wi-Fi.
+    pub fn network_changed(&self) {
+        let window = HWND(self.window as _);
+        unsafe {
+            let _ = PostMessageW(Some(window), MSG_NETWORK_CHANGED, WPARAM(0), LPARAM(0));
+        }
     }
 
     pub fn send(&self, indicator: Indicator) {

@@ -65,6 +65,10 @@ pub const MEDIA_BUTTON_SIZE: f32 = 42.0;
 /// Gap between the pill and the bubble beside it.
 pub const BUBBLE_GAP: f32 = 8.0;
 
+/// Height of the strip under an open view that shows what else plays. The
+/// window leaves no room for more, with the spring's overshoot.
+pub const STRIP_HEIGHT: f32 = 22.0;
+
 /// What the pill is made of.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Material {
@@ -119,6 +123,39 @@ impl ProgressStyle {
             ProgressStyle::Ring => "Halka",
             ProgressStyle::Edge => "Kenar ışığı",
             ProgressStyle::Fill => "Dolgu",
+        }
+    }
+}
+
+/// How a short task, such as files on their way to a phone, shares the island
+/// with something that lasts, such as music.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TaskLayout {
+    /// What lasts keeps the pill, and the task waits in the bubble beside it.
+    #[default]
+    Bubble,
+    /// One pill shows both: what lasts on the left, the task on the right.
+    Shared,
+    /// The task takes the pill, and what lasts moves to the bubble.
+    Front,
+}
+
+impl TaskLayout {
+    pub const ALL: [TaskLayout; 3] = [TaskLayout::Bubble, TaskLayout::Shared, TaskLayout::Front];
+
+    pub fn setting(self) -> &'static str {
+        match self {
+            TaskLayout::Bubble => "bubble",
+            TaskLayout::Shared => "shared",
+            TaskLayout::Front => "front",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskLayout::Bubble => "Baloncukta",
+            TaskLayout::Shared => "Yan yana",
+            TaskLayout::Front => "Öne çıkar",
         }
     }
 }
@@ -336,6 +373,8 @@ impl Pill {
     pub const LEVEL: Pill = Pill { width: 280.0, height: 44.0, radius: 22.0 };
     pub const ALERT: Pill = Pill { width: 320.0, height: 66.0, radius: 33.0 };
     pub const EXPANDED: Pill = Pill { width: 400.0, height: 170.0, radius: 42.0 };
+    /// The open view with a strip along its bottom, for music under the code.
+    pub const EXPANDED_WITH_STRIP: Pill = Pill { height: Pill::EXPANDED.height + STRIP_HEIGHT, ..Pill::EXPANDED };
 
     pub fn for_presentation(presentation: Presentation) -> Pill {
         match presentation {
@@ -371,7 +410,7 @@ mod tests {
     #[test]
     fn every_pill_fits_inside_the_window_with_room_to_overshoot() {
         let overshoot = 1.1;
-        for pill in [Pill::HIDDEN, Pill::COMPACT, Pill::LEVEL, Pill::ALERT, Pill::EXPANDED] {
+        for pill in [Pill::HIDDEN, Pill::COMPACT, Pill::LEVEL, Pill::ALERT, Pill::EXPANDED, Pill::EXPANDED_WITH_STRIP] {
             assert!(pill.width * overshoot <= WINDOW_WIDTH, "{pill:?}");
             assert!(pill.height * overshoot + TOP_MARGIN <= WINDOW_HEIGHT, "{pill:?}");
         }
@@ -386,7 +425,7 @@ mod tests {
 
     #[test]
     fn every_pill_still_fits_with_a_bubble_beside_it() {
-        for pill in [Pill::COMPACT, Pill::LEVEL, Pill::ALERT] {
+        for pill in [Pill::COMPACT, Pill::LEVEL, Pill::ALERT, Pill::EXPANDED] {
             assert!(pill.width + BUBBLE_GAP + Pill::BUBBLE.width <= WINDOW_WIDTH, "{pill:?}");
         }
         const { assert!(COMPACT_MAX_WIDTH + BUBBLE_GAP + Pill::BUBBLE.width <= WINDOW_WIDTH) };

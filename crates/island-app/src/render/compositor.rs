@@ -2,7 +2,7 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use island_core::layout::{BUBBLE_GAP, NOTCH_SHOULDER};
-use island_core::{Bubble, Frame, IslandStyle, Material, Millis, Pill, Presentation};
+use island_core::{Bubble, Frame, IslandStyle, Kind, Material, Millis, Pill, Presentation};
 use windows::Foundation::TimeSpan;
 use windows::Graphics::{IGeometrySource2D, IGeometrySource2D_Impl};
 use windows::System::DispatcherQueueController;
@@ -60,6 +60,9 @@ const PRESS_TIME: Duration = Duration::from_millis(280);
 const BOUNCE_SCALE: f32 = 1.04;
 const BOUNCE_TIME: Duration = Duration::from_millis(420);
 const BUBBLE_START_SCALE: f32 = 0.6;
+/// How small content gets as it goes into the bubble or comes out of it, when
+/// the pill and the bubble trade what they show.
+const TRADE_SCALE: f32 = 0.55;
 
 const WAVE_BARS: usize = 4;
 const WAVE_BAR_WIDTH: f32 = 3.0;
@@ -346,6 +349,15 @@ struct BubbleShape {
     spot: Option<(f32, f32)>,
 }
 
+/// Whether the pill and the bubble trade what they show.
+#[derive(Clone, Copy, Default)]
+struct Trade {
+    /// What the pill showed moves to the bubble.
+    into_bubble: bool,
+    /// What the bubble showed moves to the pill.
+    out_of_bubble: bool,
+}
+
 /// What it takes to switch the pill, the bubble and a notch's curves between
 /// materials.
 struct Surfaces {
@@ -389,6 +401,11 @@ pub struct Renderer {
     compact_width: f32,
     /// The last fit worked out, with what it was worked out for.
     fitted: Option<(String, CompactFit)>,
+    /// The open view has music along its bottom, which makes it taller.
+    strip: bool,
+    /// What the pill and the bubble showed last, to see when they trade.
+    owner: Option<Kind>,
+    aside: Option<Kind>,
 }
 
 impl Renderer {
@@ -510,6 +527,9 @@ impl Renderer {
             style,
             compact_width: Pill::COMPACT.width,
             fitted: None,
+            strip: false,
+            owner: None,
+            aside: None,
         };
         renderer.snap_to_hidden()?;
         Ok(renderer)
@@ -670,9 +690,16 @@ impl Renderer {
     pub fn pill_for(&self, presentation: Presentation) -> Pill {
         let pill = match presentation {
             Presentation::Compact => Pill { width: self.compact_width, ..Pill::COMPACT },
+            Presentation::Expanded if self.strip => Pill::EXPANDED_WITH_STRIP,
             other => Pill::for_presentation(other),
         };
         pill.scaled(self.scale)
+    }
+
+    /// Left edge of the pill in window pixels, which a bubble pushes left.
+    pub fn pill_left(&self, pill: Pill) -> f32 {
+        let slide = if self.has_bubble() { self.bubble_shift() } else { 0.0 };
+        (self.window_width - pill.width) / 2.0 - slide
     }
 
     /// Gives way a little under a click, which makes it feel like a real object.
@@ -745,10 +772,22 @@ impl Renderer {
         if frame.presentation == Presentation::Compact {
             self.fit_compact(&mut scene);
         }
+        self.strip = scene.has_strip();
         let pill = self.pill_for(frame.presentation);
         let resized = self.pill != Some(pill);
         let bubble = frame.secondary.as_ref().map(|activity| activity.bubble());
         let bubble_changed = self.bubble.shown.is_some() != bubble.is_some();
+
+        // When the pill hands what it showed to the bubble, or takes it from
+        // there, the content shrinks into the bubble or grows out of it.
+        let owner = frame.activity.as_ref().map(|activity| activity.kind);
+        let aside = frame.secondary.as_ref().map(|activity| activity.kind);
+        let trade = Trade {
+            into_bubble: self.owner.is_some() && self.owner != owner && self.owner == aside,
+            out_of_bubble: owner.is_some() && owner != self.owner && owner == self.aside,
+        };
+        let new_aside = aside.is_some() && self.aside.is_some() && aside != self.aside;
+        (self.owner, self.aside) = if hidden { (None, None) } else { (owner, aside) };
 
         let was_gone = self.pill == Some(self.pill_for(Presentation::Hidden));
         if !hidden && was_gone {
@@ -766,11 +805,11 @@ impl Renderer {
                 (false, true) => SOFT,
                 (false, false) => LIVELY,
             };
-            self.update_bubble(bubble, pill, spring)?;
+            self.update_bubble(bubble, pill, spring, new_aside)?;
             self.spring_pill(pill, spring)?;
             self.pill = Some(pill);
         } else {
-            self.update_bubble(bubble, pill, LIVELY)?;
+            self.update_bubble(bubble, pill, LIVELY, new_aside)?;
         }
 
         if hidden {
@@ -788,7 +827,7 @@ impl Renderer {
         if in_place {
             self.repaint_front(&scene, pill)?;
         } else {
-            self.cross_fade(&scene, pill, resized)?;
+            self.cross_fade(&scene, pill, resized, trade)?;
         }
 
         let origin = self.pill_origin(pill);
@@ -834,7 +873,9 @@ impl Renderer {
         spring_scalar(compositor, &self.moving, h!("Offset.X"), slide, spring)
     }
 
-    fn update_bubble(&mut self, wanted: Option<Bubble>, pill: Pill, spring: Spring) -> Result<()> {
+    /// `pop` says the bubble now stands for something else, which it shows by
+    /// growing again rather than just changing its picture.
+    fn update_bubble(&mut self, wanted: Option<Bubble>, pill: Pill, spring: Spring, pop: bool) -> Result<()> {
         let size = Pill::BUBBLE.scaled(self.scale);
         let compositor = self.compositor.clone();
         let top = self.style.bubble_top(self.scale, pill, size);
@@ -861,12 +902,23 @@ impl Renderer {
 
         // The left edge is only known once the bubble counts as shown.
         self.bubble.shown = Some(content);
+        self.bubble.visual.SetSize(Vector2 { X: size.width, Y: size.height })?;
+        if !arriving {
+            // A new picture in a bubble that is already there follows the pill,
+            // shape and all, as the same picture would.
+            if pop {
+                let visual = &self.bubble.visual;
+                visual.SetCenterPoint(Vector3 { X: size.width / 2.0, Y: size.height / 2.0, Z: 0.0 })?;
+                visual.SetScale(Vector3 { X: BUBBLE_START_SCALE, Y: BUBBLE_START_SCALE, Z: 1.0 })?;
+                spring_vector3(&compositor, visual, h!("Scale"), (1.0, 1.0, 1.0), LIVELY)?;
+            }
+            return self.move_bubble(pill, spring);
+        }
         let left = self.bubble_left(pill);
         self.bubble.spot = Some((left, top));
-        self.bubble.visual.SetSize(Vector2 { X: size.width, Y: size.height })?;
         self.bubble.visual.SetOffset(Vector3 { X: left, Y: top, Z: 0.0 })?;
 
-        if arriving {
+        {
             let geometry = &self.bubble.geometry;
             let edge = left - BUBBLE_GAP * self.scale - size.width / 2.0;
             let (shape_top, shape) = match self.style {
@@ -914,11 +966,11 @@ impl Renderer {
         let painting = scene.painting(pill, self.scale, self.corner(pill), self.style == IslandStyle::Notch);
         match &self.layers[self.front].surface {
             Some(surface) => self.painter.draw(surface, &painting),
-            None => self.cross_fade(scene, pill, false),
+            None => self.cross_fade(scene, pill, false, Trade::default()),
         }
     }
 
-    fn cross_fade(&mut self, scene: &Scene, pill: Pill, resized: bool) -> Result<()> {
+    fn cross_fade(&mut self, scene: &Scene, pill: Pill, resized: bool, trade: Trade) -> Result<()> {
         let painting = scene.painting(pill, self.scale, self.corner(pill), self.style == IslandStyle::Notch);
         let surface = self.painter.create_surface(pill.width, pill.height)?;
         self.painter.draw(&surface, &painting)?;
@@ -929,18 +981,27 @@ impl Renderer {
         incoming.surface = Some(surface);
         incoming.visual.SetSize(Vector2 { X: pill.width, Y: pill.height })?;
         incoming.visual.SetOffset(Vector3 { X: origin.X, Y: origin.Y, Z: 0.0 })?;
-        incoming.visual.SetCenterPoint(Vector3 { X: pill.width / 2.0, Y: 0.0, Z: 0.0 })?;
         incoming.visual.StopAnimation(h!("Scale"))?;
-        let start = if resized { CONTENT_START_SCALE } else { 1.0 };
+        // The bubble sits on the right, so content from it grows out of there.
+        let (center, start) = match (trade.out_of_bubble, resized) {
+            (true, _) => (Vector3 { X: pill.width, Y: pill.height / 2.0, Z: 0.0 }, TRADE_SCALE),
+            (false, true) => (Vector3 { X: pill.width / 2.0, Y: 0.0, Z: 0.0 }, CONTENT_START_SCALE),
+            (false, false) => (Vector3 { X: pill.width / 2.0, Y: 0.0, Z: 0.0 }, 1.0),
+        };
+        incoming.visual.SetCenterPoint(center)?;
         incoming.visual.SetScale(Vector3 { X: start, Y: start, Z: 1.0 })?;
-        if resized {
+        if start < 1.0 {
             spring_vector3(&self.compositor, &incoming.visual, h!("Scale"), (1.0, 1.0, 1.0), LIVELY)?;
         }
         fade(&self.compositor, &incoming.visual, 1.0, FADE_IN, FADE_IN_DELAY)?;
 
         let outgoing = &self.layers[self.front];
         fade(&self.compositor, &outgoing.visual, 0.0, FADE_OUT, Duration::ZERO)?;
-        if resized {
+        if trade.into_bubble {
+            let size = outgoing.visual.Size()?;
+            outgoing.visual.SetCenterPoint(Vector3 { X: size.X, Y: size.Y / 2.0, Z: 0.0 })?;
+            spring_vector3(&self.compositor, &outgoing.visual, h!("Scale"), (TRADE_SCALE, TRADE_SCALE, 1.0), SOFT)?;
+        } else if resized {
             let end = (CONTENT_END_SCALE, CONTENT_END_SCALE, 1.0);
             spring_vector3(&self.compositor, &outgoing.visual, h!("Scale"), end, SOFT)?;
         }

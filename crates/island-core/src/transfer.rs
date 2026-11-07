@@ -13,6 +13,9 @@ use crate::qr::QrMatrix;
 pub const WAIT_MS: Millis = 5 * 60_000;
 /// How long "sent" stays before the island closes.
 pub const DONE_MS: Millis = 2_000;
+/// How long the code waits for a phone before it suggests the island's own
+/// network. Some networks keep their devices apart, which looks the same.
+pub const NUDGE_MS: Millis = 45_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -30,6 +33,9 @@ pub enum Direct {
     Ready { code: Arc<QrMatrix>, network: String },
     /// The phone is on the network, so the download code shows.
     Joined { network: String },
+    /// Windows' Mobile Hotspot is on, which the phone may already be on, so
+    /// the download code works there instead.
+    Hotspot { network: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +52,12 @@ pub struct Transfer {
     pub warning: Option<String>,
     pub stage: Stage,
     pub direct: Option<Direct>,
+    /// Wi-Fi is off and nothing else connects the computer, so no code can be
+    /// made until it comes back.
+    pub offline: bool,
+    /// From when the code suggests the island's own network, unless a phone
+    /// came by before.
+    pub nudge_at: Option<Millis>,
 }
 
 /// What the open view shows at this stage.
@@ -66,6 +78,9 @@ pub struct TransferView {
     pub shown: Shown,
     pub style: ProgressStyle,
     pub direct: Option<Direct>,
+    pub offline: bool,
+    /// No phone came for the code yet, so it suggests the island's own network.
+    pub nudge: bool,
 }
 
 /// Minutes and seconds, rounded up so it never shows 0:00 while still open.
@@ -92,6 +107,7 @@ impl Transfer {
             },
             Stage::Done { .. } => Shown::Done,
         };
+        let waiting_here = matches!(self.stage, Stage::Waiting { .. }) && self.direct.is_none() && !self.offline;
         let view = TransferView {
             code: self.code.clone(),
             summary: self.summary.clone(),
@@ -100,10 +116,14 @@ impl Transfer {
             shown: shown.clone(),
             style,
             direct: self.direct.clone(),
+            offline: self.offline,
+            nudge: waiting_here && self.nudge_at.is_some_and(|at| at <= now),
         };
         let percent = (self.permille() / 10) as u8;
+        // The compact pill says how long the code still waits, which a bare
+        // "QR" left to be guessed.
         let (leading, trailing, icon, badge, expires_at) = match shown {
-            Shown::Waiting { .. } => (self.name.clone(), "QR".to_owned(), Icon::Phone, Bubble::Symbol(Icon::Phone), None),
+            Shown::Waiting { left } => (self.name.clone(), left, Icon::Phone, Bubble::Symbol(Icon::Phone), None),
             Shown::Sending { .. } => (
                 self.name.clone(),
                 format!("%{percent}"),
@@ -135,6 +155,7 @@ impl Transfer {
     /// When the screen has to change next without anything else happening.
     pub fn next_moment(&self, now: Millis, counting_down: bool) -> Option<Millis> {
         match self.stage {
+            // The suggestion only changes the open view, which counts down anyway.
             Stage::Waiting { until } if counting_down => {
                 let into_second = until.saturating_sub(now) % 1000;
                 Some(now + if into_second == 0 { 1000 } else { into_second }).map(|next| next.min(until))
@@ -160,14 +181,31 @@ mod tests {
             warning: None,
             stage,
             direct: None,
+            offline: false,
+            nudge_at: Some(crate::transfer::NUDGE_MS),
         }
+    }
+
+    #[test]
+    fn a_code_nobody_came_for_suggests_the_own_network() {
+        let waiting = transfer(Stage::Waiting { until: WAIT_MS });
+        let view = |transfer: &Transfer, now| transfer.activity(now, ProgressStyle::Ring).transfer.expect("view");
+        assert!(!view(&waiting, NUDGE_MS - 1).nudge);
+        assert!(view(&waiting, NUDGE_MS).nudge);
+        // Not once the island's own network is on its way, nor while offline.
+        let direct = Transfer { direct: Some(Direct::Preparing), ..waiting.clone() };
+        assert!(!view(&direct, NUDGE_MS).nudge);
+        let offline = Transfer { offline: true, ..waiting.clone() };
+        assert!(!view(&offline, NUDGE_MS).nudge);
+        let visited = Transfer { nudge_at: None, ..waiting };
+        assert!(!view(&visited, NUDGE_MS).nudge);
     }
 
     #[test]
     fn waiting_shows_the_time_left() {
         let activity = transfer(Stage::Waiting { until: WAIT_MS }).activity(1_500, ProgressStyle::Ring);
         assert_eq!(activity.kind, Kind::Transfer);
-        assert_eq!((activity.leading.as_str(), activity.trailing.as_str()), ("tatil.jpg", "QR"));
+        assert_eq!((activity.leading.as_str(), activity.trailing.as_str()), ("tatil.jpg", "4:59"));
         let view = activity.transfer.expect("view");
         assert_eq!(view.shown, Shown::Waiting { left: "4:59".into() });
     }

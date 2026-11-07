@@ -16,7 +16,7 @@ use island_core::focus::{
 use island_core::ics::{self, Event};
 use island_core::media::{RepeatMode, Sides};
 use island_core::qr::QrMatrix;
-use island_core::transfer::{Stage, Transfer, WAIT_MS};
+use island_core::transfer::{NUDGE_MS, Stage, Transfer, WAIT_MS};
 use island_core::layout::{
     TIMER_PRESETS, on_event_hide, on_home_shortcut, on_progress_bar, on_settings_shortcut,
     preset_at, progress_fraction,
@@ -27,7 +27,7 @@ use island_core::settings_view::{
 use island_core::{
     Activity, CalendarState, FocusView, Frame, FullscreenWatch, Icon, Indicator, Island, IslandStyle,
     Kind, Material, MediaButton, MediaSnapshot, Millis, PanelView, Pill, Presentation, ProgressStyle,
-    StartMode, Suppression, SystemTracker, TimerButton, Upcoming,
+    StartMode, Suppression, SystemTracker, TaskLayout, TimerButton, Upcoming,
 };
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -54,14 +54,15 @@ use crate::platform::settings_window::{
 use crate::platform::tray::{self, Command, MSG_TRAY, Tray};
 use crate::platform::window::{self, Placement};
 use crate::platform::{autostart, drop_target, hotkey, settings, shell};
-use crate::render::{self, ClockText, Renderer, WaveMotion};
+use crate::render::{self, ClockText, Renderer, TASK_RESERVED, WaveMotion};
 use crate::sources::audio::{AudioWatch, DEVICE_MICROPHONE, MSG_AUDIO_DEVICE};
 use crate::sources::bluetooth::BluetoothWatch;
 use crate::sources::calendar::{CalendarSource, CalendarUpdate, MSG_CALENDAR, unix_now};
 use crate::sources::clock_timers::{ClockTimerWatch, MSG_CLOCK_TIMERS};
 use crate::sources::drives::Drives;
 use crate::sources::focus::{self, FocusWatch, MSG_FOCUS, MSG_FOCUS_REFUSED};
-use crate::sources::direct_link::{DirectEvent, DirectLink, MSG_DIRECT};
+use crate::sources::direct_link::{self, DirectEvent, DirectLink, MSG_DIRECT};
+use crate::sources::firewall::{self, MSG_FIREWALL};
 use crate::sources::fullscreen::{self, MSG_APPBAR, MSG_FRONT_CHANGED, MSG_WINDOW_DRAG, Presence};
 use crate::sources::imaging::{Imaging, MSG_IMAGING, Made};
 use crate::sources::media::{MSG_MEDIA, MediaSource};
@@ -69,7 +70,7 @@ use crate::sources::power::{self, PowerEvent, PowerWatch};
 use crate::sources::privacy::{CameraWatch, MSG_CAMERA};
 use crate::sources::sharing::{self, MSG_SHARING, SharedFile, Sharing, SharingEvent};
 use crate::sources::keys::KeyEvent;
-use crate::sources::{IndicatorSink, MSG_INDICATOR, clipboard, keys, network, screenshots};
+use crate::sources::{IndicatorSink, MSG_INDICATOR, MSG_NETWORK_CHANGED, clipboard, keys, network, screenshots};
 
 // Lives in `Win32::UI::Controls`, a large feature to enable for one constant.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -230,6 +231,8 @@ struct App {
     pointer_inside: bool,
     open_view: OpenView,
     shown_bubble: bool,
+    /// What shares the pill on screen, which a click on its part opens.
+    companion: Option<Kind>,
     /// Length of the track on screen, if the player accepts jumps within it.
     seekable_ms: Option<u64>,
     /// The file behind the alert on screen, which a click on it opens.
@@ -251,10 +254,15 @@ struct App {
     /// The island's own network, for a phone that is not on the computer's,
     /// with its name and passphrase.
     direct: Option<(DirectLink, String, String)>,
+    /// A send waits for Wi-Fi, as nothing else connects the computer.
+    waiting_for_wifi: bool,
+    /// Which send the firewall's answer is for, as an older one may be late.
+    firewall_ticket: usize,
     /// The files of the send under way, which the own network serves again.
     shared_files: Vec<DroppedFile>,
     imaging: Imaging,
     progress_style: ProgressStyle,
+    task_layout: TaskLayout,
     /// What the open music view shows, for buttons that depend on the player.
     shown_media: Option<MediaSnapshot>,
     /// Which of the two optional buttons the player on screen offers.
@@ -313,6 +321,7 @@ pub fn run() -> Result<()> {
     }
     // Before the calendar thread, which reads the same file.
     apply_settings(&mut island);
+    start_with_windows_by_default();
     let reported = fullscreen::fullscreen_now();
     let mut fullscreen_watch = FullscreenWatch::default();
     fullscreen_watch.report(reported, fullscreen::desktop_in_front());
@@ -380,6 +389,7 @@ pub fn run() -> Result<()> {
         window_visible: false,
         pointer_inside: false,
         open_view: OpenView::Other,
+        companion: None,
         shown_bubble: false,
         seekable_ms: None,
         alert_file: None,
@@ -393,9 +403,12 @@ pub fn run() -> Result<()> {
         to_convert: Vec::new(),
         sharing: None,
         direct: None,
+        waiting_for_wifi: false,
+        firewall_ticket: 0,
         shared_files: Vec::new(),
         imaging: Imaging::new(island_window),
         progress_style: stored_progress_style(),
+        task_layout: stored_task_layout(),
         offers_shuffle: false,
         offers_repeat: false,
         scrub: None,
@@ -526,6 +539,7 @@ impl App {
         self.alert_file = frame.activity.as_ref().and_then(|activity| activity.file.clone());
         self.alert_reveals = frame.activity.as_ref().is_some_and(|activity| activity.reveal);
         self.shown_media = media.cloned();
+        self.companion = frame.companion.as_ref().map(|activity| activity.kind);
         self.offers_shuffle = media.is_some_and(|media| media.shuffle.is_some());
         self.offers_repeat = media.is_some_and(|media| media.repeat.is_some());
         let expanded = frame.presentation == Presentation::Expanded;
@@ -673,6 +687,11 @@ impl App {
         let pill = self.renderer.pill_for(self.shown);
         if self.renderer.on_bubble(x, y, pill) {
             self.island.click_secondary(now);
+            self.refresh();
+            return;
+        }
+        if self.on_companion(x, y, pill) {
+            self.island.click_companion();
             self.refresh();
             return;
         }
@@ -1061,6 +1080,7 @@ impl App {
     fn reload(&mut self) {
         apply_settings(&mut self.island);
         self.progress_style = stored_progress_style();
+        self.task_layout = stored_task_layout();
         self.notices_off = stored_notices_off();
         self.calendar.refresh();
         self.sound_wave = stored_sound_wave();
@@ -1104,6 +1124,7 @@ impl App {
             page,
             material: self.material,
             style: self.placement.style,
+            layout: self.task_layout,
             progress: self.progress_style,
             sound_wave: self.sound_wave,
             notices_off: self.notices_off.clone(),
@@ -1147,6 +1168,12 @@ impl App {
             Action::Open(chosen) => page = chosen,
             Action::Material(material) => self.choose_material(material),
             Action::Style(style) => self.choose_style(style),
+            Action::Layout(layout) => {
+                self.task_layout = layout;
+                settings::remember("task_layout", layout.setting());
+                self.island.set_task_layout(layout);
+                self.refresh();
+            }
             Action::Progress(style) => {
                 self.progress_style = style;
                 settings::remember("progress_style", style.setting());
@@ -1173,7 +1200,12 @@ impl App {
                 }
             }
             Action::SaveCalendar => calendar_note = self.save_calendar(),
-            Action::Autostart => autostart::set(!autostart::is_on()),
+            Action::Autostart => {
+                let on = !autostart::is_on();
+                autostart::set(on);
+                // Once chosen, the choice stands, and a new copy no longer turns it on.
+                settings::remember("autostart", if on { "on" } else { "off" });
+            }
             Action::Demo => self.toggle_demo(),
             Action::Reload => self.reload(),
             Action::EditFile => settings::open_in_editor(),
@@ -1259,12 +1291,29 @@ impl App {
         self.refresh();
     }
 
-    /// Converts client pixels to DIPs relative to the expanded pill.
+    /// Converts client pixels to DIPs relative to the expanded pill, which a
+    /// bubble beside it pushes left.
     fn to_expanded_pill(&self, x: i32, y: i32) -> (f32, f32) {
         let scale = self.placement.scale;
-        let pill = self.renderer.pill_for(Presentation::Expanded);
-        let left = (self.placement.width - pill.width) / 2.0;
+        let left = self.renderer.pill_left(self.renderer.pill_for(Presentation::Expanded));
         ((x as f32 - left) / scale, y as f32 / scale - self.placement.style.margin())
+    }
+
+    /// Side by side, the right end of the music pill holds the task, and the
+    /// strip along the bottom of the open code holds the music.
+    fn on_companion(&self, x: i32, y: i32, pill: Pill) -> bool {
+        if self.companion.is_none() {
+            return false;
+        }
+        let scale = self.placement.scale;
+        let from_left = (x as f32 - self.renderer.pill_left(pill)) / scale;
+        let from_top = y as f32 / scale - self.placement.style.margin();
+        let width = pill.width / scale;
+        match self.shown {
+            Presentation::Compact => (width - TASK_RESERVED..=width).contains(&from_left),
+            Presentation::Expanded => from_top >= Pill::EXPANDED.height && (0.0..=width).contains(&from_left),
+            _ => false,
+        }
     }
 
     /// Jumps on release only, so a drag sends the player a single command.
@@ -1442,6 +1491,7 @@ impl App {
         // One send at a time: a new one takes over from the last.
         self.sharing = None;
         self.direct = None;
+        self.waiting_for_wifi = false;
         self.shared_files = files.clone();
         let Some(network) = network else {
             // No network to share with a phone: the island makes its own.
@@ -1465,9 +1515,34 @@ impl App {
             self.notify("Telefona gönderilemedi", "Bağlantı açılamadı", Icon::Warning);
             return;
         };
-        let warning = network.public.then(|| "Ortak ağ: telefon ulaşamayabilir".to_owned());
-        self.begin_transfer(&files, code, sharing::describe(&network), warning);
+        self.begin_transfer(&files, code, sharing::describe(&network), None);
         self.sharing = Some(sharing);
+        // Whether the firewall lets a phone in comes a moment later. The network
+        // being public says nothing by itself, as the user may have allowed it.
+        if !loopback {
+            self.firewall_ticket += 1;
+            firewall::check(self.island_window, network.profile, self.firewall_ticket);
+        }
+    }
+
+    fn on_firewall(&mut self, wparam: WPARAM, lparam: LPARAM) {
+        let (reach, ticket) = firewall::answer(wparam, lparam);
+        if prints_address() {
+            eprintln!("firewall {reach:?}");
+        }
+        if ticket == self.firewall_ticket && self.sharing.is_some() && !self.island.transfer_is_direct() {
+            self.island.transfer_warning(reach.warning().map(str::to_owned));
+            self.refresh();
+        }
+    }
+
+    /// A send waiting for Wi-Fi tries again once the network changes.
+    fn on_network_changed(&mut self) {
+        if self.waiting_for_wifi && self.island.transfer_stage().is_some() {
+            let files = self.shared_files.clone();
+            self.send_to_phone(files);
+            self.refresh();
+        }
     }
 
     fn begin_transfer(&mut self, files: &[DroppedFile], code: QrMatrix, network: String, warning: Option<String>) {
@@ -1484,12 +1559,22 @@ impl App {
             warning,
             stage: Stage::Waiting { until: self.now() + WAIT_MS },
             direct: None,
+            offline: false,
+            nudge_at: Some(self.now() + NUDGE_MS),
         });
     }
 
     /// Starts the island's own network, with a new name and passphrase each
     /// time, which the phone joins through a code.
     fn start_direct(&mut self) {
+        // With Windows' Mobile Hotspot on, the card cannot make a network of its
+        // own, and the phone may well be on the hotspot already.
+        if self.direct.is_none()
+            && let Some(address) = direct_link::hotspot_address()
+        {
+            self.serve_hotspot(address);
+            return;
+        }
         let Some(random) = sharing::random(direct::RANDOM_BYTES) else {
             self.notify("Doğrudan bağlantı kurulamadı", "Şifre üretilemedi", Icon::Warning);
             return;
@@ -1509,6 +1594,7 @@ impl App {
             match event {
                 DirectEvent::Ready(address) => self.serve_direct(address),
                 DirectEvent::Joined => self.island.transfer_direct_joined(),
+                DirectEvent::RadioOff => self.radio_off(),
                 DirectEvent::Failed(reason) => self.direct_failed(reason),
             }
         }
@@ -1541,6 +1627,42 @@ impl App {
         }
     }
 
+    /// Serves the files on the hotspot's address, under a new code.
+    fn serve_hotspot(&mut self, address: std::net::Ipv4Addr) {
+        let shared = self
+            .shared_files
+            .iter()
+            .map(|file| SharedFile { path: file.path.clone(), name: file.name().to_owned(), size: file.size })
+            .collect();
+        let ready = Sharing::start(self.island_window, shared, address)
+            .ok()
+            .and_then(|sharing| Some((QrMatrix::encode(&sharing.url)?, sharing)));
+        match ready {
+            Some((download, sharing)) => {
+                if prints_address() {
+                    eprintln!("hotspot sharing at {}", sharing.url);
+                }
+                self.island.transfer_hotspot(download, "Mobil etkin nokta".into());
+                self.sharing = Some(sharing);
+                self.refresh();
+            }
+            None => self.notify("Etkin noktadan gönderilemedi", "Bağlantı açılamadı", Icon::Warning),
+        }
+    }
+
+    /// Wi-Fi is off. With a network of the computer's still there, its code
+    /// stands; without one, the send waits for Wi-Fi to come back.
+    fn radio_off(&mut self) {
+        self.direct = None;
+        self.island.transfer_direct_failed();
+        if self.sharing.is_some() {
+            self.notify("Doğrudan bağlantı kurulamadı", "Wi-Fi kapalı", Icon::Warning);
+        } else {
+            self.island.transfer_offline(true);
+            self.waiting_for_wifi = true;
+        }
+    }
+
     fn direct_failed(&mut self, reason: &'static str) {
         self.direct = None;
         self.island.transfer_direct_failed();
@@ -1556,6 +1678,7 @@ impl App {
         let now = self.now();
         for event in events {
             match event {
+                SharingEvent::Visited => self.island.transfer_visited(),
                 SharingEvent::Progress(sent) => self.island.transfer_progress(sent),
                 SharingEvent::BrokeOff => self.island.transfer_broke_off(now),
                 SharingEvent::Done => {
@@ -1880,8 +2003,9 @@ impl App {
                 }
             }
             5 => self.island.open_convert(summary(std::slice::from_ref(&photo)), now),
-            // 16 is the code without a warning, as most networks show it.
-            6..=11 | 16 => {
+            // 16 is the code without a warning, as most networks show it. 26 waits
+            // for Wi-Fi, 27 suggests the own network, 28 serves on the hotspot.
+            6..=11 | 16 | 26..=28 => {
                 let code = QrMatrix::encode("http://192.168.1.20:52731/q7m2k4vx9pd3hz6tbw5n");
                 let Some(code) = code else { return };
                 self.island.start_transfer(Transfer {
@@ -1890,9 +2014,11 @@ impl App {
                     total: photo.size,
                     code: Arc::new(code),
                     network: "Wi-Fi · Ev".into(),
-                    warning: (step == 6).then(|| "Ortak ağ: telefon ulaşamayabilir".to_owned()),
+                    warning: (step == 6).then(|| "Güvenlik duvarı bu ağda engelliyor".to_owned()),
                     stage: Stage::Waiting { until: now + WAIT_MS },
                     direct: None,
+                    offline: step == 26,
+                    nudge_at: Some(if step == 27 { now } else { now + NUDGE_MS }),
                 });
                 let (style, permille) = match step {
                     7 => (ProgressStyle::Ring, 400),
@@ -1911,6 +2037,11 @@ impl App {
                 }
                 if step == 11 {
                     self.island.close_views();
+                }
+                if step == 28
+                    && let Some(download) = QrMatrix::encode("http://192.168.137.1:52731/q7m2k4vx9pd3hz6tbw5n")
+                {
+                    self.island.transfer_hotspot(download, "Mobil etkin nokta".into());
                 }
             }
             // The island's own network: starting, its code, and the phone on it.
@@ -1966,13 +2097,20 @@ impl App {
                 self.demo_step = Some(0);
                 self.island.upsert_media(demo_track("Kısa Şarkı", true, now), now);
             }
-            // Music playing while a send waits, closes, goes, and is done.
-            21..=24 => {
+            // Music playing while a send waits, closes, goes, and is done, and
+            // the volume changing while its code is open.
+            21..=25 => {
                 self.demo_step = Some(0);
                 self.island.upsert_media(demo_track("Kısa Şarkı", true, now), now);
                 let Some(code) = QrMatrix::encode("http://192.168.1.20:52731/q7m2k4vx9pd3hz6tbw5n") else { return };
                 self.begin_transfer(std::slice::from_ref(&photo), code, "Wi-Fi · Ev".into(), None);
-                if step >= 22 {
+                if step == 25 {
+                    let mut volume = Indicator::Volume { percent: 40, muted: false }.into_activity(now);
+                    // Long enough to be photographed.
+                    volume.expires_at = Some(now + 60_000);
+                    self.island.upsert(volume);
+                }
+                if (22..=24).contains(&step) {
                     self.island.set_hovered(false, now);
                     self.island.close_views();
                     self.island.set_hovered(true, now);
@@ -2133,9 +2271,26 @@ fn stored_progress_style() -> ProgressStyle {
     settings::read().map(|text| config::read_progress_style(&text)).unwrap_or_default()
 }
 
+/// Islora starts with Windows unless the user said otherwise once. Copies run
+/// by tests and for pictures never touch the real list.
+fn start_with_windows_by_default() {
+    let testing = std::env::args().any(|a| a == "--only-session" || a == "--second-copy");
+    let Some(text) = settings::read() else { return };
+    if testing || config::read_autostart(&text).is_some() {
+        return;
+    }
+    autostart::set(true);
+    settings::remember("autostart", "on");
+}
+
+fn stored_task_layout() -> TaskLayout {
+    settings::read().map(|text| config::read_task_layout(&text)).unwrap_or_default()
+}
+
 fn apply_settings(island: &mut Island) {
     let text = settings::read().unwrap_or_default();
     island.set_progress_style(config::read_progress_style(&text));
+    island.set_task_layout(config::read_task_layout(&text));
     island.set_presets(config::read_presets(&text).unwrap_or(TIMER_PRESETS));
     island.set_track_notices(!config::read_notices_off(&text).iter().any(|name| name == "track_change"));
     if let Some(mode) = config::read_start_mode(&text) {
@@ -2203,6 +2358,12 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         MSG_DIRECT => {
             with_app(App::on_direct);
+        }
+        MSG_FIREWALL => {
+            with_app(|app| app.on_firewall(wparam, lparam));
+        }
+        MSG_NETWORK_CHANGED => {
+            with_app(App::on_network_changed);
         }
         WM_TIMER => {
             with_app(|app| app.on_timer(wparam.0));
@@ -2357,6 +2518,10 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             let dpi = (wparam.0 & 0xFFFF) as u32;
             let suggested = unsafe { *(lparam.0 as *const RECT) };
             with_app(|app| app.settings.as_mut().map(|window| window.on_dpi_changed(dpi, &suggested)));
+        }
+        WM_TIMER => {
+            with_app(|app| app.settings.as_mut().map(SettingsWindow::on_timer));
+            return LRESULT(0);
         }
         WM_DESTROY => settings_window::notify_closed(),
         _ => {}

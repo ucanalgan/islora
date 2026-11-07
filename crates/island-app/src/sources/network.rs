@@ -62,6 +62,7 @@ fn follow_network(sink: &IndicatorSink) {
         for indicator in tracker.update(read_state()) {
             sink.send(indicator);
         }
+        sink.network_changed();
     }
 }
 

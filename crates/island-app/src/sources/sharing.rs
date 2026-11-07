@@ -15,8 +15,10 @@ use island_core::transfer::WAIT_MS;
 use windows::Networking::Connectivity::{NetworkConnectivityLevel, NetworkInformation};
 use windows::Networking::HostNameType;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use island_core::firewall;
 use windows::Win32::Networking::NetworkListManager::{
-    INetworkConnection, INetworkListManager, NLM_NETWORK_CATEGORY_PUBLIC, NetworkListManager,
+    INetworkConnection, INetworkListManager, NLM_NETWORK_CATEGORY_DOMAIN_AUTHENTICATED,
+    NLM_NETWORK_CATEGORY_PRIVATE, NetworkListManager,
 };
 use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
@@ -39,8 +41,8 @@ pub struct LocalNetwork {
     pub address: Ipv4Addr,
     pub name: String,
     pub wifi: bool,
-    /// Windows treats it as public, where its firewall blocks phones by default.
-    pub public: bool,
+    /// Which of the firewall's profiles applies to it: public, private or domain.
+    pub profile: u32,
 }
 
 /// The Wi-Fi or Ethernet connection in use, never a VPN, whose address a
@@ -72,12 +74,12 @@ pub fn local_network() -> Option<LocalNetwork> {
         }
     }
     let (_, id, name, wifi) = best?;
-    Some(LocalNetwork { address: address_of(id)?, name, wifi, public: is_public(id) })
+    Some(LocalNetwork { address: address_of(id)?, name, wifi, profile: profile_of(id) })
 }
 
 /// This computer only, for tests.
 pub fn loopback() -> LocalNetwork {
-    LocalNetwork { address: Ipv4Addr::LOCALHOST, name: "Bu bilgisayar".into(), wifi: false, public: false }
+    LocalNetwork { address: Ipv4Addr::LOCALHOST, name: "Bu bilgisayar".into(), wifi: false, profile: firewall::PRIVATE }
 }
 
 fn address_of(adapter: GUID) -> Option<Ipv4Addr> {
@@ -92,8 +94,10 @@ fn address_of(adapter: GUID) -> Option<Ipv4Addr> {
     })
 }
 
-fn is_public(adapter: GUID) -> bool {
-    let check = || -> windows::core::Result<bool> {
+/// The firewall profile of the adapter's network. Unknown counts as public,
+/// the strictest.
+fn profile_of(adapter: GUID) -> u32 {
+    let check = || -> windows::core::Result<u32> {
         unsafe {
             let manager: INetworkListManager = CoCreateInstance(&NetworkListManager, None, CLSCTX_ALL)?;
             let connections = manager.GetNetworkConnections()?;
@@ -101,17 +105,23 @@ fn is_public(adapter: GUID) -> bool {
                 let mut next: [Option<INetworkConnection>; 1] = [None];
                 let mut fetched = 0;
                 connections.Next(&mut next, Some(&mut fetched))?;
-                let Some(connection) = next[0].take().filter(|_| fetched == 1) else { return Ok(false) };
+                let Some(connection) = next[0].take().filter(|_| fetched == 1) else { return Ok(firewall::PUBLIC) };
                 if connection.GetAdapterId()? == adapter {
-                    return Ok(connection.GetNetwork()?.GetCategory()? == NLM_NETWORK_CATEGORY_PUBLIC);
+                    return Ok(match connection.GetNetwork()?.GetCategory()? {
+                        NLM_NETWORK_CATEGORY_PRIVATE => firewall::PRIVATE,
+                        NLM_NETWORK_CATEGORY_DOMAIN_AUTHENTICATED => firewall::DOMAIN,
+                        _ => firewall::PUBLIC,
+                    });
                 }
             }
         }
     };
-    check().unwrap_or(false)
+    check().unwrap_or(firewall::PUBLIC)
 }
 
 pub enum SharingEvent {
+    /// A phone opened the page, so it found its way to the computer.
+    Visited,
     /// Bytes sent so far, of all the files together.
     Progress(u64),
     /// A download broke off before the end. The code waits again.
@@ -143,6 +153,8 @@ struct Shared {
     files: Vec<SharedFile>,
     total: u64,
     stop: AtomicBool,
+    /// A phone got through, which is told once.
+    visited: AtomicBool,
     progress: Mutex<Progress>,
     wake: Condvar,
     window: isize,
@@ -183,6 +195,7 @@ impl Sharing {
             total: files.iter().map(|file| file.size).sum(),
             files,
             stop: AtomicBool::new(false),
+            visited: AtomicBool::new(false),
             progress: Mutex::new(Progress {
                 sent: vec![0; count],
                 done: vec![false; count],
@@ -314,6 +327,9 @@ fn serve(mut stream: TcpStream, shared: &Shared) -> io::Result<()> {
     match http::route(&request.path, &shared.token, shared.files.len()) {
         Route::NotFound => answer(&mut stream, 404, "text/plain", b""),
         Route::Page => {
+            if !shared.visited.swap(true, Ordering::Relaxed) {
+                shared.report(SharingEvent::Visited);
+            }
             let listed: Vec<(String, u64)> = shared.files.iter().map(|file| (file.name.clone(), file.size)).collect();
             let page = http::page(&shared.token, &listed);
             let body = if request.method == Method::Head { &[][..] } else { page.as_bytes() };

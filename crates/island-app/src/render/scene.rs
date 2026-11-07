@@ -8,7 +8,7 @@ use island_core::layout::{
     HOME_SHORTCUT_X, HOME_SHORTCUT_Y, MEDIA_BUTTON_Y, MODE_TAB_HEIGHT,
     MODE_TAB_Y, MediaButton, PRESET_HEIGHT, PRESET_WIDTH, PRESET_Y, PROGRESS_HEIGHT,
     PROGRESS_WIDTH, PROGRESS_X, PROGRESS_Y, SETTINGS_SHORTCUT_SIZE, SETTINGS_SHORTCUT_X,
-    SETTINGS_SHORTCUT_Y, StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS,
+    SETTINGS_SHORTCUT_Y, STRIP_HEIGHT, StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS,
     TIMER_RING_RADIUS, TIMER_RING_WIDTH, TIMER_RING_X, TIMER_RING_Y, TimerButton, preset_center_x,
 };
 use island_core::convert::Target;
@@ -18,6 +18,7 @@ use island_core::drop::{
     tile_name,
 };
 use island_core::media::{RepeatMode, Sides, format_time};
+use island_core::MediaSnapshot;
 use island_core::shelf::ShelfView;
 use island_core::transfer::{Direct, Shown, TransferView};
 use island_core::{
@@ -112,6 +113,8 @@ fn glyph(icon: Icon) -> &'static str {
 
 /// Right edge of the compact pill reserved for the sound wave, in DIPs.
 pub const WAVE_RESERVED: f32 = 42.0;
+/// Right edge of the music pill kept for a task beside it, which a click opens.
+pub const TASK_RESERVED: f32 = 40.0;
 
 const ALERT_ART: f32 = 46.0;
 const ALERT_ART_RADIUS: f32 = 12.0;
@@ -181,6 +184,15 @@ pub struct Timing {
     pub scrubbing: bool,
 }
 
+/// What shares the pill with the activity it shows.
+#[derive(Clone, PartialEq)]
+pub enum Companion {
+    /// A task on the right of the music pill, by how far it got.
+    Task(Shown),
+    /// Music along the bottom of the open code.
+    Strip { media: MediaScene, text: String },
+}
+
 #[derive(Clone, PartialEq)]
 pub struct Scene {
     pub presentation: Presentation,
@@ -204,6 +216,7 @@ pub struct Scene {
     pub transfer: Option<TransferView>,
     /// The alert's file is shown in its folder, which a button on it offers.
     pub reveal: bool,
+    pub companion: Option<Companion>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -226,9 +239,28 @@ pub struct HomeScene {
 
 const DEFAULT_FIT: CompactFit = CompactFit { width: Pill::COMPACT.width, trailing: 0.0 };
 
-/// The space kept after the title: the wave only takes room while it is there.
-fn compact_media_end(media: &MediaScene) -> f32 {
-    if media.playing { WAVE_RESERVED } else { COMPACT_TEXT_END }
+/// The space kept after the title: the wave only takes room while it is
+/// there, and a task beside the music takes it instead.
+fn compact_media_end(media: &MediaScene, companion: Option<&Companion>) -> f32 {
+    match companion {
+        Some(Companion::Task(_)) => TASK_RESERVED,
+        _ if media.playing => WAVE_RESERVED,
+        _ => COMPACT_TEXT_END,
+    }
+}
+
+fn media_scene(media: &MediaSnapshot, timing: Option<Timing>) -> MediaScene {
+    MediaScene {
+        artwork: media.artwork.clone(),
+        playing: media.playing,
+        shuffle: media.shuffle,
+        repeat: media.repeat,
+        sides: media.sides(),
+        is_music: media.is_music,
+        can_previous: media.can_previous,
+        can_next: media.can_next,
+        timing,
+    }
 }
 
 impl HomeScene {
@@ -276,18 +308,11 @@ impl Scene {
                 panel: frame.panel.clone(),
                 transfer: None,
                 reveal: false,
+                companion: None,
             };
         };
-        let media = activity.media.as_ref().map(|media| MediaScene {
-            artwork: media.artwork.clone(),
-            playing: media.playing,
-            shuffle: media.shuffle,
-            repeat: media.repeat,
-            sides: media.sides(),
-            is_music: media.is_music,
-            can_previous: media.can_previous,
-            can_next: media.can_next,
-            timing: (presentation == Presentation::Expanded)
+        let media = activity.media.as_ref().map(|media| {
+            let timing = (presentation == Presentation::Expanded)
                 .then(|| media.progress_at(now).map(|progress| {
                     let progress = scrub.unwrap_or(progress);
                     let position = (media.duration_ms as f32 * progress) as u64;
@@ -298,7 +323,20 @@ impl Scene {
                         scrubbing: scrub.is_some(),
                     }
                 }))
-                .flatten(),
+                .flatten();
+            media_scene(media, timing)
+        });
+        let companion = frame.companion.as_ref().and_then(|other| match presentation {
+            Presentation::Compact => other.transfer.as_ref().map(|view| Companion::Task(view.shown.clone())),
+            Presentation::Expanded => other.media.as_ref().map(|media| Companion::Strip {
+                media: media_scene(media, None),
+                text: if other.detail.is_empty() {
+                    other.title.clone()
+                } else {
+                    format!("{} · {}", other.title, other.detail)
+                },
+            }),
+            _ => None,
         });
         Self {
             presentation,
@@ -318,14 +356,26 @@ impl Scene {
             panel: None,
             transfer: activity.transfer.clone(),
             reveal: activity.reveal && activity.file.is_some(),
+            companion,
         }
+    }
+
+    /// Music along the bottom of the open code, which makes the pill taller.
+    pub fn has_strip(&self) -> bool {
+        matches!(self.companion, Some(Companion::Strip { .. }))
+    }
+
+    /// A task on the right of the music pill.
+    pub fn has_task_beside(&self) -> bool {
+        matches!(self.companion, Some(Companion::Task(_)))
     }
 
     /// Everything the fit depends on, so it is only measured when that changes.
     pub fn fit_key(&self) -> String {
         let cover = self.media.as_ref().map(|media| media.playing);
         format!(
-            "{cover:?}|{}|{}|{}|{}",
+            "{cover:?}|{}|{}|{}|{}|{}",
+            self.has_task_beside(),
             self.icon.is_some(),
             self.clock.as_deref().map(all_zeros).unwrap_or_default(),
             self.leading,
@@ -341,7 +391,7 @@ impl Scene {
         let wanted = if let Some(clock) = &self.clock {
             measure(&all_zeros(clock), COMPACT_CLOCK_SIZE, true).ceil() + COMPACT_CLOCK_PADDING * 2.0
         } else if let Some(media) = &self.media {
-            COMPACT_ART_TEXT_X + text(&self.leading, true) + compact_media_end(media)
+            COMPACT_ART_TEXT_X + text(&self.leading, true) + compact_media_end(media, self.companion.as_ref())
         } else {
             let gap = if trailing > 0.0 { COMPACT_TEXT_GAP } else { 0.0 };
             self.text_start() + text(&self.leading, true) + gap + trailing + COMPACT_TEXT_END
@@ -380,12 +430,16 @@ impl Scene {
                 home.today.clear();
                 home.mode = StartMode::default();
             }
+            let without_progress = |shown: &Shown| match shown {
+                Shown::Waiting { .. } => Shown::Waiting { left: String::new() },
+                Shown::Sending { .. } => Shown::Sending { permille: 0, amount: String::new() },
+                Shown::Done => Shown::Done,
+            };
             if let Some(transfer) = &mut scene.transfer {
-                transfer.shown = match transfer.shown {
-                    Shown::Waiting { .. } => Shown::Waiting { left: String::new() },
-                    Shown::Sending { .. } => Shown::Sending { permille: 0, amount: String::new() },
-                    Shown::Done => Shown::Done,
-                };
+                transfer.shown = without_progress(&transfer.shown);
+            }
+            if let Some(Companion::Task(shown)) = &mut scene.companion {
+                *shown = without_progress(shown);
             }
             match &mut scene.panel {
                 Some(PanelView::Drop(view)) => view.hovered = None,
@@ -402,6 +456,7 @@ impl Scene {
     pub fn shows_wave(&self) -> bool {
         self.presentation == Presentation::Compact
             && self.media.as_ref().is_some_and(|media| media.playing)
+            && !self.has_task_beside()
     }
 
     /// `corner` is how round the pill's corners look, in DIPs.
@@ -483,9 +538,14 @@ impl Scene {
         let radius = (canvas.corner - inset).clamp(SMALLEST_ART_RADIUS, COMPACT_ART / 2.0);
         canvas.artwork(&mut painting, media, inset, inset, COMPACT_ART, radius);
 
-        let width = canvas.width - COMPACT_ART_TEXT_X - compact_media_end(media);
+        let width = canvas.width - COMPACT_ART_TEXT_X - compact_media_end(media, self.companion.as_ref());
         let bounds = canvas.bounds(COMPACT_ART_TEXT_X, 0.0, width, canvas.height);
         painting.texts.push(canvas.text(&self.leading, bounds, COMPACT_TEXT_SIZE, true, 1.0, Align::Leading));
+        if let Some(Companion::Task(shown)) = &self.companion {
+            // As far in from the end as the cover is from the start.
+            let center_x = canvas.width - inset - COMPACT_ART / 2.0;
+            task_mark(&mut painting, shown, canvas, center_x, canvas.height / 2.0);
+        }
         painting
     }
 
@@ -566,6 +626,16 @@ impl Scene {
                         painting.codes.push(CodeRun { bounds: code, code: join });
                         "Telefonu bağla"
                     }
+                    // No code without a network: Wi-Fi in its place, dimmed.
+                    None if transfer.offline => {
+                        let icon = canvas.bounds(TRANSFER_CODE.x, middle_y - 30.0, TRANSFER_CODE.width, 40.0);
+                        let mut run = canvas.icon(glyph(Icon::Wifi), icon, 30.0);
+                        run.opacity = 0.45;
+                        painting.texts.push(run);
+                        let note = canvas.bounds(TRANSFER_CODE.x, middle_y + 14.0, TRANSFER_CODE.width, 20.0);
+                        painting.texts.push(canvas.text("Wi-Fi kapalı", note, 12.0, false, 0.7, Align::Center));
+                        "Telefona gönder"
+                    }
                     _ => {
                         painting.codes.push(CodeRun { bounds: code, code: &transfer.code });
                         "Telefona gönder"
@@ -625,15 +695,26 @@ impl Scene {
         let note = canvas.bounds(left, 89.0, width, 18.0);
         match &transfer.shown {
             Shown::Waiting { .. } => match &transfer.direct {
+                None if transfer.offline => {
+                    painting.colored.push((canvas.text("Wi-Fi kapalı", line_beside_time, 12.0, false, 1.0, Align::Leading), WARNING_COLOR));
+                    painting.texts.push(canvas.text("Wi-Fi açılınca kod hazırlanır", note, 12.0, false, 0.6, Align::Leading));
+                }
                 None => {
                     painting.texts.push(canvas.text(&transfer.network, line_beside_time, 12.0, false, 0.6, Align::Leading));
                     match &transfer.warning {
                         Some(warning) => painting.colored.push((canvas.text(warning, note, 12.0, false, 1.0, Align::Leading), WARNING_COLOR)),
+                        // Some networks keep phones away from computers, which
+                        // looks like nobody coming at all.
+                        None if transfer.nudge => painting.texts.push(canvas.text("Açılmazsa Doğrudan bağlan'ı dene", note, 12.0, false, 0.9, Align::Leading)),
                         None => painting.texts.push(canvas.text("Telefonun kamerasıyla okut", note, 12.0, false, 0.6, Align::Leading)),
                     }
                     let other = canvas.rect(TRANSFER_DIRECT);
-                    painting.bars.push(BarRun { bounds: other, opacity: 0.14 });
+                    painting.bars.push(BarRun { bounds: other, opacity: if transfer.nudge { 0.3 } else { 0.14 } });
                     painting.texts.push(canvas.text("Doğrudan bağlan", other, 11.5, true, 1.0, Align::Center));
+                }
+                Some(Direct::Hotspot { network }) => {
+                    painting.texts.push(canvas.text(network, line_beside_time, 12.0, true, 0.9, Align::Leading));
+                    painting.texts.push(canvas.text("Telefon etkin noktadaysa okut", note, 12.0, false, 0.6, Align::Leading));
                 }
                 Some(Direct::Preparing) => {
                     painting.texts.push(canvas.text("Islora kendi ağını kuruyor", line_beside_time, 12.0, false, 0.6, Align::Leading));
@@ -659,6 +740,9 @@ impl Scene {
             let stop = canvas.rect(TRANSFER_STOP);
             painting.bars.push(BarRun { bounds: stop, opacity: 0.14 });
             painting.texts.push(canvas.text("Durdur", stop, 12.5, true, 1.0, Align::Center));
+        }
+        if let Some(Companion::Strip { media, text }) = &self.companion {
+            music_strip(&mut painting, media, text, canvas);
         }
         painting
     }
@@ -833,6 +917,39 @@ impl Scene {
     }
 }
 
+/// A task's state in a small space: the phone while the code waits, a ring
+/// as the files go, and a green tick once they are there.
+fn task_mark(painting: &mut Painting<'_>, shown: &Shown, canvas: &Canvas, center_x: f32, center_y: f32) {
+    const SIZE: f32 = 24.0;
+    let bounds = canvas.bounds(center_x - SIZE / 2.0, center_y - SIZE / 2.0, SIZE, SIZE);
+    match shown {
+        Shown::Waiting { .. } => painting.texts.push(canvas.icon(glyph(Icon::Phone), bounds, 14.0)),
+        Shown::Sending { permille, .. } => painting.rings.push(RingRun {
+            center_x: center_x * canvas.scale,
+            center_y: center_y * canvas.scale,
+            radius: 8.0 * canvas.scale,
+            width: 2.2 * canvas.scale,
+            fraction: f32::from(*permille) / 1000.0,
+            opacity: 1.0,
+        }),
+        Shown::Done => painting.colored.push((canvas.icon(glyph(Icon::Check), bounds, 15.0), PHONE_COLOR)),
+    }
+}
+
+/// Music along the bottom of the open code: its cover and what plays.
+fn music_strip<'a>(painting: &mut Painting<'a>, media: &'a MediaScene, text: &'a str, canvas: &Canvas) {
+    const ART: f32 = 14.0;
+    // Far enough in that the rounded bottom corners never cut the cover.
+    const LEFT: f32 = 40.0;
+    let top = Pill::EXPANDED.height;
+    painting.bars.push(BarRun { bounds: canvas.bounds(24.0, top - 1.0, canvas.width - 48.0, 1.0), opacity: 0.12 });
+    let middle = top + (STRIP_HEIGHT - 4.0) / 2.0;
+    canvas.artwork(painting, media, LEFT, middle - ART / 2.0, ART, 4.0);
+    let text_left = LEFT + ART + 8.0;
+    let bounds = canvas.bounds(text_left, middle - 9.0, canvas.width - text_left - LEFT, 18.0);
+    painting.texts.push(canvas.text(text, bounds, 11.5, false, 0.75, Align::Leading));
+}
+
 /// What the small bubble beside the pill shows.
 pub fn bubble_painting(bubble: &Bubble, size: f32, scale: f32) -> Painting<'_> {
     let canvas = Canvas { scale, width: size / scale, height: size / scale, corner: size / scale / 2.0, notch: false };
@@ -848,7 +965,13 @@ pub fn bubble_painting(bubble: &Bubble, size: f32, scale: f32) -> Painting<'_> {
         }),
         Bubble::Symbol(icon) => {
             let bounds = canvas.bounds(0.0, 0.0, canvas.width, canvas.height);
-            painting.texts.push(canvas.icon(glyph(*icon), bounds, 16.0));
+            let run = canvas.icon(glyph(*icon), bounds, 16.0);
+            // A finished task ticks green wherever it shows.
+            if *icon == Icon::Check {
+                painting.colored.push((run, PHONE_COLOR));
+            } else {
+                painting.texts.push(run);
+            }
         }
         Bubble::Count { value, icon, ring } => {
             if let Some(percent) = ring {

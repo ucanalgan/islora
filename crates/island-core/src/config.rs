@@ -1,6 +1,6 @@
 //! The settings file: one `key = "value"` per line, `#` for comments.
 
-use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS};
+use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout};
 
 const LONGEST_PRESET_MINUTES: u64 = 720;
 
@@ -91,9 +91,43 @@ pub fn read_progress_style(text: &str) -> ProgressStyle {
     ProgressStyle::ALL.into_iter().find(|style| value.as_deref() == Some(style.setting())).unwrap_or_default()
 }
 
+/// Whether the user chose to start with Windows or not. `None` until they
+/// chose, which is when a new copy turns it on by itself.
+pub fn read_autostart(text: &str) -> Option<bool> {
+    match read_value(text, "autostart")?.as_str() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// The bubble is the default, so anything else unknown reads as the bubble.
+pub fn read_task_layout(text: &str) -> TaskLayout {
+    let value = read_value(text, "task_layout");
+    TaskLayout::ALL.into_iter().find(|layout| value.as_deref() == Some(layout.setting())).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn starting_with_windows_is_undecided_until_chosen() {
+        assert_eq!(read_autostart("autostart = \"on\""), Some(true));
+        assert_eq!(read_autostart("autostart = \"off\""), Some(false));
+        assert_eq!(read_autostart("autostart = \"maybe\""), None);
+        assert_eq!(read_autostart("# autostart = \"off\""), None);
+        assert_eq!(read_autostart(""), None);
+    }
+
+    #[test]
+    fn the_task_layout_is_read_by_its_name() {
+        assert_eq!(read_task_layout("task_layout = \"shared\""), TaskLayout::Shared);
+        assert_eq!(read_task_layout("task_layout = \"front\""), TaskLayout::Front);
+        assert_eq!(read_task_layout("task_layout = \"bubble\""), TaskLayout::Bubble);
+        assert_eq!(read_task_layout("task_layout = \"stack\""), TaskLayout::Bubble);
+        assert_eq!(read_task_layout(""), TaskLayout::Bubble);
+    }
 
     #[test]
     fn the_progress_style_is_read_by_its_name() {

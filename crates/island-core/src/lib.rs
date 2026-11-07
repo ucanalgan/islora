@@ -8,6 +8,7 @@ pub mod convert;
 pub mod direct;
 pub mod drop;
 pub mod files;
+pub mod firewall;
 pub mod focus;
 pub mod fullscreen;
 pub mod http;
@@ -27,7 +28,7 @@ pub mod transfer;
 pub use activity::{Activity, Bubble, Icon, Kind, Millis, TimerView};
 pub use fullscreen::FullscreenWatch;
 pub use indicator::{Indicator, NetworkState, NetworkTracker, SystemTracker};
-pub use layout::{IslandStyle, Material, MediaButton, Pill, ProgressStyle, StartMode, TimerButton};
+pub use layout::{IslandStyle, Material, MediaButton, Pill, ProgressStyle, StartMode, TaskLayout, TimerButton};
 pub use media::MediaSnapshot;
 pub use schedule::Upcoming;
 pub use scheduler::{

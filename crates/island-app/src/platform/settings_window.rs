@@ -4,8 +4,9 @@
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use std::time::{Duration, Instant};
 
-use island_core::{IslandStyle, Material, ProgressStyle};
+use island_core::{IslandStyle, Material, ProgressStyle, TaskLayout};
 use island_core::settings_view::{
     ADDRESS_FIELD, Action, Control, Focus, Look, PREVIEW, Page, Rect, SIDEBAR_WIDTH, SettingsState,
     View, WINDOW_HEIGHT, WINDOW_WIDTH, view,
@@ -85,6 +86,10 @@ pub struct SettingsWindow {
     focus: Option<Focus>,
     /// The focus is outlined only once the keyboard is in use, as in Windows.
     ring: bool,
+    /// The preview's shapes for the choices in effect.
+    shapes: Vec<Shape>,
+    /// The shapes it is moving from, and since when, after a change.
+    transition: Option<(Vec<Shape>, Instant)>,
 }
 
 impl SettingsWindow {
@@ -153,11 +158,13 @@ impl SettingsWindow {
                 field_brush,
                 scale,
                 view: view(&state),
+                shapes: preview_shapes(&state),
                 state,
                 hovered: None,
                 tracking_pointer: false,
                 focus: None,
                 ring: false,
+                transition: None,
             };
             window.fit_address_field();
             window.show_address_on_its_page();
@@ -183,8 +190,31 @@ impl SettingsWindow {
         &self.state
     }
 
+    /// One step of the preview's move to a new choice. The timer stops with it.
+    pub fn on_timer(&mut self) {
+        let done = self.transition.as_ref().is_none_or(|(_, started)| started.elapsed() >= TRANSITION);
+        if done {
+            self.transition = None;
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), PREVIEW_TIMER);
+            }
+        }
+        self.repaint();
+    }
+
     pub fn update(&mut self, state: SettingsState) {
         self.view = view(&state);
+        let shapes = preview_shapes(&state);
+        // A new choice on the same page moves the preview there. Another page
+        // simply shows its own.
+        if state.page == self.state.page && shapes != self.shapes && !self.shapes.is_empty() {
+            let from = std::mem::replace(&mut self.shapes, shapes);
+            self.transition = Some((from, Instant::now()));
+            unsafe { SetTimer(Some(self.hwnd), PREVIEW_TIMER, TRANSITION_TICK_MS, None) };
+        } else {
+            self.shapes = shapes;
+            self.transition = None;
+        }
         self.state = state;
         // A page change can take away what the keyboard was on.
         if self.focus.is_some_and(|focus| !self.view.focus_order(self.state.page).contains(&focus)) {
@@ -399,7 +429,7 @@ impl SettingsWindow {
             border: None,
         });
         match self.state.page {
-            Page::Appearance => self.preview(&mut painting),
+            page if page.has_preview() => self.preview(&mut painting),
             Page::Calendar => painting.shapes.push(ShapeRun {
                 bounds: self.bounds(ADDRESS_FIELD),
                 radius: 10.0 * self.scale,
@@ -521,106 +551,117 @@ impl SettingsWindow {
         });
     }
 
-    /// A small scene with the island on it, in the look chosen below: music
-    /// playing, and beside it the open view of a send to a phone, in the
-    /// progress style chosen.
+    /// The small scene with the island on it, in the look chosen on the page.
+    /// After a change its shapes move from where they were for a moment, and
+    /// what they hold fades across.
     fn preview(&self, painting: &mut Painting<'_>) {
-        const PILL_WIDTH: f32 = 176.0;
-        const PILL_HEIGHT: f32 = 36.0;
-        const CARD_WIDTH: f32 = 184.0;
-        const CARD_HEIGHT: f32 = 64.0;
-        const GAP: f32 = 22.0;
-        /// How far the send in the picture has got.
-        const SENT: f32 = 0.64;
-        const GREEN: [f32; 3] = [0.25, 0.82, 0.48];
-        let scale = self.scale;
         let scene = PREVIEW;
+        let scale = self.scale;
         let place = |x: f32, y: f32, width: f32, height: f32| self.bounds(Rect { x: scene.x + x, y: scene.y + y, width, height });
-        let shape = |x: f32, y: f32, width: f32, height: f32, radius: f32, fill: [f32; 4]| ShapeRun {
-            bounds: place(x, y, width, height),
-            radius: radius * scale,
-            fill,
-            border: None,
-        };
-        let text = |text: &'static str, bounds: Bounds, size: f32, bold: bool, opacity: f32, align: Align, font: Font| TextRun {
-            text,
-            bounds,
-            size: size * scale,
-            bold,
-            opacity,
-            align,
-            font,
-            even_digits: false,
-        };
-        let green = |alpha: f32| [GREEN[0], GREEN[1], GREEN[2], alpha];
-        painting.shapes.push(shape(0.0, 0.0, scene.width, scene.height, 12.0, [0.204, 0.314, 0.486, 1.0]));
-        painting.shapes.push(shape(40.0, 26.0, 60.0, 60.0, 30.0, [0.91, 0.725, 0.227, 1.0]));
-        painting.shapes.push(shape(scene.width - 120.0, 10.0, 76.0, 76.0, 38.0, [0.184, 0.659, 0.604, 1.0]));
+        let plain = |bounds: Bounds, radius: f32, fill: [f32; 4]| ShapeRun { bounds, radius: radius * scale, fill, border: None };
+        painting.shapes.push(plain(place(0.0, 0.0, scene.width, scene.height), 12.0, [0.204, 0.314, 0.486, 1.0]));
+        painting.shapes.push(plain(place(40.0, 26.0, 60.0, 60.0), 30.0, [0.91, 0.725, 0.227, 1.0]));
+        painting.shapes.push(plain(place(scene.width - 120.0, 10.0, 76.0, 76.0), 38.0, [0.184, 0.659, 0.604, 1.0]));
 
-        let left = (scene.width - PILL_WIDTH - GAP - CARD_WIDTH) / 2.0;
-        let card_left = left + PILL_WIDTH + GAP;
-        let notch = self.state.style == IslandStyle::Notch;
-        let glass = self.state.material == Material::Glass;
-        let fill = if glass { [0.05, 0.05, 0.09, 0.62] } else { [0.0, 0.0, 0.0, 1.0] };
-        let border = glass.then_some(([1.0, 1.0, 1.0, 0.3], scale));
+        let progress = self.transition.as_ref().map(|(from, started)| (from, ease(started.elapsed().as_secs_f32() / TRANSITION.as_secs_f32())));
+        for part in Part::ALL {
+            let to = self.shapes.iter().find(|shape| shape.part == part);
+            match progress {
+                Some((from, t)) => {
+                    let from = from.iter().find(|shape| shape.part == part);
+                    match (from, to) {
+                        (Some(a), Some(b)) => {
+                            let outline = a.outline().blend(&b.outline(), t);
+                            if a.marks == b.marks {
+                                self.draw_part(painting, &outline, &b.marks, 1.0, 1.0);
+                            } else {
+                                self.draw_part(painting, &outline, &a.marks, 1.0, (1.0 - t * 1.6).max(0.0));
+                                self.draw_part(painting, &outline, &b.marks, 0.0, ((t - 0.3) / 0.7).clamp(0.0, 1.0));
+                            }
+                        }
+                        (Some(a), None) => self.draw_part(painting, &a.outline().scaled(1.0 - 0.4 * t), &a.marks, 1.0 - t, 1.0 - t),
+                        (None, Some(b)) => self.draw_part(painting, &b.outline().scaled(0.6 + 0.4 * t), &b.marks, t, t),
+                        (None, None) => {}
+                    }
+                }
+                None => {
+                    if let Some(shape) = to {
+                        self.draw_part(painting, &shape.outline(), &shape.marks, 1.0, 1.0);
+                    }
+                }
+            }
+        }
         // A notch starts above the scene, which is then painted over, so that
         // its top corners stay square against the edge.
-        let (top, above) = if notch { (0.0, 16.0) } else { (12.0, 0.0) };
-        let pill_radius = if notch { 14.0 } else { PILL_HEIGHT / 2.0 };
-        let card_radius = if notch { 16.0 } else { 22.0 };
-        painting.shapes.push(ShapeRun { border, ..shape(left, top - above, PILL_WIDTH, PILL_HEIGHT + above, pill_radius, fill) });
-        painting.shapes.push(ShapeRun { border, ..shape(card_left, top - above, CARD_WIDTH, CARD_HEIGHT + above, card_radius, fill) });
-        painting.shapes.push(shape(left - 2.0, -18.0, PILL_WIDTH + GAP + CARD_WIDTH + 4.0, 18.0, 0.0, BACKGROUND));
+        painting.shapes.push(plain(place(0.0, -NOTCH_REACH - 2.0, scene.width, NOTCH_REACH + 2.0), 0.0, BACKGROUND));
+    }
 
-        let middle = top + PILL_HEIGHT / 2.0;
-        let line = |x: f32, width: f32| place(left + x, middle - 12.0, width, 24.0);
-        painting.texts.push(text(ICON_MUSIC, line(16.0, 22.0), 15.0, false, 1.0, Align::Center, Font::Icons));
-        painting.texts.push(text("Kısa Şarkı", line(46.0, 84.0), 13.0, true, 1.0, Align::Leading, Font::Text));
-        let heights = if self.state.sound_wave { [6.0, 12.0, 15.0, 9.0] } else { [4.0; 4] };
-        let opacity = if self.state.sound_wave { 1.0 } else { 0.6 };
-        for (index, bar) in heights.into_iter().enumerate() {
-            let bounds = place(left + 136.0 + index as f32 * 6.0, middle - bar / 2.0, 3.0, bar);
-            painting.bars.push(BarRun { bounds, opacity });
+    /// One shape at `body` opacity, and what it holds at `marks` opacity. Only
+    /// the first drawing of a shape paints its body.
+    fn draw_part(&self, painting: &mut Painting<'_>, outline: &Outline, marks: &[Mark], body: f32, opacity: f32) {
+        let scale = self.scale;
+        let scene = PREVIEW;
+        let at = outline.at;
+        let place = |x: f32, y: f32, width: f32, height: f32| self.bounds(Rect { x: scene.x + at.x + x, y: scene.y + at.y + y, width, height });
+        let shape_bounds = place(0.0, -outline.above, at.width, at.height + outline.above);
+        let radius = outline.radius * scale;
+        if body > 0.0 {
+            let fade = |color: [f32; 4]| [color[0], color[1], color[2], color[3] * body];
+            let border = (outline.border[3] > 0.0).then(|| (fade(outline.border), scale));
+            painting.shapes.push(ShapeRun { bounds: shape_bounds, radius, fill: fade(outline.fill), border });
         }
-
-        // The open view of a send, as the chosen style shows it.
-        let center = top + CARD_HEIGHT / 2.0;
-        let whole = place(card_left, top, CARD_WIDTH, CARD_HEIGHT);
-        let shape_bounds = place(card_left, top - above, CARD_WIDTH, CARD_HEIGHT + above);
-        let percent_small = place(card_left + 10.0, center - 10.0, 48.0, 20.0);
-        let percent_large = place(card_left + 4.0, center - 13.0, 60.0, 26.0);
-        match self.state.progress {
-            ProgressStyle::Ring => {
-                let point = place(card_left + 34.0, center, 0.0, 0.0);
-                painting.rings.push(RingRun {
-                    center_x: point.x,
-                    center_y: point.y,
-                    radius: 19.0 * scale,
-                    width: 3.5 * scale,
-                    fraction: SENT,
-                    opacity: 1.0,
-                });
-                painting.texts.push(text("%64", percent_small, 10.5, true, 1.0, Align::Center, Font::Text));
-            }
-            ProgressStyle::Edge => {
-                let radius = card_radius * scale;
-                painting.outlines.push(OutlineRun { bounds: whole, radius, width: 5.0 * scale, color: green(0.25), fraction: SENT, dash: None, open_top: notch });
-                painting.outlines.push(OutlineRun { bounds: whole, radius, width: 2.0 * scale, color: green(1.0), fraction: SENT, dash: None, open_top: notch });
-                painting.texts.push(text("%64", percent_large, 15.0, true, 1.0, Align::Center, Font::Text));
-            }
-            ProgressStyle::Fill => {
-                let radius = card_radius * scale;
-                let reach = CARD_WIDTH * SENT;
-                let filled = ShapeRun { bounds: place(card_left, top, reach, CARD_HEIGHT), radius: 0.0, fill: green(0.26), border: None };
-                let front = ShapeRun { bounds: place(card_left + reach - 2.0, top, 2.0, CARD_HEIGHT), radius: 0.0, fill: green(0.8), border: None };
-                painting.clipped.push((filled, shape_bounds, radius));
-                painting.clipped.push((front, shape_bounds, radius));
-                painting.texts.push(text("%64", percent_large, 15.0, true, 1.0, Align::Center, Font::Text));
+        if opacity <= 0.0 {
+            return;
+        }
+        let green = |alpha: f32| [GREEN[0], GREEN[1], GREEN[2], alpha * opacity];
+        for mark in marks {
+            match mark {
+                Mark::Text { text, at: spot, size, bold, opacity: own, centered, icon, tinted } => {
+                    let run = TextRun {
+                        text,
+                        bounds: place(spot.x, spot.y, spot.width, spot.height),
+                        size: size * scale,
+                        bold: *bold,
+                        opacity: own * opacity,
+                        align: if *centered { Align::Center } else { Align::Leading },
+                        font: if *icon { Font::Icons } else { Font::Text },
+                        even_digits: false,
+                    };
+                    if *tinted {
+                        painting.colored.push((run, GREEN));
+                    } else {
+                        painting.texts.push(run);
+                    }
+                }
+                Mark::Bar { at: spot, opacity: own } => {
+                    painting.bars.push(BarRun { bounds: place(spot.x, spot.y, spot.width, spot.height), opacity: own * opacity });
+                }
+                Mark::Ring { x, y, radius: ring, width, fraction } => {
+                    let point = place(*x, *y, 0.0, 0.0);
+                    painting.rings.push(RingRun {
+                        center_x: point.x,
+                        center_y: point.y,
+                        radius: ring * scale,
+                        width: width * scale,
+                        fraction: *fraction,
+                        opacity,
+                    });
+                }
+                Mark::Edge { fraction } => {
+                    let whole = place(0.0, 0.0, at.width, at.height);
+                    let open_top = outline.above > 0.0;
+                    painting.outlines.push(OutlineRun { bounds: whole, radius, width: 5.0 * scale, color: green(0.25), fraction: *fraction, dash: None, open_top });
+                    painting.outlines.push(OutlineRun { bounds: whole, radius, width: 2.0 * scale, color: green(1.0), fraction: *fraction, dash: None, open_top });
+                }
+                Mark::Fill { fraction } => {
+                    let reach = at.width * fraction;
+                    let filled = ShapeRun { bounds: place(0.0, 0.0, reach, at.height), radius: 0.0, fill: green(0.26), border: None };
+                    let front = ShapeRun { bounds: place(reach - 2.0, 0.0, 2.0, at.height), radius: 0.0, fill: green(0.8), border: None };
+                    painting.clipped.push((filled, shape_bounds, radius));
+                    painting.clipped.push((front, shape_bounds, radius));
+                }
             }
         }
-        let words = CARD_WIDTH - 76.0;
-        painting.texts.push(text("Gönderiliyor", place(card_left + 66.0, center - 17.0, words, 17.0), 11.5, true, 1.0, Align::Leading, Font::Text));
-        painting.texts.push(text("Kapadokya.jpg", place(card_left + 66.0, center + 1.0, words, 16.0), 10.5, false, 0.6, Align::Leading, Font::Text));
     }
 }
 
@@ -709,5 +750,279 @@ fn create_address_field(parent: HWND, instance: windows::Win32::Foundation::HINS
             Some(instance),
             None,
         )
+    }
+}
+
+/// How long the preview takes to move to a new choice.
+const TRANSITION: Duration = Duration::from_millis(260);
+/// How often it repaints meanwhile, which is all the time it costs.
+const TRANSITION_TICK_MS: u32 = 15;
+const PREVIEW_TIMER: usize = 1;
+/// How far a notch reaches up past the top of the scene.
+const NOTCH_REACH: f32 = 16.0;
+const GREEN: [f32; 3] = [0.25, 0.82, 0.48];
+/// How far the send in the picture has got.
+const SENT: f32 = 0.64;
+const PILL_WIDTH: f32 = 176.0;
+const PILL_HEIGHT: f32 = 36.0;
+const BUBBLE_SIZE: f32 = 36.0;
+const BUBBLE_GAP: f32 = 8.0;
+const CARD_WIDTH: f32 = 184.0;
+const CARD_HEIGHT: f32 = 64.0;
+const GROUP_GAP: f32 = 22.0;
+
+/// Starts quickly and settles, as the island's own springs do.
+fn ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t)]
+}
+
+/// The shapes of the preview, which keep who they are across a change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Part {
+    Pill,
+    Bubble,
+    Card,
+}
+
+impl Part {
+    const ALL: [Part; 3] = [Part::Pill, Part::Bubble, Part::Card];
+}
+
+/// Something drawn inside a shape, placed from its top left, in DIPs.
+#[derive(Clone, Debug, PartialEq)]
+enum Mark {
+    Text { text: &'static str, at: Rect, size: f32, bold: bool, opacity: f32, centered: bool, icon: bool, tinted: bool },
+    Bar { at: Rect, opacity: f32 },
+    Ring { x: f32, y: f32, radius: f32, width: f32, fraction: f32 },
+    /// Light along the edge of the shape, as far as the send got.
+    Edge { fraction: f32 },
+    /// The shape filled from the left, as far as the send got.
+    Fill { fraction: f32 },
+}
+
+impl Mark {
+    fn text(text: &'static str, at: Rect, size: f32, bold: bool) -> Mark {
+        Mark::Text { text, at, size, bold, opacity: 1.0, centered: false, icon: false, tinted: false }
+    }
+
+    fn icon(glyph: &'static str, at: Rect, size: f32) -> Mark {
+        Mark::Text { text: glyph, at, size, bold: false, opacity: 1.0, centered: true, icon: true, tinted: false }
+    }
+}
+
+/// Where a shape is and how it looks, which a change blends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Outline {
+    /// Within the scene: the part on screen, without what a notch hides above.
+    at: Rect,
+    above: f32,
+    radius: f32,
+    fill: [f32; 4],
+    border: [f32; 4],
+}
+
+impl Outline {
+    fn blend(&self, other: &Outline, t: f32) -> Outline {
+        Outline {
+            at: Rect {
+                x: lerp(self.at.x, other.at.x, t),
+                y: lerp(self.at.y, other.at.y, t),
+                width: lerp(self.at.width, other.at.width, t),
+                height: lerp(self.at.height, other.at.height, t),
+            },
+            above: lerp(self.above, other.above, t),
+            radius: lerp(self.radius, other.radius, t),
+            fill: lerp_color(self.fill, other.fill, t),
+            border: lerp_color(self.border, other.border, t),
+        }
+    }
+
+    /// Grown or shrunk about its middle, for a shape that comes or goes.
+    fn scaled(&self, factor: f32) -> Outline {
+        let width = self.at.width * factor;
+        let height = self.at.height * factor;
+        Outline {
+            at: Rect {
+                x: self.at.x + (self.at.width - width) / 2.0,
+                y: self.at.y + (self.at.height - height) / 2.0,
+                width,
+                height,
+            },
+            radius: self.radius * factor,
+            ..*self
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Shape {
+    part: Part,
+    outline: Outline,
+    marks: Vec<Mark>,
+}
+
+impl Shape {
+    fn outline(&self) -> Outline {
+        self.outline
+    }
+}
+
+/// What the chosen look makes of every shape.
+struct Dress {
+    top: f32,
+    above: f32,
+    notch: bool,
+    fill: [f32; 4],
+    border: [f32; 4],
+}
+
+impl Dress {
+    fn new(state: &SettingsState) -> Self {
+        let notch = state.style == IslandStyle::Notch;
+        let glass = state.material == Material::Glass;
+        Self {
+            top: if notch { 0.0 } else { 12.0 },
+            above: if notch { NOTCH_REACH } else { 0.0 },
+            notch,
+            fill: if glass { [0.05, 0.05, 0.09, 0.62] } else { [0.0, 0.0, 0.0, 1.0] },
+            border: if glass { [1.0, 1.0, 1.0, 0.3] } else { [1.0, 1.0, 1.0, 0.0] },
+        }
+    }
+
+    /// `round` is its corner as a floating island, then as a notch.
+    fn shape(&self, part: Part, x: f32, (width, height): (f32, f32), round: (f32, f32), marks: Vec<Mark>) -> Shape {
+        let (round, notch_round) = round;
+        let radius = if self.notch { notch_round } else { round };
+        let outline = Outline {
+            at: Rect { x, y: self.top, width, height },
+            above: self.above,
+            radius,
+            fill: self.fill,
+            border: self.border,
+        };
+        Shape { part, outline, marks }
+    }
+}
+
+/// What the music pill shows, with the task on its right when they share it.
+fn music_marks(state: &SettingsState, task_beside: bool) -> Vec<Mark> {
+    let middle = PILL_HEIGHT / 2.0;
+    let mut marks = vec![
+        Mark::icon(ICON_MUSIC, Rect { x: 16.0, y: middle - 12.0, width: 22.0, height: 24.0 }, 15.0),
+        Mark::text("Kısa Şarkı", Rect { x: 46.0, y: middle - 12.0, width: 84.0, height: 24.0 }, 13.0, true),
+    ];
+    if task_beside {
+        marks.push(Mark::Ring { x: PILL_WIDTH - 24.0, y: middle, radius: 8.0, width: 2.2, fraction: SENT });
+        return marks;
+    }
+    let (heights, opacity) = if state.sound_wave { ([6.0, 12.0, 15.0, 9.0], 1.0) } else { ([4.0; 4], 0.6) };
+    for (index, bar) in heights.into_iter().enumerate() {
+        let at = Rect { x: 136.0 + index as f32 * 6.0, y: middle - bar / 2.0, width: 3.0, height: bar };
+        marks.push(Mark::Bar { at, opacity });
+    }
+    marks
+}
+
+/// The send itself in the pill, as when it comes to the front.
+fn send_marks() -> Vec<Mark> {
+    let middle = PILL_HEIGHT / 2.0;
+    vec![
+        Mark::Ring { x: 24.0, y: middle, radius: 7.0, width: 2.2, fraction: SENT },
+        Mark::text("Kapadokya.jpg", Rect { x: 42.0, y: middle - 12.0, width: 88.0, height: 24.0 }, 12.0, true),
+        Mark::Text {
+            text: "%64",
+            at: Rect { x: PILL_WIDTH - 44.0, y: middle - 12.0, width: 32.0, height: 24.0 },
+            size: 12.0,
+            bold: false,
+            opacity: 0.75,
+            centered: false,
+            icon: false,
+            tinted: false,
+        },
+    ]
+}
+
+/// The open view of a send, as the chosen style shows it.
+fn card_marks(state: &SettingsState) -> Vec<Mark> {
+    let center = CARD_HEIGHT / 2.0;
+    let percent = |large: bool| Mark::Text {
+        text: "%64",
+        at: if large {
+            Rect { x: 4.0, y: center - 13.0, width: 60.0, height: 26.0 }
+        } else {
+            Rect { x: 10.0, y: center - 10.0, width: 48.0, height: 20.0 }
+        },
+        size: if large { 15.0 } else { 10.5 },
+        bold: true,
+        opacity: 1.0,
+        centered: true,
+        icon: false,
+        tinted: false,
+    };
+    let mut marks = match state.progress {
+        ProgressStyle::Ring => vec![Mark::Ring { x: 34.0, y: center, radius: 19.0, width: 3.5, fraction: SENT }, percent(false)],
+        ProgressStyle::Edge => vec![Mark::Edge { fraction: SENT }, percent(true)],
+        ProgressStyle::Fill => vec![Mark::Fill { fraction: SENT }, percent(true)],
+    };
+    let words = CARD_WIDTH - 76.0;
+    marks.push(Mark::text("Gönderiliyor", Rect { x: 66.0, y: center - 17.0, width: words, height: 17.0 }, 11.5, true));
+    marks.push(Mark::Text {
+        text: "Kapadokya.jpg",
+        at: Rect { x: 66.0, y: center + 1.0, width: words, height: 16.0 },
+        size: 10.5,
+        bold: false,
+        opacity: 0.6,
+        centered: false,
+        icon: false,
+        tinted: false,
+    });
+    marks
+}
+
+/// The shapes of the preview on a page, for the choices in `state`.
+fn preview_shapes(state: &SettingsState) -> Vec<Shape> {
+    let dress = Dress::new(state);
+    let pill = |x: f32, marks| dress.shape(Part::Pill, x, (PILL_WIDTH, PILL_HEIGHT), (PILL_HEIGHT / 2.0, 14.0), marks);
+    match state.page {
+        // The look on its own: music playing in the pill.
+        Page::Appearance => vec![pill((PREVIEW.width - PILL_WIDTH) / 2.0, music_marks(state, false))],
+        // Music and a send: the closed island in the chosen layout, and beside it
+        // the open view in the chosen progress style.
+        Page::Layout => {
+            let group = PILL_WIDTH + BUBBLE_GAP + BUBBLE_SIZE;
+            let left = (PREVIEW.width - group - GROUP_GAP - CARD_WIDTH) / 2.0;
+            let bubble = |marks| dress.shape(Part::Bubble, left + PILL_WIDTH + BUBBLE_GAP, (BUBBLE_SIZE, BUBBLE_SIZE), (BUBBLE_SIZE / 2.0, 12.0), marks);
+            let ring = vec![
+                Mark::Ring { x: BUBBLE_SIZE / 2.0, y: BUBBLE_SIZE / 2.0, radius: 15.0, width: 2.0, fraction: SENT },
+                Mark::Text {
+                    text: "64",
+                    at: Rect { x: 0.0, y: 0.0, width: BUBBLE_SIZE, height: BUBBLE_SIZE },
+                    size: 11.0,
+                    bold: true,
+                    opacity: 1.0,
+                    centered: true,
+                    icon: false,
+                    tinted: false,
+                },
+            ];
+            let note = vec![Mark::icon(ICON_MUSIC, Rect { x: 0.0, y: 0.0, width: BUBBLE_SIZE, height: BUBBLE_SIZE }, 14.0)];
+            let card = dress.shape(Part::Card, left + group + GROUP_GAP, (CARD_WIDTH, CARD_HEIGHT), (22.0, 16.0), card_marks(state));
+            match state.layout {
+                TaskLayout::Bubble => vec![pill(left, music_marks(state, false)), bubble(ring), card],
+                // Without a bubble the pill sits in the middle of where the two were.
+                TaskLayout::Shared => vec![pill(left + (group - PILL_WIDTH) / 2.0, music_marks(state, true)), card],
+                TaskLayout::Front => vec![pill(left, send_marks()), bubble(note), card],
+            }
+        }
+        _ => Vec::new(),
     }
 }
