@@ -13,11 +13,11 @@ A live island for Windows 11. Islora shows what your PC is doing in a small blac
   </tr>
   <tr>
     <td><img src="assets/screenshots/drop.png" alt="Files dragged to the island, over the three places they can go"></td>
-    <td><img src="assets/screenshots/phone.png" alt="A QR code for a phone to download a file over the local network"></td>
+    <td><img src="assets/screenshots/phone.png" alt="A QR code for a phone to download a file, with the music that plays meanwhile in a bubble beside it"></td>
   </tr>
   <tr>
     <td><img src="assets/screenshots/glass.png" alt="The glass material, showing the colours behind it"></td>
-    <td><img src="assets/screenshots/settings.png" alt="The settings window on its appearance page, with the progress style for sending"></td>
+    <td><img src="assets/screenshots/settings.png" alt="The settings window on its layout page, choosing how a send shares the island with music"></td>
   </tr>
 </table>
 
@@ -35,10 +35,10 @@ The file is not signed, so SmartScreen may warn you the first time. Choose **Mor
 - **Music and video:** cover, title, artist, progress and playback buttons for any player that reports to Windows, such as Spotify, or YouTube and YouTube Music in a browser. You can seek, shuffle and repeat when the player allows it. Where a player has no previous or next, as for a single video, the buttons beside play jump 10 seconds back and 30 forward. Songs are told from videos by what comes with them, such as an album, a square cover, the controls on offer and the title, not by which app or site plays them, so a new song is announced and the next video is not.
 - **Timers:** Islora's own countdown, Windows Focus sessions in both directions, and running timers from the Clock app. Clock timers are read-only, as Windows offers no public way to create them.
 - **Calendar:** events from a private iCal address, as a bubble 30 minutes before they start, in the pill 5 minutes before, and as an alert when they begin.
-- **Files:** drag files to the top of the screen and three places open. **Raf** keeps them at hand to drag somewhere else later. **Telefona gönder** shows a code that a phone camera scans to download them over your network, with no app or account on the phone. When the phone is on another network, **Doğrudan bağlan** has the computer open a small Wi-Fi network of its own: the phone joins it with one code and downloads with a second. **Dönüştür** saves pictures as JPG or PNG, or makes them smaller, next to the original.
+- **Files:** drag files to the top of the screen and three places open. **Raf** keeps them at hand to drag somewhere else later. **Telefona gönder** shows a code that a phone camera scans to download them over your network, with no app or account on the phone. When the phone is on another network, **Doğrudan bağlan** has the computer open a small Wi-Fi network of its own: the phone joins it with one code and downloads with a second, or, with Windows' Mobile Hotspot on, serves the files there. If no phone has opened the page after 45 seconds, the code suggests it, as some networks keep their devices apart. With Wi-Fi off and nothing else connected, the send waits and makes its code once Wi-Fi is back. **Dönüştür** saves pictures as JPG or PNG, or makes them smaller, next to the original.
 - **System changes:** volume, brightness, Caps Lock, Num Lock, charger, low battery, Energy Saver, Bluetooth, sound output, microphone, camera, internet, Wi-Fi, VPN, airplane mode, USB drives, displays, screenshots and screen clips, copied items, new songs and keyboard language.
 
-Two things can run at once: the main one sits in the pill and the second in a bubble beside it.
+Two things can run at once: the main one sits in the pill and the second in a bubble beside it. A short task such as a send keeps to the bubble by default while music plays, so the music stays where it was, and volume or brightness never covers an open code or panel.
 
 The island hides during fullscreen apps and leaves itself out of screenshots, screen recordings and screen sharing.
 
@@ -51,6 +51,7 @@ The island hides during fullscreen apps and leaves itself out of screenshots, sc
 | Switch to the second thing | Click the bubble. |
 | Keep, send or convert files | Drag them to the middle of the top screen edge, or onto the island, and drop them on one of the three places. Files on the shelf wait in a bubble beside the island: click it to drag them out again. |
 | Start a timer or see your next events | Open the home view with the timer icon or by pressing the shortcut twice. |
+| Choose how a send shares the island with music | On the settings window's Düzen page: **Baloncukta**, **Yan yana** or **Öne çıkar**. The picture there shows each choice as you make it. |
 | Change settings | Open Islora again from the Start menu or its exe, or use the gear in the home view or the tray menu. The window works with the keyboard too: Tab and the arrows move, Enter or Space press, Esc closes. |
 
 ## Settings
@@ -65,14 +66,18 @@ The settings window opens by itself on first run, and changes apply at once. Eve
 | `material` | `black`, or `glass` for a frosted view of what is behind the pill. Glass turns black in Energy Saver and with Windows transparency off. | `black` |
 | `island_style` | `island` floats below the top edge, `notch` is attached to it. | `island` |
 | `notices_off` | Notices to hide, separated by commas. The file lists the names. | empty |
+| `task_layout` | How a short task such as a send shares the island with music: `bubble` keeps the music in the pill and the task in the bubble beside it, `shared` shows both in one pill, `front` gives the pill to the task. | `bubble` |
 | `progress_style` | How the open view shows a send to a phone: `ring`, `edge` for light running along the island's edge, or `fill`. | `ring` |
 | `sound_wave` | `off` stills the wave in the small pill, which is lighter on the system. Energy Saver stills it too. | `on` |
+| `autostart` | `on` starts Islora with Windows. A new copy turns it on by itself until you turn it off on the Genel page. | `on` |
 
 ## Privacy
 
 Islora has no account and no telemetry. On its own it makes one kind of network request: it downloads the calendar address you set, every 15 minutes.
 
-While you send files to a phone, and only then, Islora runs a small web server on your computer that only devices on the same network can reach. It answers only at an address with a one-time code in it, which the QR code carries, offers only the files you dropped, and stops once they are downloaded or after 5 minutes without a download. The files go straight from your computer to the phone and never through the internet. With **Doğrudan bağlan**, Islora also opens a Wi-Fi network of its own for the same time, with a new random password each time that only the code carries. The computer's internet is not shared over it, and the computer stays on its own network meanwhile.
+While you send files to a phone, and only then, Islora runs a small web server on your computer that only devices on the same network can reach. It answers only at an address with a one-time code in it, which the QR code carries, offers only the files you dropped, and stops once they are downloaded or after 5 minutes without a download. The files go straight from your computer to the phone and never through the internet. With **Doğrudan bağlan**, Islora also opens a Wi-Fi network of its own for the same time, with a new random password each time that only the code carries. The computer's internet is not shared over it, and the computer stays on its own network meanwhile. To tell whether a phone can get through, Islora reads Windows' firewall settings and the rules that name it. It never changes the firewall.
+
+To start with Windows, Islora adds itself to your account's startup list, the one Task Manager shows, and nothing else.
 
 The shelf keeps where your files are, never copies, and forgets them when Islora quits. Converted pictures are saved next to the original, which is left as it was.
 
@@ -80,7 +85,7 @@ Islora never reads what you copy, only whether it was text, an image or a file, 
 
 ## System load
 
-Islora is written in Rust with no runtime or web view. Nothing polls: every source waits for a Windows event, and shape animations run in the Windows compositor, so the app itself does no work per frame. With nothing to show, v0.0.3 used 0 ms of CPU over 15 seconds and about 8 MB of private memory, the same as before files could be dropped on it. The web server for a phone and the picture work run only while they are needed.
+Islora is written in Rust with no runtime or web view. Nothing polls: every source waits for a Windows event, and shape animations run in the Windows compositor, so the app itself does no work per frame. With nothing to show, 0.4.0 used 0 ms of CPU over 15 seconds and about 8 MB of private memory, as 0.0.3 did. The web server for a phone and the picture work run only while they are needed.
 
 The exception is the sound wave in the small pill while music plays. It loops, so the compositor (`dwm.exe`) redraws it on every frame, which costs about half a CPU core at 144 Hz. Turn off **Ses dalgası** in the settings to stop it. It also stops by itself while Windows Energy Saver is on.
 
@@ -89,8 +94,8 @@ The exception is the sound wave in the small pill while music plays. It loops, s
 - App notifications are not shown yet.
 - Only the primary display is used.
 - The Windows volume flyout and notification banners still appear beside the island.
-- The first time you send to a phone, Windows asks whether Islora may use the network. Allow it on private networks, or the phone cannot connect. On a network Windows treats as public, phones usually cannot connect at all.
-- **Doğrudan bağlan** needs a Wi-Fi card that supports Wi-Fi Direct, as most laptops have, and does not work while Windows' Mobile Hotspot is on. The phone shows that its network has no internet while it is joined, which is expected.
+- The first time you send to a phone, Windows asks whether Islora may use the network. Allow it, or the phone cannot connect. The open code says so when the firewall turns phones away on the network you are on.
+- **Doğrudan bağlan** needs a Wi-Fi card that supports Wi-Fi Direct, as most laptops have. The phone shows that its network has no internet while it is joined, which is expected. With Windows' Mobile Hotspot on, the phone has to be on the hotspot already, as Islora cannot read its password to offer a code for joining it.
 - Telling songs from videos rests on what each site sends. A page that sends nothing counts as a video, and an odd title can be misread.
 - A screen clip shows a preview only when the Snipping Tool saves it as a file. Otherwise the island says it was copied.
 - Converting HEIC pictures needs Microsoft's HEIF Image Extensions, and AVIF the AV1 Video Extension, both free in the Microsoft Store.
