@@ -53,7 +53,7 @@ use crate::platform::settings_window::{
 };
 use crate::platform::tray::{self, Command, MSG_TRAY, Tray};
 use crate::platform::window::{self, Placement};
-use crate::platform::{autostart, drop_target, hotkey, settings, shell};
+use crate::platform::{autostart, drop_target, hotkey, native_osd, settings, shell};
 use crate::render::{self, ClockText, Renderer, TASK_RESERVED, WaveMotion};
 use crate::sources::audio::{AudioWatch, DEVICE_MICROPHONE, MSG_AUDIO_DEVICE};
 use crate::sources::bluetooth::BluetoothWatch;
@@ -186,6 +186,7 @@ struct App {
     renderer: Renderer,
     tray: Tray,
     _presence: Presence,
+    native_osd: Option<native_osd::NativeOsd>,
     fullscreen: FullscreenWatch,
     /// Whether the island is out of the way for a full screen app right now.
     out_for_fullscreen: bool,
@@ -314,6 +315,10 @@ pub fn run() -> Result<()> {
     }
     let tray = Tray::add(island_window)?;
     let presence = Presence::start(island_window)?;
+    let notices_off = stored_notices_off();
+    let osd_enabled = !std::env::args().any(|a| a == "--no-real-notices")
+        && !notices_off.iter().any(|name| name == "volume" || name == "brightness");
+    let native_osd = optional("Windows level flyout", native_osd::NativeOsd::start(osd_enabled));
 
     let mut island = Island::new();
     if std::env::args().any(|a| a == "--local-timers") {
@@ -357,6 +362,7 @@ pub fn run() -> Result<()> {
         renderer,
         tray,
         _presence: presence,
+        native_osd,
         fullscreen: fullscreen_watch,
         out_for_fullscreen: fullscreen_watch.active(),
         settings: None,
@@ -373,7 +379,7 @@ pub fn run() -> Result<()> {
         clock_timers: Vec::new(),
         camera_watch,
         drives: Drives::default(),
-        notices_off: stored_notices_off(),
+        notices_off,
         network_quiet_until: 0,
         clipboard_quiet_until: 0,
         clip_expected_until: 0,
@@ -1082,6 +1088,7 @@ impl App {
         self.progress_style = stored_progress_style();
         self.task_layout = stored_task_layout();
         self.notices_off = stored_notices_off();
+        self.update_native_osd();
         self.calendar.refresh();
         self.sound_wave = stored_sound_wave();
         self.apply_wave();
@@ -1257,9 +1264,17 @@ impl App {
 
     fn toggle_notice(&mut self, name: &str) {
         self.notices_off = toggled_notice(&self.notices_off, name);
+        self.update_native_osd();
         settings::remember("notices_off", &self.notices_off.join(", "));
         apply_settings(&mut self.island);
         self.on_camera();
+    }
+
+    fn update_native_osd(&self) {
+        if let Some(osd) = &self.native_osd {
+            osd.set_enabled(!self.quiet
+                && !self.notices_off.iter().any(|name| name == "volume" || name == "brightness"));
+        }
     }
 
     fn save_calendar(&mut self) -> Option<&'static str> {

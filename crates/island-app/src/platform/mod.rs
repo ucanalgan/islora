@@ -1,6 +1,7 @@
 pub mod autostart;
 pub mod drop_target;
 pub mod hotkey;
+pub mod native_osd;
 pub mod settings;
 pub mod settings_window;
 pub mod shell;

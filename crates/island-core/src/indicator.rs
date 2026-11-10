@@ -65,6 +65,8 @@ impl Indicator {
     /// The name that turns it off in the settings, for those that can be.
     pub fn setting(&self) -> Option<&'static str> {
         match self {
+            Indicator::Volume { .. } => Some("volume"),
+            Indicator::Brightness { .. } => Some("brightness"),
             Indicator::BluetoothBattery { .. } => Some("bluetooth_battery"),
             Indicator::AudioOutput { .. } => Some("audio_output"),
             Indicator::Microphone { .. } => Some("microphone"),
@@ -663,6 +665,8 @@ mod tests {
 
     #[test]
     fn notices_that_can_be_turned_off_have_a_name() {
+        assert_eq!(Indicator::Volume { percent: 40, muted: false }.setting(), Some("volume"));
+        assert_eq!(Indicator::Brightness { percent: 70 }.setting(), Some("brightness"));
         assert_eq!(Indicator::AirplaneMode { on: true }.setting(), Some("airplane"));
         assert_eq!(Indicator::CapsLock { on: true }.setting(), None);
     }

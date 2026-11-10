@@ -35,7 +35,8 @@ island_style = \"island\"
 /// Added on its own to files made before it existed.
 const NOTICE_SETTINGS: &str = "
 # Görmek istemediğin bildirimler, virgülle ayrılmış olarak. Seçenekler:
-# audio_output, microphone, microphone_use, camera, internet, wifi, vpn, airplane,
+# volume, brightness, audio_output, microphone, microphone_use, camera, internet,
+# wifi, vpn, airplane,
 # bluetooth_battery, usb, display, screenshot, clipboard, track_change,
 # battery_saver, keyboard_language
 notices_off = \"\"
@@ -45,6 +46,11 @@ notices_off = \"\"
 const LATER_NOTICES: &str = "
 # notices_off için ek seçenekler: screenshot, clipboard, track_change,
 # battery_saver, keyboard_language
+";
+
+const LEVEL_NOTICES: &str = "
+# notices_off için ek seçenekler: volume, brightness. Bunlardan biri kapalıysa
+# Windows'un ses/parlaklık göstergesi de görünür kalır.
 ";
 
 const WAVE_SETTINGS: &str = "
@@ -85,7 +91,7 @@ pub fn read() -> Option<String> {
     let path = path()?;
     if !path.exists() {
         std::fs::create_dir_all(path.parent()?).ok()?;
-        let text = format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{WAVE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}");
+        let text = format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}");
         std::fs::write(&path, text).ok()?;
     }
     let mut text = std::fs::read_to_string(&path).ok()?;
@@ -94,6 +100,7 @@ pub fn read() -> Option<String> {
         ("timer_presets", START_SETTINGS),
         ("notices_off", NOTICE_SETTINGS),
         ("keyboard_language", LATER_NOTICES),
+        ("# notices_off için ek seçenekler: volume, brightness", LEVEL_NOTICES),
         ("sound_wave", WAVE_SETTINGS),
         ("material", MATERIAL_SETTINGS),
         ("progress_style", PROGRESS_SETTINGS),

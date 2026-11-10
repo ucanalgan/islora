@@ -26,7 +26,9 @@ pub const PREVIEW: Rect = Rect { x: LEFT, y: TOP, width: WIDTH, height: 96.0 };
 pub const ADDRESS_FIELD: Rect = Rect { x: LEFT, y: TOP + 26.0, width: WIDTH, height: 40.0 };
 
 /// Every notice that can be turned off: its name in the settings file and its label.
-pub const NOTICES: [(&str, &str); 16] = [
+pub const NOTICES: [(&str, &str); 18] = [
+    ("volume", "Ses düzeyi"),
+    ("brightness", "Parlaklık"),
     ("audio_output", "Ses çıkışı"),
     ("microphone", "Mikrofon"),
     ("microphone_use", "Mikrofon kullanımı"),
@@ -313,13 +315,14 @@ fn notices(view: &mut View, state: &SettingsState) {
         let row = index % rows;
         let bounds = Rect {
             x: LEFT + column as f32 * (width + GAP),
-            y: TOP + row as f32 * (ROW_HEIGHT + 6.0),
+            y: TOP + row as f32 * 48.0,
             width,
-            height: ROW_HEIGHT,
+            height: 44.0,
         };
         let on = !state.notices_off.iter().any(|name| name == setting);
         view.control(Action::Notice(index), Look::Switch { on }, bounds, label);
     }
+    view.caption("Ses ve parlaklık açıkken Windows göstergesi gizlenir.", 506.0);
 }
 
 fn calendar(view: &mut View, state: &SettingsState) {
@@ -537,15 +540,17 @@ mod tests {
     #[test]
     fn a_turned_off_notice_shows_as_off() {
         let mut current = state(Page::Notices);
-        current.notices_off = vec!["wifi".to_owned()];
+        current.notices_off = vec!["wifi".to_owned(), "volume".to_owned(), "brightness".to_owned()];
         let view = view(&current);
         let wifi = NOTICES.iter().position(|(setting, _)| *setting == "wifi").unwrap();
+        let volume = NOTICES.iter().position(|(setting, _)| *setting == "volume").unwrap();
+        let brightness = NOTICES.iter().position(|(setting, _)| *setting == "brightness").unwrap();
         let switches = view.controls.iter().filter_map(|control| match (control.action, control.look) {
             (Action::Notice(index), Look::Switch { on }) => Some((index, on)),
             _ => None,
         });
         for (index, on) in switches {
-            assert_eq!(on, index != wifi);
+            assert_eq!(on, index != wifi && index != volume && index != brightness);
         }
     }
 

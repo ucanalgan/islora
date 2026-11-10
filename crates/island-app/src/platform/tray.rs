@@ -25,6 +25,7 @@ const ID_RELEASE_NOTES: usize = 2;
 const ID_QUIT: usize = 3;
 
 const RELEASE_NOTES: &str = concat!("https://github.com/ucanalgan/islora/releases/tag/v", env!("CARGO_PKG_VERSION"));
+const BETA_RELEASE_NOTES: &str = "https://github.com/ucanalgan/islora/releases";
 
 // Resource numbers from app.rc.
 const ICON_WHITE: usize = 2;
@@ -166,6 +167,7 @@ pub fn show_menu(hwnd: HWND) -> Option<Command> {
 pub fn open_release_notes() {
     // Handing a link to the browser can take a while, which the UI must not wait for.
     std::thread::spawn(|| unsafe {
-        ShellExecuteW(None, w!("open"), &HSTRING::from(RELEASE_NOTES), None, None, SW_SHOWNORMAL);
+        let url = if env!("CARGO_PKG_VERSION").contains('-') { BETA_RELEASE_NOTES } else { RELEASE_NOTES };
+        ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL);
     });
 }
