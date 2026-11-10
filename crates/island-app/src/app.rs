@@ -1909,8 +1909,8 @@ impl App {
     }
 
     fn on_front_changed(&mut self) {
-        self.stay_on_top();
         self.fullscreen.front_changed(fullscreen::desktop_in_front());
+        self.stay_on_top();
         if self.fullscreen.active() {
             self.set_timer(TIMER_FULLSCREEN, FULLSCREEN_SETTLE_MS);
         } else {
@@ -1929,9 +1929,12 @@ impl App {
 
     /// The island stays above the strip, as when it is shown.
     fn keep_on_top(&self) {
-        if !self.out_for_fullscreen {
-            window::raise(self.edge_window);
+        // A foreground switch can precede the delayed fullscreen suppression.
+        // Do not put either window above the game during that interval.
+        if self.fullscreen.active() || self.out_for_fullscreen {
+            return;
         }
+        window::raise(self.edge_window);
         if self.window_visible {
             window::raise(self.island_window);
         }
