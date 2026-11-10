@@ -171,6 +171,12 @@ impl SettingsWindow {
             let show = if hidden_away { SW_SHOWNOACTIVATE } else { SW_SHOW };
             let _ = ShowWindow(hwnd, show);
             if !hidden_away {
+                // STARTUPINFO may override the first ShowWindow call (for
+                // example when a background launcher starts us hidden).
+                // Ensure the settings window is actually visible.
+                if !IsWindowVisible(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                }
                 let _ = SetForegroundWindow(hwnd);
             }
             Ok(window)
@@ -181,6 +187,8 @@ impl SettingsWindow {
         unsafe {
             if IsIconic(self.hwnd).as_bool() {
                 let _ = ShowWindow(self.hwnd, SW_RESTORE);
+            } else if !IsWindowVisible(self.hwnd).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_SHOW);
             }
             let _ = SetForegroundWindow(self.hwnd);
         }
