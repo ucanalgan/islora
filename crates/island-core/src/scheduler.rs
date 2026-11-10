@@ -29,6 +29,10 @@ const HOME_EVENTS: usize = 2;
 /// it moves again.
 const DROP_VIEW_MS: Millis = 6_000;
 
+fn is_layout_task(kind: Kind) -> bool {
+    matches!(kind, Kind::Transfer | Kind::Focus | Kind::TimerRunning | Kind::ClockTimer)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Presentation {
     Hidden,
@@ -763,7 +767,7 @@ impl Island {
         let shared = self.task_layout == TaskLayout::Shared;
         let music_in_pill = top.as_ref().is_some_and(|a| a.media.is_some() && !a.kind.is_transient());
         let companion = match presentation {
-            Presentation::Compact if shared && music_in_pill => lasting.iter().find(|a| a.kind == Kind::Transfer).cloned(),
+            Presentation::Compact if shared && music_in_pill => lasting.iter().find(|a| is_layout_task(a.kind)).cloned(),
             Presentation::Expanded if shared && transfer_open => {
                 lasting.iter().find(|a| a.kind != Kind::Transfer && a.media.is_some()).cloned()
             }
@@ -953,6 +957,14 @@ impl Island {
                 let task = ranked.remove(first);
                 ranked.insert(second, task);
             }
+        }
+        if self.task_layout == TaskLayout::Front
+            && let Some(music) = ranked.iter().position(|a| a.kind == Kind::Media)
+            && let Some(task) = ranked.iter().position(|a| is_layout_task(a.kind) && a.kind != Kind::Transfer)
+            && task > music
+        {
+            let activity = ranked.remove(task);
+            ranked.insert(music, activity);
         }
         ranked
     }
@@ -2414,6 +2426,46 @@ mod tests {
         assert_eq!(shown(&open), Some(Kind::Transfer));
         assert_eq!(open.companion.as_ref().map(|a| a.kind), Some(Kind::Media));
         assert_eq!(second(&open), None);
+    }
+
+    #[test]
+    fn changing_layout_updates_a_running_closed_send() {
+        let mut island = music_and_a_closed_code(TaskLayout::Bubble);
+        assert_eq!(shown(&island.frame(0)), Some(Kind::Media));
+        assert_eq!(second(&island.frame(0)), Some(Kind::Transfer));
+
+        island.set_task_layout(TaskLayout::Shared);
+        let shared = island.frame(0);
+        assert_eq!(shown(&shared), Some(Kind::Media));
+        assert_eq!(shared.companion.as_ref().map(|a| a.kind), Some(Kind::Transfer));
+        assert_eq!(second(&shared), None);
+
+        island.set_task_layout(TaskLayout::Front);
+        let front = island.frame(0);
+        assert_eq!(shown(&front), Some(Kind::Transfer));
+        assert_eq!(second(&front), Some(Kind::Media));
+    }
+
+    #[test]
+    fn changing_layout_updates_music_and_focus() {
+        let mut island = Island::new();
+        island.upsert_media(snapshot(true), 0);
+        island.set_focus(focus(25 * MINUTE, 25 * MINUTE), 0);
+
+        let bubble = island.frame(0);
+        assert_eq!(shown(&bubble), Some(Kind::Media));
+        assert_eq!(second(&bubble), Some(Kind::Focus));
+
+        island.set_task_layout(TaskLayout::Shared);
+        let shared = island.frame(0);
+        assert_eq!(shown(&shared), Some(Kind::Media));
+        assert_eq!(shared.companion.as_ref().map(|a| a.kind), Some(Kind::Focus));
+        assert_eq!(second(&shared), None);
+
+        island.set_task_layout(TaskLayout::Front);
+        let front = island.frame(0);
+        assert_eq!(shown(&front), Some(Kind::Focus));
+        assert_eq!(second(&front), Some(Kind::Media));
     }
 
     #[test]

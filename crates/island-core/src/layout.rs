@@ -127,8 +127,7 @@ impl ProgressStyle {
     }
 }
 
-/// How a short task, such as files on their way to a phone, shares the island
-/// with something that lasts, such as music.
+/// How focus, a timer or a file send shares the island with music.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TaskLayout {
     /// What lasts keeps the pill, and the task waits in the bubble beside it.

@@ -283,8 +283,8 @@ fn appearance(view: &mut View, state: &SettingsState) {
 
 /// How a short task shares the island with music, and how a send shows.
 fn layout(view: &mut View, state: &SettingsState) {
-    view.caption("Müzik çalarken telefona gönderilen bir dosya", PREVIEW.y + PREVIEW.height + 6.0);
-    view.caption("Kısa bir iş, süren bir şeyle birlikteyken", 200.0);
+    view.caption("Örnek: müzik çalarken telefona gönderilen bir dosya", PREVIEW.y + PREVIEW.height + 6.0);
+    view.caption("Müzik ile Odak, zamanlayıcı veya gönderim birlikteyken", 200.0);
     view.choices(222.0, TaskLayout::ALL.map(|layout| (Action::Layout(layout), state.layout == layout, layout.label())));
     view.caption(layout_note(state.layout), 272.0);
     view.caption("Telefona gönderirken açık görünümde ilerleme", 312.0);

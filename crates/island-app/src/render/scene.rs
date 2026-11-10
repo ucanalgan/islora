@@ -189,6 +189,8 @@ pub struct Timing {
 pub enum Companion {
     /// A task on the right of the music pill, by how far it got.
     Task(Shown),
+    /// A running focus session or timer beside the music title.
+    Timed(Bubble),
     /// Music along the bottom of the open code.
     Strip { media: MediaScene, text: String },
 }
@@ -243,7 +245,7 @@ const DEFAULT_FIT: CompactFit = CompactFit { width: Pill::COMPACT.width, trailin
 /// there, and a task beside the music takes it instead.
 fn compact_media_end(media: &MediaScene, companion: Option<&Companion>) -> f32 {
     match companion {
-        Some(Companion::Task(_)) => TASK_RESERVED,
+        Some(Companion::Task(_) | Companion::Timed(_)) => TASK_RESERVED,
         _ if media.playing => WAVE_RESERVED,
         _ => COMPACT_TEXT_END,
     }
@@ -327,7 +329,11 @@ impl Scene {
             media_scene(media, timing)
         });
         let companion = frame.companion.as_ref().and_then(|other| match presentation {
-            Presentation::Compact => other.transfer.as_ref().map(|view| Companion::Task(view.shown.clone())),
+            Presentation::Compact => other
+                .transfer
+                .as_ref()
+                .map(|view| Companion::Task(view.shown.clone()))
+                .or_else(|| matches!(other.kind, Kind::Focus | Kind::TimerRunning | Kind::ClockTimer).then(|| Companion::Timed(other.bubble()))),
             Presentation::Expanded => other.media.as_ref().map(|media| Companion::Strip {
                 media: media_scene(media, None),
                 text: if other.detail.is_empty() {
@@ -367,7 +373,7 @@ impl Scene {
 
     /// A task on the right of the music pill.
     pub fn has_task_beside(&self) -> bool {
-        matches!(self.companion, Some(Companion::Task(_)))
+        matches!(self.companion, Some(Companion::Task(_) | Companion::Timed(_)))
     }
 
     /// Everything the fit depends on, so it is only measured when that changes.
@@ -440,6 +446,10 @@ impl Scene {
             }
             if let Some(Companion::Task(shown)) = &mut scene.companion {
                 *shown = without_progress(shown);
+            }
+            if let Some(Companion::Timed(Bubble::Count { value, ring, .. })) = &mut scene.companion {
+                value.clear();
+                *ring = None;
             }
             match &mut scene.panel {
                 Some(PanelView::Drop(view)) => view.hovered = None,
@@ -545,6 +555,9 @@ impl Scene {
             // As far in from the end as the cover is from the start.
             let center_x = canvas.width - inset - COMPACT_ART / 2.0;
             task_mark(&mut painting, shown, canvas, center_x, canvas.height / 2.0);
+        } else if let Some(Companion::Timed(badge)) = &self.companion {
+            let center_x = canvas.width - inset - COMPACT_ART / 2.0;
+            timed_mark(&mut painting, badge, canvas, center_x, canvas.height / 2.0);
         }
         painting
     }
@@ -933,6 +946,28 @@ fn task_mark(painting: &mut Painting<'_>, shown: &Shown, canvas: &Canvas, center
             opacity: 1.0,
         }),
         Shown::Done => painting.colored.push((canvas.icon(glyph(Icon::Check), bounds, 15.0), PHONE_COLOR)),
+    }
+}
+
+fn timed_mark<'a>(painting: &mut Painting<'a>, badge: &'a Bubble, canvas: &Canvas, center_x: f32, center_y: f32) {
+    const SIZE: f32 = 28.0;
+    let bounds = canvas.bounds(center_x - SIZE / 2.0, center_y - SIZE / 2.0, SIZE, SIZE);
+    match badge {
+        Bubble::Count { value, ring, .. } => {
+            if let Some(percent) = ring {
+                painting.rings.push(RingRun {
+                    center_x: center_x * canvas.scale,
+                    center_y: center_y * canvas.scale,
+                    radius: 13.0 * canvas.scale,
+                    width: 2.0 * canvas.scale,
+                    fraction: *percent as f32 / 100.0,
+                    opacity: 1.0,
+                });
+            }
+            painting.texts.push(canvas.text(value, bounds, 11.0, true, 1.0, Align::Center));
+        }
+        Bubble::Symbol(icon) => painting.texts.push(canvas.icon(glyph(*icon), bounds, 15.0)),
+        Bubble::Artwork(_) => {}
     }
 }
 

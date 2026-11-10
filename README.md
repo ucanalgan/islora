@@ -38,7 +38,7 @@ The file is not signed, so SmartScreen may warn you the first time. Choose **Mor
 - **Files:** drag files to the top of the screen and three places open. **Raf** keeps them at hand to drag somewhere else later. **Telefona gönder** shows a code that a phone camera scans to download them over your network, with no app or account on the phone. When the phone is on another network, **Doğrudan bağlan** has the computer open a small Wi-Fi network of its own: the phone joins it with one code and downloads with a second, or, with Windows' Mobile Hotspot on, serves the files there. If no phone has opened the page after 45 seconds, the code suggests it, as some networks keep their devices apart. With Wi-Fi off and nothing else connected, the send waits and makes its code once Wi-Fi is back. **Dönüştür** saves pictures as JPG or PNG, or makes them smaller, next to the original.
 - **System changes:** volume, brightness, Caps Lock, Num Lock, charger, low battery, Energy Saver, Bluetooth, sound output, microphone, camera, internet, Wi-Fi, VPN, airplane mode, USB drives, displays, screenshots and screen clips, copied items, new songs and keyboard language.
 
-Two things can run at once: the main one sits in the pill and the second in a bubble beside it. A short task such as a send keeps to the bubble by default while music plays, so the music stays where it was, and volume or brightness never covers an open code or panel.
+Two things can run at once: the main one sits in the pill and the second in a bubble beside it. A focus session, timer or file send keeps to the bubble by default while music plays, so the music stays where it was, and volume or brightness never covers an open code or panel.
 
 The island hides during fullscreen apps and leaves itself out of screenshots, screen recordings and screen sharing.
 
@@ -51,7 +51,7 @@ The island hides during fullscreen apps and leaves itself out of screenshots, sc
 | Switch to the second thing | Click the bubble. |
 | Keep, send or convert files | Drag them to the middle of the top screen edge, or onto the island, and drop them on one of the three places. Files on the shelf wait in a bubble beside the island: click it to drag them out again. |
 | Start a timer or see your next events | Open the home view with the timer icon or by pressing the shortcut twice. |
-| Choose how a send shares the island with music | On the settings window's Düzen page: **Baloncukta**, **Yan yana** or **Öne çıkar**. The picture there shows each choice as you make it. |
+| Choose how focus, timers or a send share the island with music | On the settings window's Düzen page: **Baloncukta**, **Yan yana** or **Öne çıkar**. The picture shows a send as an example and changes with each choice. |
 | Change settings | Open Islora again from the Start menu or its exe, or use the gear in the home view or the tray menu. The window works with the keyboard too: Tab and the arrows move, Enter or Space press, Esc closes. |
 
 ## Settings
@@ -66,7 +66,7 @@ The settings window opens by itself on first run, and changes apply at once. Eve
 | `material` | `black`, or `glass` for a frosted view of what is behind the pill. Glass turns black in Energy Saver and with Windows transparency off. | `black` |
 | `island_style` | `island` floats below the top edge, `notch` is attached to it. | `island` |
 | `notices_off` | Notices to hide, separated by commas. The file lists the names. | empty |
-| `task_layout` | How a short task such as a send shares the island with music: `bubble` keeps the music in the pill and the task in the bubble beside it, `shared` shows both in one pill, `front` gives the pill to the task. | `bubble` |
+| `task_layout` | How focus, timers or a file send share the island with music: `bubble` keeps the music in the pill and the task in the bubble beside it, `shared` shows both in one pill, `front` gives the pill to the task. | `bubble` |
 | `progress_style` | How the open view shows a send to a phone: `ring`, `edge` for light running along the island's edge, or `fill`. | `ring` |
 | `sound_wave` | `off` stills the wave in the small pill, which is lighter on the system. Energy Saver stills it too. | `on` |
 | `autostart` | `on` starts Islora with Windows. A new copy turns it on by itself until you turn it off on the Genel page. | `on` |
