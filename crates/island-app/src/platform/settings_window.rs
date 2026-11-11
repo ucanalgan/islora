@@ -932,7 +932,13 @@ fn music_marks(state: &SettingsState, task_beside: bool) -> Vec<Mark> {
         marks.push(Mark::Ring { x: PILL_WIDTH - 24.0, y: middle, radius: 8.0, width: 2.2, fraction: SENT });
         return marks;
     }
-    let (heights, opacity) = if state.sound_wave { ([6.0, 12.0, 15.0, 9.0], 1.0) } else { ([4.0; 4], 0.6) };
+    let (heights, opacity) = if state.sound_wave {
+        match state.wave_style {
+            island_core::layout::WaveStyle::Calm => ([6.0, 9.0, 11.0, 7.0], 1.0),
+            island_core::layout::WaveStyle::Normal => ([6.0, 12.0, 15.0, 9.0], 1.0),
+            island_core::layout::WaveStyle::Lively => ([4.0, 15.0, 17.0, 6.0], 1.0),
+        }
+    } else { ([4.0; 4], 0.6) };
     for (index, bar) in heights.into_iter().enumerate() {
         let at = Rect { x: 136.0 + index as f32 * 6.0, y: middle - bar / 2.0, width: 3.0, height: bar };
         marks.push(Mark::Bar { at, opacity });

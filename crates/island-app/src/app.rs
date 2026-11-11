@@ -19,7 +19,7 @@ use island_core::qr::QrMatrix;
 use island_core::transfer::{NUDGE_MS, Stage, Transfer, WAIT_MS};
 use island_core::layout::{
     TIMER_PRESETS, on_event_hide, on_home_shortcut, on_progress_bar, on_settings_shortcut,
-    preset_at, progress_fraction,
+    preset_at, progress_fraction, WaveStyle,
 };
 use island_core::settings_view::{
     Action, NOTICES, Page, SettingsState, is_calendar_address, stepped_preset, toggled_notice,
@@ -195,6 +195,7 @@ struct App {
     /// What the user chose, which Energy Saver can overrule for a while.
     material: Material,
     sound_wave: bool,
+    wave_style: WaveStyle,
     battery_saver: bool,
     media: MediaSource,
     calendar: CalendarSource,
@@ -307,8 +308,9 @@ pub fn run() -> Result<()> {
         Some("still") => false,
         _ => stored_sound_wave(),
     };
+    let wave_style = stored_wave_style();
     let wave_motion = if sound_wave { WaveMotion::Always } else { WaveMotion::Still };
-    let renderer = Renderer::new(island_window, placement.scale, placement.width, placement.style, wave_motion)?;
+    let renderer = Renderer::new(island_window, placement.scale, placement.width, placement.style, wave_motion, wave_style)?;
 
     if !hotkey::register(island_window) {
         eprintln!("no global shortcut available, only the top edge will open the island");
@@ -368,6 +370,7 @@ pub fn run() -> Result<()> {
         settings: None,
         material: stored_material(),
         sound_wave,
+        wave_style,
         battery_saver: false,
         media: MediaSource::start(island_window, started, argument_after("--only-session")),
         calendar: CalendarSource::start(island_window, argument_after("--calendar-file")),
@@ -1091,6 +1094,10 @@ impl App {
         self.update_native_osd();
         self.calendar.refresh();
         self.sound_wave = stored_sound_wave();
+        self.wave_style = stored_wave_style();
+        if let Err(error) = self.renderer.set_wave_style(self.wave_style) {
+            eprintln!("wave style failed: {error}");
+        }
         self.apply_wave();
         self.material = stored_material();
         self.apply_material();
@@ -1134,6 +1141,7 @@ impl App {
             layout: self.task_layout,
             progress: self.progress_style,
             sound_wave: self.sound_wave,
+            wave_style: self.wave_style,
             notices_off: self.notices_off.clone(),
             presets: self.island.presets(),
             mode: self.island.start_mode(),
@@ -1191,6 +1199,13 @@ impl App {
                 self.sound_wave = !self.sound_wave;
                 settings::remember("sound_wave", if self.sound_wave { "on" } else { "off" });
                 self.apply_wave();
+            }
+            Action::WaveStyle(style) => {
+                self.wave_style = style;
+                settings::remember("wave_style", style.setting());
+                if let Err(error) = self.renderer.set_wave_style(style) {
+                    eprintln!("wave style failed: {error}");
+                }
             }
             Action::Notice(index) => self.toggle_notice(NOTICES[index].0),
             Action::Preset { index, longer } => {
@@ -2267,6 +2282,10 @@ fn stored_material() -> Material {
 
 fn stored_sound_wave() -> bool {
     settings::read().is_none_or(|text| config::read_sound_wave(&text))
+}
+
+fn stored_wave_style() -> WaveStyle {
+    settings::read().map_or(WaveStyle::Normal, |text| config::read_wave_style(&text))
 }
 
 fn ask_running_copy_for_settings() {

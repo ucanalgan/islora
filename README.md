@@ -69,6 +69,7 @@ The settings window opens by itself on first run, and changes apply at once. Eve
 | `task_layout` | How focus, timers or a file send share the island with music: `bubble` keeps the music in the pill and the task in the bubble beside it, `shared` shows both in one pill, `front` gives the pill to the task. | `bubble` |
 | `progress_style` | How the open view shows a send to a phone: `ring`, `edge` for light running along the island's edge, or `fill`. | `ring` |
 | `sound_wave` | `off` stills the wave in the small pill, which is lighter on the system. Energy Saver stills it too. | `on` |
+| `wave_style` | The moving wave's pace and height: `calm`, `normal` or `lively`. | `normal` |
 | `autostart` | `on` starts Islora with Windows. A new copy turns it on by itself until you turn it off on the Genel page. | `on` |
 
 ## Privacy

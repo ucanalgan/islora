@@ -59,6 +59,11 @@ const WAVE_SETTINGS: &str = "
 sound_wave = \"on\"
 ";
 
+const WAVE_STYLE_SETTINGS: &str = "
+# Ses dalgasının hareketi: calm sakin, normal, lively canlı.
+wave_style = \"normal\"
+";
+
 const MATERIAL_SETTINGS: &str = "
 # Tasarım: black düz siyah, glass arkasını bulanık gösteren camdır. Cam, enerji
 # tasarrufunda ve Windows şeffaflığı kapalıyken siyah görünür.
@@ -91,7 +96,7 @@ pub fn read() -> Option<String> {
     let path = path()?;
     if !path.exists() {
         std::fs::create_dir_all(path.parent()?).ok()?;
-        let text = format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}");
+        let text = format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}");
         std::fs::write(&path, text).ok()?;
     }
     let mut text = std::fs::read_to_string(&path).ok()?;
@@ -102,6 +107,7 @@ pub fn read() -> Option<String> {
         ("keyboard_language", LATER_NOTICES),
         ("# notices_off için ek seçenekler: volume, brightness", LEVEL_NOTICES),
         ("sound_wave", WAVE_SETTINGS),
+        ("wave_style", WAVE_STYLE_SETTINGS),
         ("material", MATERIAL_SETTINGS),
         ("progress_style", PROGRESS_SETTINGS),
     ];

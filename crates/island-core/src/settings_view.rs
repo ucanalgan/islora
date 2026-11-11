@@ -1,7 +1,7 @@
 //! What the settings window shows and where, in DIPs. Nothing here draws, so the
 //! layout and what each click means can be tested without a window.
 
-use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TaskLayout};
+use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TaskLayout, WaveStyle};
 
 pub const WINDOW_WIDTH: f32 = 760.0;
 pub const WINDOW_HEIGHT: f32 = 540.0;
@@ -102,6 +102,7 @@ pub enum Action {
     Layout(TaskLayout),
     Progress(ProgressStyle),
     SoundWave,
+    WaveStyle(WaveStyle),
     Notice(usize),
     Preset { index: usize, longer: bool },
     Mode(StartMode),
@@ -156,6 +157,7 @@ pub struct SettingsState {
     pub layout: TaskLayout,
     pub progress: ProgressStyle,
     pub sound_wave: bool,
+    pub wave_style: WaveStyle,
     pub notices_off: Vec<String>,
     pub presets: [u64; 4],
     pub mode: StartMode,
@@ -279,8 +281,11 @@ fn appearance(view: &mut View, state: &SettingsState) {
     );
     let row = Rect { x: LEFT, y: 352.0, width: WIDTH, height: ROW_HEIGHT };
     view.control(Action::SoundWave, Look::Switch { on: state.sound_wave }, row, "Ses dalgası");
-    view.caption("Kapalıyken sabit çubuklar görünür. Enerji tasarrufunda dalga kendiliğinden durur", 402.0);
-    view.caption("Cam, enerji tasarrufunda ve Windows şeffaflığı kapalıyken Siyah görünür", 424.0);
+    view.caption("Dalga hareketi", 404.0);
+    view.choices(426.0, WaveStyle::ALL.map(|style| {
+        (Action::WaveStyle(style), state.wave_style == style, style.label())
+    }));
+    view.caption("Kapalıyken ve enerji tasarrufunda çubuklar sabit kalır", 478.0);
 }
 
 /// How a short task shares the island with music, and how a send shows.
@@ -425,6 +430,7 @@ mod tests {
             layout: TaskLayout::Bubble,
             progress: ProgressStyle::Ring,
             sound_wave: true,
+            wave_style: WaveStyle::Normal,
             notices_off: Vec::new(),
             presets: [5, 15, 25, 45],
             mode: StartMode::Focus,
@@ -509,6 +515,7 @@ mod tests {
         current.material = Material::Glass;
         current.style = IslandStyle::Notch;
         current.sound_wave = false;
+        current.wave_style = WaveStyle::Calm;
         let view = view(&current);
         let look = |action| view.controls.iter().find(|control| control.action == action).unwrap().look;
         assert_eq!(look(Action::Material(Material::Glass)), Look::Choice { selected: true });
@@ -516,6 +523,7 @@ mod tests {
         assert_eq!(look(Action::Style(IslandStyle::Notch)), Look::Choice { selected: true });
         assert_eq!(look(Action::Style(IslandStyle::Island)), Look::Choice { selected: false });
         assert_eq!(look(Action::SoundWave), Look::Switch { on: false });
+        assert_eq!(look(Action::WaveStyle(WaveStyle::Calm)), Look::Choice { selected: true });
     }
 
     #[test]

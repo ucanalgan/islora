@@ -78,6 +78,59 @@ pub enum Material {
     Glass,
 }
 
+/// How the compact music pill's bars move while music plays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WaveStyle {
+    Calm,
+    #[default]
+    Normal,
+    Lively,
+}
+
+impl WaveStyle {
+    pub const ALL: [Self; 3] = [Self::Calm, Self::Normal, Self::Lively];
+
+    pub fn setting(self) -> &'static str {
+        match self {
+            Self::Calm => "calm",
+            Self::Normal => "normal",
+            Self::Lively => "lively",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Calm => "Sakin",
+            Self::Normal => "Normal",
+            Self::Lively => "Canlı",
+        }
+    }
+
+    pub fn low(self) -> f32 {
+        match self {
+            Self::Calm => 0.45,
+            Self::Normal => 0.38,
+            Self::Lively => 0.15,
+        }
+    }
+
+    pub fn high(self) -> f32 {
+        match self {
+            Self::Calm => 0.85,
+            Self::Normal | Self::Lively => 1.0,
+        }
+    }
+
+    pub fn period_ms(self, index: usize) -> u64 {
+        let (base, offset) = match self {
+            Self::Calm => (1050, 220),
+            Self::Normal => (640, 170),
+            Self::Lively => (390, 95),
+        };
+        base + index as u64 * offset
+    }
+}
+
 impl Material {
     /// The name used for it in the settings file.
     pub fn setting(self) -> &'static str {
@@ -405,6 +458,19 @@ impl Pill {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wave_styles_keep_the_old_motion_and_change_its_range_and_pace() {
+        assert_eq!((WaveStyle::Normal.low(), WaveStyle::Normal.high()), (0.38, 1.0));
+        assert_eq!((0..4).map(|index| WaveStyle::Normal.period_ms(index)).collect::<Vec<_>>(), vec![640, 810, 980, 1150]);
+        assert!(WaveStyle::Calm.low() > WaveStyle::Normal.low());
+        assert!(WaveStyle::Calm.high() < WaveStyle::Normal.high());
+        assert!(WaveStyle::Lively.low() < WaveStyle::Normal.low());
+        for index in 0..4 {
+            assert!(WaveStyle::Lively.period_ms(index) < WaveStyle::Normal.period_ms(index));
+            assert!(WaveStyle::Normal.period_ms(index) < WaveStyle::Calm.period_ms(index));
+        }
+    }
 
     #[test]
     fn every_pill_fits_inside_the_window_with_room_to_overshoot() {

@@ -1,6 +1,6 @@
 //! The settings file: one `key = "value"` per line, `#` for comments.
 
-use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout};
+use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout, WaveStyle};
 
 const LONGEST_PRESET_MINUTES: u64 = 720;
 
@@ -59,6 +59,11 @@ pub fn read_notices_off(text: &str) -> Vec<String> {
 /// Only an explicit `off` stills the wave, which runs by default.
 pub fn read_sound_wave(text: &str) -> bool {
     read_value(text, "sound_wave").as_deref() != Some("off")
+}
+
+pub fn read_wave_style(text: &str) -> WaveStyle {
+    let value = read_value(text, "wave_style");
+    WaveStyle::ALL.into_iter().find(|style| value.as_deref() == Some(style.setting())).unwrap_or_default()
 }
 
 pub fn read_start_mode(text: &str) -> Option<StartMode> {
@@ -150,6 +155,14 @@ mod tests {
         assert!(read_sound_wave(""));
         assert!(read_sound_wave("sound_wave = \"on\""));
         assert!(!read_sound_wave("sound_wave = \"off\""));
+    }
+
+    #[test]
+    fn the_wave_style_defaults_to_the_existing_motion() {
+        assert_eq!(read_wave_style(""), WaveStyle::Normal);
+        assert_eq!(read_wave_style("wave_style = \"calm\""), WaveStyle::Calm);
+        assert_eq!(read_wave_style("wave_style = \"lively\""), WaveStyle::Lively);
+        assert_eq!(read_wave_style("wave_style = \"unknown\""), WaveStyle::Normal);
     }
 
     #[test]

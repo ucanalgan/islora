@@ -1,7 +1,7 @@
 use std::mem::size_of;
 use std::time::Duration;
 
-use island_core::layout::{BUBBLE_GAP, NOTCH_SHOULDER};
+use island_core::layout::{BUBBLE_GAP, NOTCH_SHOULDER, WaveStyle};
 use island_core::{Bubble, Frame, IslandStyle, Kind, Material, Millis, Pill, Presentation};
 use windows::Foundation::TimeSpan;
 use windows::Graphics::{IGeometrySource2D, IGeometrySource2D_Impl};
@@ -68,8 +68,6 @@ const WAVE_BARS: usize = 4;
 const WAVE_BAR_WIDTH: f32 = 3.0;
 const WAVE_BAR_GAP: f32 = 3.0;
 const WAVE_BAR_HEIGHT: f32 = 15.0;
-/// Resting height of a bar relative to its full height.
-const WAVE_LOW: f32 = 0.38;
 /// Where a notch's curve starts to turn solid, which softens its edge.
 const SHOULDER_EDGE: f32 = 0.92;
 
@@ -235,10 +233,11 @@ struct Wave {
     bars: Vec<SpriteVisual>,
     visible: bool,
     moving: bool,
+    style: WaveStyle,
 }
 
 impl Wave {
-    fn new(compositor: &Compositor) -> Result<Self> {
+    fn new(compositor: &Compositor, style: WaveStyle) -> Result<Self> {
         let container = compositor.CreateContainerVisual()?;
         container.SetOpacity(0.0)?;
         let white = compositor.CreateColorBrushWithColor(Color { A: 220, R: 255, G: 255, B: 255 })?;
@@ -250,7 +249,7 @@ impl Wave {
             container.Children()?.InsertAtTop(&bar)?;
             bars.push(bar);
         }
-        Ok(Self { container, bars, visible: false, moving: false })
+        Ok(Self { container, bars, visible: false, moving: false, style })
     }
 
     /// The right edge of a pill moves with its spring, so bars already on show
@@ -321,15 +320,25 @@ impl Wave {
                 continue;
             }
             let animation = compositor.CreateScalarKeyFrameAnimation()?;
-            animation.InsertKeyFrame(0.0, WAVE_LOW)?;
-            animation.InsertKeyFrame(0.5, 1.0)?;
-            animation.InsertKeyFrame(1.0, WAVE_LOW)?;
-            let period = Duration::from_millis(640 + index as u64 * 170);
+            animation.InsertKeyFrame(0.0, self.style.low())?;
+            animation.InsertKeyFrame(0.5, self.style.high())?;
+            animation.InsertKeyFrame(1.0, self.style.low())?;
+            let period = Duration::from_millis(self.style.period_ms(index));
             animation.SetDuration(TimeSpan::from(period))?;
             animation.SetIterationBehavior(AnimationIterationBehavior::Forever)?;
             bar.StartAnimation(h!("Scale.Y"), &animation)?;
         }
         Ok(())
+    }
+
+    fn set_style(&mut self, compositor: &Compositor, style: WaveStyle) -> Result<()> {
+        if self.style == style {
+            return Ok(());
+        }
+        let moving = self.moving;
+        self.set_moving(compositor, false)?;
+        self.style = style;
+        self.set_moving(compositor, moving)
     }
 }
 
@@ -409,7 +418,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(hwnd: HWND, scale: f32, window_width: f32, style: IslandStyle, wave_motion: WaveMotion) -> Result<Self> {
+    pub fn new(hwnd: HWND, scale: f32, window_width: f32, style: IslandStyle, wave_motion: WaveMotion, wave_style: WaveStyle) -> Result<Self> {
         let compositor = Compositor::new()?;
         let interop: ICompositorDesktopInterop = compositor.cast()?;
         let target = unsafe { interop.CreateDesktopWindowTarget(hwnd, false)? };
@@ -500,7 +509,7 @@ impl Renderer {
         for layer in &layers {
             moving.Children()?.InsertAtTop(&layer.visual)?;
         }
-        let wave = Wave::new(&compositor)?;
+        let wave = Wave::new(&compositor, wave_style)?;
         moving.Children()?.InsertAtTop(&wave.container)?;
 
         let painter = Painter::new(&compositor)?;
@@ -615,6 +624,10 @@ impl Renderer {
             }
             None => Ok(()),
         }
+    }
+
+    pub fn set_wave_style(&mut self, style: WaveStyle) -> Result<()> {
+        self.wave.set_style(&self.compositor, style)
     }
 
     pub fn set_style(&mut self, style: IslandStyle) -> Result<()> {
