@@ -221,10 +221,11 @@ impl Layer {
 /// display frame for it: at 144 Hz, about 40 to 70% of a core during playback,
 /// against almost nothing for `Still`. It stops by itself whenever the bars
 /// leave the screen, so a hidden or expanded island pays none of this.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaveMotion {
     Always,
     Still,
+    Hidden,
 }
 
 /// Equaliser bars that show sound is playing.
@@ -290,8 +291,15 @@ impl Wave {
         for property in [h!("Opacity"), h!("Offset.X"), h!("Offset.Y")] {
             self.container.StopAnimation(property)?;
         }
+        // A layout or DPI change can hide the pill without going through
+        // update_wave. Stop the looping bars and any settling springs too.
+        for (index, bar) in self.bars.iter().enumerate() {
+            bar.StopAnimation(h!("Scale.Y"))?;
+            bar.SetScale(rest_scale(index))?;
+        }
         self.container.SetOpacity(0.0)?;
         self.visible = false;
+        self.moving = false;
         Ok(())
     }
 
@@ -311,7 +319,6 @@ impl Wave {
         if self.moving == moving {
             return Ok(());
         }
-        self.moving = moving;
         for (index, bar) in self.bars.iter().enumerate() {
             if !moving {
                 // Stopping keeps the bar where it was, so it can sink from there.
@@ -328,6 +335,7 @@ impl Wave {
             animation.SetIterationBehavior(AnimationIterationBehavior::Forever)?;
             bar.StartAnimation(h!("Scale.Y"), &animation)?;
         }
+        self.moving = moving;
         Ok(())
     }
 
@@ -781,7 +789,7 @@ impl Renderer {
     /// Returns whether the pill changes size, which the window has to allow for.
     pub fn present(&mut self, frame: &Frame, clock: &ClockText, now: Millis, scrub: Option<f32>) -> Result<bool> {
         let hidden = frame.presentation == Presentation::Hidden;
-        let mut scene = Scene::new(frame, clock, now, scrub);
+        let mut scene = Scene::new(frame, clock, now, scrub, self.wave_motion != WaveMotion::Hidden);
         if frame.presentation == Presentation::Compact {
             self.fit_compact(&mut scene);
         }
@@ -851,7 +859,7 @@ impl Renderer {
     }
 
     fn update_wave(&mut self, scene: &Scene) -> Result<()> {
-        let shows = scene.shows_wave();
+        let shows = scene.shows_wave() && self.wave_motion != WaveMotion::Hidden;
         self.wave.set_visible(&self.compositor, shows)?;
         self.wave.set_moving(&self.compositor, shows && self.wave_motion == WaveMotion::Always)
     }

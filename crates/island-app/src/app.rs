@@ -195,6 +195,7 @@ struct App {
     /// What the user chose, which Energy Saver can overrule for a while.
     material: Material,
     sound_wave: bool,
+    wave_still: bool,
     wave_style: WaveStyle,
     battery_saver: bool,
     media: MediaSource,
@@ -304,12 +305,10 @@ pub fn run() -> Result<()> {
         optional("drop", drop_target::register(target, &DROP_HANDLERS));
     }
     let placement = window::place(island_window, edge_window, stored_style())?;
-    let sound_wave = match argument_after("--wave").as_deref() {
-        Some("still") => false,
-        _ => stored_sound_wave(),
-    };
+    let sound_wave = stored_sound_wave();
+    let wave_still = argument_after("--wave").as_deref() == Some("still");
     let wave_style = stored_wave_style();
-    let wave_motion = if sound_wave { WaveMotion::Always } else { WaveMotion::Still };
+    let wave_motion = selected_wave_motion(sound_wave, false, wave_still);
     let renderer = Renderer::new(island_window, placement.scale, placement.width, placement.style, wave_motion, wave_style)?;
 
     if !hotkey::register(island_window) {
@@ -370,6 +369,7 @@ pub fn run() -> Result<()> {
         settings: None,
         material: stored_material(),
         sound_wave,
+        wave_still,
         wave_style,
         battery_saver: false,
         media: MediaSource::start(island_window, started, argument_after("--only-session")),
@@ -1141,6 +1141,7 @@ impl App {
             layout: self.task_layout,
             progress: self.progress_style,
             sound_wave: self.sound_wave,
+            battery_saver: self.battery_saver,
             wave_style: self.wave_style,
             notices_off: self.notices_off.clone(),
             presets: self.island.presets(),
@@ -1267,14 +1268,14 @@ impl App {
         self.refresh();
     }
 
-    /// The moving wave is the costliest thing on screen, so Energy Saver stills
-    /// it as well, whatever the user chose.
+    /// Both the user's off switch and Energy Saver remove the wave. The stored
+    /// choice returns when Energy Saver ends.
     fn apply_wave(&mut self) {
-        let moving = self.sound_wave && !self.battery_saver;
-        let motion = if moving { WaveMotion::Always } else { WaveMotion::Still };
+        let motion = selected_wave_motion(self.sound_wave, self.battery_saver, self.wave_still);
         if let Err(error) = self.renderer.set_wave_motion(motion) {
             eprintln!("wave failed: {error}");
         }
+        self.refresh();
     }
 
     fn toggle_notice(&mut self, name: &str) {
@@ -1848,6 +1849,12 @@ impl App {
                 self.battery_saver = self.tracker.saver_on();
                 self.apply_material();
                 self.apply_wave();
+                if let Some(page) = self.settings.as_ref().map(|window| window.state().page) {
+                    let state = self.settings_state(page);
+                    if let Some(window) = &mut self.settings {
+                        window.update(state);
+                    }
+                }
                 indicator
             }
         };
@@ -2288,6 +2295,16 @@ fn stored_wave_style() -> WaveStyle {
     settings::read().map_or(WaveStyle::Normal, |text| config::read_wave_style(&text))
 }
 
+fn selected_wave_motion(enabled: bool, saver: bool, force_still: bool) -> WaveMotion {
+    if force_still {
+        WaveMotion::Still
+    } else if enabled && !saver {
+        WaveMotion::Always
+    } else {
+        WaveMotion::Hidden
+    }
+}
+
 fn ask_running_copy_for_settings() {
     let Some(running) = window::find_running() else { return };
     unsafe {
@@ -2591,5 +2608,20 @@ unsafe extern "system" fn edge_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wave_switch_and_energy_saver_hide_bars_without_losing_the_choice() {
+        assert_eq!(selected_wave_motion(true, false, false), WaveMotion::Always);
+        assert_eq!(selected_wave_motion(true, true, false), WaveMotion::Hidden);
+        assert_eq!(selected_wave_motion(false, false, false), WaveMotion::Hidden);
+        assert_eq!(selected_wave_motion(false, true, false), WaveMotion::Hidden);
+        // The load measurement can still ask for a stationary visible wave.
+        assert_eq!(selected_wave_motion(true, false, true), WaveMotion::Still);
     }
 }

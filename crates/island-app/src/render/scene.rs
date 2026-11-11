@@ -198,6 +198,7 @@ pub enum Companion {
 #[derive(Clone, PartialEq)]
 pub struct Scene {
     pub presentation: Presentation,
+    pub wave_visible: bool,
     pub clock: Option<String>,
     pub leading: String,
     pub trailing: String,
@@ -243,10 +244,10 @@ const DEFAULT_FIT: CompactFit = CompactFit { width: Pill::COMPACT.width, trailin
 
 /// The space kept after the title: the wave only takes room while it is
 /// there, and a task beside the music takes it instead.
-fn compact_media_end(media: &MediaScene, companion: Option<&Companion>) -> f32 {
+fn compact_media_end(media: &MediaScene, companion: Option<&Companion>, wave_visible: bool) -> f32 {
     match companion {
         Some(Companion::Task(_) | Companion::Timed(_)) => TASK_RESERVED,
-        _ if media.playing => WAVE_RESERVED,
+        _ if media.playing && wave_visible => WAVE_RESERVED,
         _ => COMPACT_TEXT_END,
     }
 }
@@ -288,12 +289,13 @@ impl HomeScene {
 
 impl Scene {
     /// `scrub` is where the user is dragging the position bar, from 0 to 1.
-    pub fn new(frame: &Frame, clock: &ClockText, now: Millis, scrub: Option<f32>) -> Self {
+    pub fn new(frame: &Frame, clock: &ClockText, now: Millis, scrub: Option<f32>, wave_visible: bool) -> Self {
         let presentation = frame.presentation;
         let Some(activity) = &frame.activity else {
             let home = frame.home.as_ref().map(|home| HomeScene::new(home, clock));
             return Self {
                 presentation,
+                wave_visible,
                 clock: (home.is_none() && frame.panel.is_none()).then(|| clock.time.clone()),
                 leading: String::new(),
                 trailing: String::new(),
@@ -346,6 +348,7 @@ impl Scene {
         });
         Self {
             presentation,
+            wave_visible,
             clock: None,
             leading: activity.leading.clone(),
             trailing: activity.trailing.clone(),
@@ -380,7 +383,8 @@ impl Scene {
     pub fn fit_key(&self) -> String {
         let cover = self.media.as_ref().map(|media| media.playing);
         format!(
-            "{cover:?}|{}|{}|{}|{}|{}",
+            "{cover:?}|{}|{}|{}|{}|{}|{}",
+            self.wave_visible,
             self.has_task_beside(),
             self.icon.is_some(),
             self.clock.as_deref().map(all_zeros).unwrap_or_default(),
@@ -397,7 +401,7 @@ impl Scene {
         let wanted = if let Some(clock) = &self.clock {
             measure(&all_zeros(clock), COMPACT_CLOCK_SIZE, true).ceil() + COMPACT_CLOCK_PADDING * 2.0
         } else if let Some(media) = &self.media {
-            COMPACT_ART_TEXT_X + text(&self.leading, true) + compact_media_end(media, self.companion.as_ref())
+            COMPACT_ART_TEXT_X + text(&self.leading, true) + compact_media_end(media, self.companion.as_ref(), self.wave_visible)
         } else {
             let gap = if trailing > 0.0 { COMPACT_TEXT_GAP } else { 0.0 };
             self.text_start() + text(&self.leading, true) + gap + trailing + COMPACT_TEXT_END
@@ -464,7 +468,7 @@ impl Scene {
     }
 
     pub fn shows_wave(&self) -> bool {
-        self.presentation == Presentation::Compact
+        self.wave_visible && self.presentation == Presentation::Compact
             && self.media.as_ref().is_some_and(|media| media.playing)
             && !self.has_task_beside()
     }
@@ -548,7 +552,7 @@ impl Scene {
         let radius = (canvas.corner - inset).clamp(SMALLEST_ART_RADIUS, COMPACT_ART / 2.0);
         canvas.artwork(&mut painting, media, inset, inset, COMPACT_ART, radius);
 
-        let width = canvas.width - COMPACT_ART_TEXT_X - compact_media_end(media, self.companion.as_ref());
+        let width = canvas.width - COMPACT_ART_TEXT_X - compact_media_end(media, self.companion.as_ref(), self.wave_visible);
         let bounds = canvas.bounds(COMPACT_ART_TEXT_X, 0.0, width, canvas.height);
         painting.texts.push(canvas.text(&self.leading, bounds, COMPACT_TEXT_SIZE, true, 1.0, Align::Leading));
         if let Some(Companion::Task(shown)) = &self.companion {
@@ -1212,5 +1216,55 @@ impl Canvas {
                 painting.texts.push(self.icon(glyph, self.bounds(x, y, size, size), size * 0.62));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn playing_music(wave_visible: bool) -> Scene {
+        Scene {
+            presentation: Presentation::Compact,
+            wave_visible,
+            clock: None,
+            leading: "Example song title".into(),
+            trailing: String::new(),
+            title: String::new(),
+            detail: String::new(),
+            media: Some(MediaScene {
+                artwork: None,
+                playing: true,
+                shuffle: None,
+                repeat: None,
+                sides: Sides::Tracks,
+                is_music: true,
+                can_previous: true,
+                can_next: true,
+                timing: None,
+            }),
+            icon: None,
+            level: None,
+            timer: None,
+            home: None,
+            hideable: false,
+            fit: DEFAULT_FIT,
+            preview: None,
+            panel: None,
+            transfer: None,
+            reveal: false,
+            companion: None,
+        }
+    }
+
+    #[test]
+    fn hiding_the_wave_gives_its_space_back_to_the_music_pill() {
+        let shown = playing_music(true);
+        let hidden = playing_music(false);
+        let measure = |text: &str, _size: f32, _bold: bool| text.len() as f32 * 7.0;
+        assert_eq!(shown.fit(measure).width - hidden.fit(measure).width, WAVE_RESERVED - COMPACT_TEXT_END);
+        assert_ne!(shown.fit_key(), hidden.fit_key());
+        assert!(shown.shows_wave());
+        assert!(!hidden.shows_wave());
     }
 }

@@ -54,8 +54,8 @@ const LEVEL_NOTICES: &str = "
 ";
 
 const WAVE_SETTINGS: &str = "
-# Küçük pill'deki ses dalgası: on veya off. Kapalıyken sistem daha az yorulur.
-# Enerji tasarrufu açıkken dalga her durumda durur.
+# Küçük pill'deki ses dalgası: on veya off. Kapalıyken dalga görünmez.
+# Enerji tasarrufu açıkken dalga da görünmez; kapatılınca seçimin geri gelir.
 sound_wave = \"on\"
 ";
 

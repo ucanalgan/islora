@@ -157,6 +157,7 @@ pub struct SettingsState {
     pub layout: TaskLayout,
     pub progress: ProgressStyle,
     pub sound_wave: bool,
+    pub battery_saver: bool,
     pub wave_style: WaveStyle,
     pub notices_off: Vec<String>,
     pub presets: [u64; 4],
@@ -285,7 +286,7 @@ fn appearance(view: &mut View, state: &SettingsState) {
     view.choices(426.0, WaveStyle::ALL.map(|style| {
         (Action::WaveStyle(style), state.wave_style == style, style.label())
     }));
-    view.caption("Kapalıyken ve enerji tasarrufunda çubuklar sabit kalır", 478.0);
+    view.caption("Kapalıyken ve enerji tasarrufunda dalga gizlenir", 478.0);
 }
 
 /// How a short task shares the island with music, and how a send shows.
@@ -430,6 +431,7 @@ mod tests {
             layout: TaskLayout::Bubble,
             progress: ProgressStyle::Ring,
             sound_wave: true,
+            battery_saver: false,
             wave_style: WaveStyle::Normal,
             notices_off: Vec::new(),
             presets: [5, 15, 25, 45],

@@ -68,7 +68,7 @@ The settings window opens by itself on first run, and changes apply at once. Eve
 | `notices_off` | Islora notices to hide, separated by commas. This includes `volume` and `brightness`. When both are enabled, Islora hides the Windows level flyout. The file lists the names. | empty |
 | `task_layout` | How focus, timers or a file send share the island with music: `bubble` keeps the music in the pill and the task in the bubble beside it, `shared` shows both in one pill, `front` gives the pill to the task. | `bubble` |
 | `progress_style` | How the open view shows a send to a phone: `ring`, `edge` for light running along the island's edge, or `fill`. | `ring` |
-| `sound_wave` | `off` stills the wave in the small pill, which is lighter on the system. Energy Saver stills it too. | `on` |
+| `sound_wave` | `off` removes the wave from the small pill. Energy Saver hides it too, restoring your choice when it ends. | `on` |
 | `wave_style` | The moving wave's pace and height: `calm`, `normal` or `lively`. | `normal` |
 | `autostart` | `on` starts Islora with Windows. A new copy turns it on by itself until you turn it off on the Genel page. | `on` |
 
@@ -88,7 +88,7 @@ Islora never reads what you copy, only whether it was text, an image or a file, 
 
 Islora is written in Rust with no runtime or web view. Nothing polls: every source waits for a Windows event, and shape animations run in the Windows compositor, so the app itself does no work per frame. With nothing to show, 0.4.0 used 0 ms of CPU over 15 seconds and about 8 MB of private memory, as 0.0.3 did. The web server for a phone and the picture work run only while they are needed.
 
-The exception is the sound wave in the small pill while music plays. It loops, so the compositor (`dwm.exe`) redraws it on every frame, which costs about half a CPU core at 144 Hz. Turn off **Ses dalgası** in the settings to stop it. It also stops by itself while Windows Energy Saver is on.
+The exception is the sound wave in the small pill while music plays. It loops, so the compositor (`dwm.exe`) redraws it on every frame, which costs about half a CPU core at 144 Hz. Turn off **Ses dalgası** in the settings to hide it. It also disappears while Windows Energy Saver is on.
 
 ## Known limits
 
