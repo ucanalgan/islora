@@ -2,17 +2,27 @@
 //! The shell creates the host lazily, so watching its show event also handles
 //! the first key press after startup and an explorer restart.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_OBJECT_SHOW, FindWindowExW, GetClassNameW, GetShellWindow, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, SHOW_WINDOW_CMD, ShowWindowAsync, WINEVENT_OUTOFCONTEXT,
+    EVENT_OBJECT_SHOW, FindWindowExW, GetClassNameW, GetParent, GetShellWindow, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, IsWindow, SHOW_WINDOW_CMD, ShowWindowAsync,
+    WINEVENT_OUTOFCONTEXT,
 };
 use windows::core::{Error, Result, w};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+static HIDDEN: Mutex<Vec<HiddenFlyout>> = Mutex::new(Vec::new());
+
+#[derive(Clone, Copy)]
+struct HiddenFlyout {
+    host: usize,
+    content: usize,
+    shell_pid: u32,
+}
 
 pub struct NativeOsd {
     hook: HWINEVENTHOOK,
@@ -40,6 +50,9 @@ impl NativeOsd {
 
     pub fn set_enabled(&self, enabled: bool) {
         ENABLED.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            restore_hidden();
+        }
     }
 }
 
@@ -48,6 +61,34 @@ impl Drop for NativeOsd {
         ENABLED.store(false, Ordering::Relaxed);
         unsafe {
             let _ = UnhookWinEvent(self.hook);
+        }
+        restore_hidden();
+    }
+}
+
+/// A hidden shell window otherwise stays hidden after Islora quits or the user
+/// turns either level notice off. Do not reuse handles after Explorer restarts.
+fn restore_hidden() {
+    let hidden = {
+        let mut saved = HIDDEN.lock().unwrap_or_else(|error| error.into_inner());
+        std::mem::take(&mut *saved)
+    };
+    for item in hidden {
+        let host = HWND(item.host as *mut _);
+        let content = HWND(item.content as *mut _);
+        unsafe {
+            if !IsWindow(Some(host)).as_bool() {
+                continue;
+            }
+            let mut owner_pid = 0;
+            GetWindowThreadProcessId(host, Some(&mut owner_pid));
+            if owner_pid != item.shell_pid {
+                continue;
+            }
+            if IsWindow(Some(content)).as_bool() && GetParent(content).ok() == Some(host) {
+                let _ = ShowWindowAsync(content, SHOW_WINDOW_CMD(9)); // SW_RESTORE
+            }
+            let _ = ShowWindowAsync(host, SHOW_WINDOW_CMD(4)); // SW_SHOWNOACTIVATE
         }
     }
 }
@@ -104,6 +145,16 @@ unsafe extern "system" fn on_show(
             FindWindowExW(Some(hwnd), None, w!("DirectUIHWND"), w!(""))
         };
         let Ok(content) = content else { return };
+        {
+            let mut hidden = HIDDEN.lock().unwrap_or_else(|error| error.into_inner());
+            if !hidden.iter().any(|saved| saved.host == hwnd.0 as usize && saved.shell_pid == shell_pid) {
+                hidden.push(HiddenFlyout {
+                    host: hwnd.0 as usize,
+                    content: content.0 as usize,
+                    shell_pid,
+                });
+            }
+        }
         let _ = ShowWindowAsync(content, SHOW_WINDOW_CMD(6)); // SW_MINIMIZE
         let _ = ShowWindowAsync(hwnd, SHOW_WINDOW_CMD(0)); // SW_HIDE
     }
