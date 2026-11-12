@@ -89,6 +89,7 @@ fn glyph(icon: Icon) -> &'static str {
         Icon::Bluetooth => "\u{E702}",
         Icon::Timer => ICON_STOPWATCH,
         Icon::Focus => "\u{E708}",
+        Icon::Message => "\u{E8F2}",
         Icon::Calendar => "\u{E787}",
         Icon::Music => ICON_NOTE,
         Icon::Speaker => "\u{E7F5}",

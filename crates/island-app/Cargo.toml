@@ -21,6 +21,7 @@ embed-resource = "3"
 version = "0.62"
 features = [
     "ApplicationModel_AppService",
+    "ApplicationModel",
     "Devices_Bluetooth",
     "Devices_Enumeration",
     "Devices_WiFiDirect",
@@ -39,6 +40,8 @@ features = [
     "UI_Composition",
     "UI_Composition_Desktop",
     "UI_Shell",
+    "UI_Notifications",
+    "UI_Notifications_Management",
     "Web_Http",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",

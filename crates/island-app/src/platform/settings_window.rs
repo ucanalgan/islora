@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use island_core::{IslandStyle, Material, ProgressStyle, TaskLayout};
-use island_core::settings_view::{
+use crate::settings_view::{
     ADDRESS_FIELD, Action, Control, Focus, Look, PREVIEW, Page, Rect, SIDEBAR_WIDTH, SettingsState,
     View, WINDOW_HEIGHT, WINDOW_WIDTH, view,
 };

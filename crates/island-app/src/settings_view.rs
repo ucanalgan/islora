@@ -1,7 +1,8 @@
 //! What the settings window shows and where, in DIPs. Nothing here draws, so the
 //! layout and what each click means can be tested without a window.
 
-use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TaskLayout, WaveStyle};
+use island_core::layout::{IslandStyle, Material, ProgressStyle, StartMode, TaskLayout, WaveStyle};
+pub use island_core::geometry::Rect;
 
 pub const WINDOW_WIDTH: f32 = 760.0;
 pub const WINDOW_HEIGHT: f32 = 540.0;
@@ -79,20 +80,6 @@ impl Page {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    pub fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-}
-
 /// What a click on a control asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -101,9 +88,13 @@ pub enum Action {
     Style(IslandStyle),
     Layout(TaskLayout),
     Progress(ProgressStyle),
+    MonitorStep { next: bool },
     SoundWave,
     WaveStyle(WaveStyle),
     Notice(usize),
+    WindowsNotifications,
+    FocusHidesNotifications,
+    ClearMutedApps,
     Preset { index: usize, longer: bool },
     Mode(StartMode),
     SaveCalendar,
@@ -156,10 +147,14 @@ pub struct SettingsState {
     pub style: IslandStyle,
     pub layout: TaskLayout,
     pub progress: ProgressStyle,
+    pub monitor_label: String,
     pub sound_wave: bool,
     pub battery_saver: bool,
     pub wave_style: WaveStyle,
     pub notices_off: Vec<String>,
+    pub windows_notifications: bool,
+    pub focus_hides_notifications: bool,
+    pub muted_app_count: usize,
     pub presets: [u64; 4],
     pub mode: StartMode,
     pub autostart: bool,
@@ -301,6 +296,11 @@ fn layout(view: &mut View, state: &SettingsState) {
         ProgressStyle::ALL.map(|style| (Action::Progress(style), state.progress == style, style.label())),
     );
     view.caption("Kapalıyken ilerleme her zaman küçük bir halkadır", 384.0);
+    view.caption("Island'ın görüneceği ekran", 412.0);
+    let y = 438.0;
+    view.control(Action::MonitorStep { next: false }, Look::Step, Rect { x: LEFT, y, width: STEP_SIZE, height: STEP_SIZE }, "‹");
+    view.control(Action::MonitorStep { next: true }, Look::Step, Rect { x: LEFT + WIDTH - STEP_SIZE, y, width: STEP_SIZE, height: STEP_SIZE }, "›");
+    view.labels.push(Label { text: state.monitor_label.clone(), bounds: Rect { x: LEFT + STEP_SIZE, y, width: WIDTH - STEP_SIZE * 2.0, height: STEP_SIZE }, size: 14.0, bold: true, opacity: 1.0, centered: true });
 }
 
 /// One line on what the chosen layout does.
@@ -313,8 +313,8 @@ pub fn layout_note(layout: TaskLayout) -> &'static str {
 }
 
 fn notices(view: &mut View, state: &SettingsState) {
-    const COLUMNS: usize = 2;
-    let width = (WIDTH - GAP) / COLUMNS as f32;
+    const COLUMNS: usize = 3;
+    let width = (WIDTH - GAP * (COLUMNS - 1) as f32) / COLUMNS as f32;
     let rows = NOTICES.len().div_ceil(COLUMNS);
     for (index, (setting, label)) in NOTICES.into_iter().enumerate() {
         let column = index / rows;
@@ -323,12 +323,20 @@ fn notices(view: &mut View, state: &SettingsState) {
             x: LEFT + column as f32 * (width + GAP),
             y: TOP + row as f32 * 48.0,
             width,
-            height: 44.0,
+            height: 42.0,
         };
         let on = !state.notices_off.iter().any(|name| name == setting);
         view.control(Action::Notice(index), Look::Switch { on }, bounds, label);
     }
-    view.caption("Ses ve parlaklık açıkken Windows göstergesi gizlenir.", 506.0);
+    let notifications = Rect { x: LEFT, y: 380.0, width: WIDTH, height: 42.0 };
+    view.control(Action::WindowsNotifications, Look::Switch { on: state.windows_notifications }, notifications, "Windows bildirimlerini göster");
+    let focus = Rect { x: LEFT, y: 426.0, width: WIDTH, height: 42.0 };
+    view.control(Action::FocusHidesNotifications, Look::Switch { on: state.focus_hides_notifications }, focus, "Odak oturumunda gizle");
+    if state.muted_app_count > 0 {
+        let clear = Rect { x: LEFT, y: 478.0, width: 210.0, height: 36.0 };
+        view.control(Action::ClearMutedApps, Look::Button, clear, format!("Sessiz uygulamaları sıfırla ({})", state.muted_app_count));
+    }
+    view.caption("Bildirimde sağ tık: uygulamayı sessize al · Erişim için Windows izni gerekir", 518.0);
 }
 
 fn calendar(view: &mut View, state: &SettingsState) {
@@ -430,10 +438,14 @@ mod tests {
             style: IslandStyle::Island,
             layout: TaskLayout::Bubble,
             progress: ProgressStyle::Ring,
+            monitor_label: "Ekran 1 · Birincil".into(),
             sound_wave: true,
             battery_saver: false,
             wave_style: WaveStyle::Normal,
             notices_off: Vec::new(),
+            windows_notifications: false,
+            focus_hides_notifications: true,
+            muted_app_count: 0,
             presets: [5, 15, 25, 45],
             mode: StartMode::Focus,
             autostart: false,

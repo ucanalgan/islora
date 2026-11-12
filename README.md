@@ -37,10 +37,13 @@ The file is not signed, so SmartScreen may warn you the first time. Choose **Mor
 - **Calendar:** events from a private iCal address, as a bubble 30 minutes before they start, in the pill 5 minutes before, and as an alert when they begin.
 - **Files:** drag files to the top of the screen and three places open. **Raf** keeps them at hand to drag somewhere else later. **Telefona gönder** shows a code that a phone camera scans to download them over your network, with no app or account on the phone. When the phone is on another network, **Doğrudan bağlan** has the computer open a small Wi-Fi network of its own: the phone joins it with one code and downloads with a second, or, with Windows' Mobile Hotspot on, serves the files there. If no phone has opened the page after 45 seconds, the code suggests it, as some networks keep their devices apart. With Wi-Fi off and nothing else connected, the send waits and makes its code once Wi-Fi is back. **Dönüştür** saves pictures as JPG or PNG, or makes them smaller, next to the original.
 - **System changes:** volume, brightness, Caps Lock, Num Lock, charger, low battery, Energy Saver, Bluetooth, sound output, microphone, camera, internet, Wi-Fi, VPN, airplane mode, USB drives, displays, screenshots and screen clips, copied items, new songs and keyboard language.
+- **Windows notifications:** opt in under **Ayarlar > Bildirimler** and allow Windows access. Islora follows notifications from any app that posts them to Windows Notification Center, without an app list. It shows the sender's app icon and available message text; notifications without readable text still show their app name. Click to open the source app, or right click to mute that app in Islora. For WhatsApp Web in Chrome, a click selects an existing WhatsApp tab when available. The same page can clear muted apps. Focus sessions can hide these previews. With the standalone exe, Islora checks for new notifications about every five seconds; it does not save their text to disk. Windows' own notification remains in Notification Center. Clicking Islora's preview opens the app, not the exact message.
 
 Two things can run at once: the main one sits in the pill and the second in a bubble beside it. A focus session, timer or file send keeps to the bubble by default while music plays, so the music stays where it was, and volume or brightness never covers an open code or panel.
 
 The island hides during fullscreen apps and leaves itself out of screenshots, screen recordings and screen sharing.
+
+Under **Ayarlar > Düzen**, choose which connected display shows the island. If that display is disconnected, Islora uses the primary display until it returns.
 
 ## Using it
 
@@ -111,7 +114,7 @@ cargo build --release
 cargo test -p island-core
 ```
 
-The app is `target\release\islora.exe`. `crates/island-core` holds the logic and has no Windows dependency, so it can be tested on its own. `crates/island-app` holds the window, drawing and event sources. `spikes` keeps the early experiments and is not part of the build.
+The app is `target\release\islora.exe`. `crates/island-core` holds the logic and has no Windows dependency, so it can be tested on its own. `crates/island-app` holds the windows, settings UI, drawing and event sources. See [architecture](docs/ARCHITECTURE.md) for the boundary between them. `spikes` keeps the early experiments and is not part of the build.
 
 ## License
 

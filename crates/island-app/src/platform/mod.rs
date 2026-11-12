@@ -1,4 +1,5 @@
 pub mod autostart;
+pub mod browser;
 pub mod drop_target;
 pub mod hotkey;
 pub mod native_osd;

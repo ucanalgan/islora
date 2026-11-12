@@ -1139,6 +1139,23 @@ mod tests {
     }
 
     #[test]
+    fn an_external_notification_interrupts_music_and_timer_then_they_return() {
+        let mut island = Island::new();
+        island.upsert_media(snapshot(true), 0);
+        island.start_timer(25 * MINUTE, 0);
+        let notice = crate::notifications::Notice {
+            id: 1, app_id: "chat".into(), app: "Chat".into(), title: "Hello".into(), body: "Message".into(), logo: None,
+        };
+        island.upsert(notice.activity(0));
+        let alert = island.frame(0);
+        assert_eq!(alert.presentation, Presentation::Alert);
+        assert_eq!(shown(&alert), Some(Kind::ExternalNotification));
+        let after = island.frame(6_000);
+        assert_eq!(shown(&after), Some(Kind::Media));
+        assert_eq!(second(&after), Some(Kind::TimerRunning));
+    }
+
+    #[test]
     fn a_finished_timer_waits_for_a_click_but_not_forever() {
         let mut island = Island::new();
         island.start_timer(MINUTE, 0);

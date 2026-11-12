@@ -3,6 +3,7 @@
 mod app;
 mod platform;
 mod render;
+mod settings_view;
 mod sources;
 
 fn main() -> windows::core::Result<()> {

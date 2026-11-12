@@ -4,7 +4,7 @@
 use crate::convert::Target;
 use crate::files::{DroppedFile, summary};
 use crate::layout::Pill;
-pub use crate::settings_view::Rect;
+pub use crate::geometry::Rect;
 
 const MARGIN: f32 = 18.0;
 const GAP: f32 = 10.0;

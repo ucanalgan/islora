@@ -2,28 +2,18 @@
 //! The shell creates the host lazily, so watching its show event also handles
 //! the first key press after startup and an explorer restart.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_OBJECT_SHOW, FindWindowExW, GetClassNameW, GetParent, GetShellWindow, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsWindow, SHOW_WINDOW_CMD, ShowWindowAsync,
-    WINEVENT_OUTOFCONTEXT,
+    EVENT_OBJECT_SHOW, FindWindowExW, GetClassNameW, GetShellWindow, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+    SHOW_WINDOW_CMD, ShowWindowAsync, WINEVENT_OUTOFCONTEXT,
 };
 use windows::core::{Error, Result, w};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static HIDDEN: Mutex<Vec<HiddenFlyout>> = Mutex::new(Vec::new());
-
-#[derive(Clone, Copy)]
-struct HiddenFlyout {
-    host: usize,
-    content: usize,
-    shell_pid: u32,
-}
-
 pub struct NativeOsd {
     hook: HWINEVENTHOOK,
 }
@@ -50,9 +40,6 @@ impl NativeOsd {
 
     pub fn set_enabled(&self, enabled: bool) {
         ENABLED.store(enabled, Ordering::Relaxed);
-        if !enabled {
-            restore_hidden();
-        }
     }
 }
 
@@ -61,34 +48,6 @@ impl Drop for NativeOsd {
         ENABLED.store(false, Ordering::Relaxed);
         unsafe {
             let _ = UnhookWinEvent(self.hook);
-        }
-        restore_hidden();
-    }
-}
-
-/// A hidden shell window otherwise stays hidden after Islora quits or the user
-/// turns either level notice off. Do not reuse handles after Explorer restarts.
-fn restore_hidden() {
-    let hidden = {
-        let mut saved = HIDDEN.lock().unwrap_or_else(|error| error.into_inner());
-        std::mem::take(&mut *saved)
-    };
-    for item in hidden {
-        let host = HWND(item.host as *mut _);
-        let content = HWND(item.content as *mut _);
-        unsafe {
-            if !IsWindow(Some(host)).as_bool() {
-                continue;
-            }
-            let mut owner_pid = 0;
-            GetWindowThreadProcessId(host, Some(&mut owner_pid));
-            if owner_pid != item.shell_pid {
-                continue;
-            }
-            if IsWindow(Some(content)).as_bool() && GetParent(content).ok() == Some(host) {
-                let _ = ShowWindowAsync(content, SHOW_WINDOW_CMD(9)); // SW_RESTORE
-            }
-            let _ = ShowWindowAsync(host, SHOW_WINDOW_CMD(4)); // SW_SHOWNOACTIVATE
         }
     }
 }
@@ -127,8 +86,20 @@ unsafe extern "system" fn on_show(
         }
         let mut rect = Default::default();
         if GetWindowRect(hwnd, &mut rect).is_err()
-            || !(100..=650).contains(&(rect.right - rect.left))
-            || !(30..=650).contains(&(rect.bottom - rect.top))
+            || !(100..=300).contains(&(rect.right - rect.left))
+            || !(30..=120).contains(&(rect.bottom - rect.top))
+        {
+            return;
+        }
+        // Toasts and other shell flyouts share this host class and bridge.
+        // The level indicator is a small flyout at the bottom centre on the
+        // supported layout. An unknown placement is safer left alone.
+        let screen_width = GetSystemMetrics(SM_CXSCREEN);
+        let screen_height = GetSystemMetrics(SM_CYSCREEN);
+        if screen_width <= 0 || screen_height <= 0
+            || ((rect.left + rect.right) / 2 - screen_width / 2).abs() > 150
+            || rect.bottom < screen_height - 180
+            || rect.bottom > screen_height
         {
             return;
         }
@@ -144,18 +115,9 @@ unsafe extern "system" fn on_show(
         } else {
             FindWindowExW(Some(hwnd), None, w!("DirectUIHWND"), w!(""))
         };
-        let Ok(content) = content else { return };
-        {
-            let mut hidden = HIDDEN.lock().unwrap_or_else(|error| error.into_inner());
-            if !hidden.iter().any(|saved| saved.host == hwnd.0 as usize && saved.shell_pid == shell_pid) {
-                hidden.push(HiddenFlyout {
-                    host: hwnd.0 as usize,
-                    content: content.0 as usize,
-                    shell_pid,
-                });
-            }
-        }
-        let _ = ShowWindowAsync(content, SHOW_WINDOW_CMD(6)); // SW_MINIMIZE
+        if content.is_err() { return; }
+        // Hiding the host is enough. Minimising its content and restoring the
+        // host on exit can leave an empty, transparent rectangle on screen.
         let _ = ShowWindowAsync(hwnd, SHOW_WINDOW_CMD(0)); // SW_HIDE
     }
 }

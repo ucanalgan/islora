@@ -12,6 +12,7 @@ pub mod imaging;
 pub mod keys;
 pub mod media;
 pub mod network;
+pub mod notifications;
 pub mod power;
 pub mod privacy;
 mod registry;

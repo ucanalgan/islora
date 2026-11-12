@@ -15,13 +15,14 @@ use island_core::focus::{
 };
 use island_core::ics::{self, Event};
 use island_core::media::{RepeatMode, Sides};
+use island_core::notifications::{Notice, NotificationQueue};
 use island_core::qr::QrMatrix;
 use island_core::transfer::{NUDGE_MS, Stage, Transfer, WAIT_MS};
 use island_core::layout::{
     TIMER_PRESETS, on_event_hide, on_home_shortcut, on_progress_bar, on_settings_shortcut,
     preset_at, progress_fraction, WaveStyle,
 };
-use island_core::settings_view::{
+use crate::settings_view::{
     Action, NOTICES, Page, SettingsState, is_calendar_address, stepped_preset, toggled_notice,
 };
 use island_core::{
@@ -66,6 +67,7 @@ use crate::sources::firewall::{self, MSG_FIREWALL};
 use crate::sources::fullscreen::{self, MSG_APPBAR, MSG_FRONT_CHANGED, MSG_WINDOW_DRAG, Presence};
 use crate::sources::imaging::{Imaging, MSG_IMAGING, Made};
 use crate::sources::media::{MSG_MEDIA, MediaSource};
+use crate::sources::notifications::{MSG_NOTIFICATIONS, NotificationSource, Update as NotificationUpdate};
 use crate::sources::power::{self, PowerEvent, PowerWatch};
 use crate::sources::privacy::{CameraWatch, MSG_CAMERA};
 use crate::sources::sharing::{self, MSG_SHARING, SharedFile, Sharing, SharingEvent};
@@ -182,6 +184,7 @@ struct App {
     island_window: HWND,
     edge_window: HWND,
     placement: Placement,
+    selected_monitor: Option<String>,
     island: Island,
     renderer: Renderer,
     tray: Tray,
@@ -211,6 +214,13 @@ struct App {
     drives: Drives,
     /// Names of the notices the user turned off.
     notices_off: Vec<String>,
+    windows_notifications: bool,
+    focus_hides_notifications: bool,
+    muted_apps: Vec<String>,
+    notification_queue: NotificationQueue,
+    notification_source: Option<NotificationSource>,
+    active_notification: Option<(Notice, Millis)>,
+    shown_notification: bool,
     /// Until when news about the network is left unsaid.
     network_quiet_until: Millis,
     /// Until when a change of the clipboard is left unsaid.
@@ -304,7 +314,8 @@ pub fn run() -> Result<()> {
     for target in [island_window, edge_window] {
         optional("drop", drop_target::register(target, &DROP_HANDLERS));
     }
-    let placement = window::place(island_window, edge_window, stored_style())?;
+    let selected_monitor = stored_monitor();
+    let placement = window::place(island_window, edge_window, stored_style(), selected_monitor.as_deref())?;
     let sound_wave = stored_sound_wave();
     let wave_still = argument_after("--wave").as_deref() == Some("still");
     let wave_style = stored_wave_style();
@@ -317,6 +328,8 @@ pub fn run() -> Result<()> {
     let tray = Tray::add(island_window)?;
     let presence = Presence::start(island_window)?;
     let notices_off = stored_notices_off();
+    let windows_notifications = stored_windows_notifications()
+        && !std::env::args().any(|a| a == "--no-real-notices");
     let osd_enabled = !std::env::args().any(|a| a == "--no-real-notices")
         && !notices_off.iter().any(|name| name == "volume" || name == "brightness");
     let native_osd = optional("Windows level flyout", native_osd::NativeOsd::start(osd_enabled));
@@ -359,6 +372,7 @@ pub fn run() -> Result<()> {
         island_window,
         edge_window,
         placement,
+        selected_monitor,
         island,
         renderer,
         tray,
@@ -383,6 +397,13 @@ pub fn run() -> Result<()> {
         camera_watch,
         drives: Drives::default(),
         notices_off,
+        windows_notifications,
+        focus_hides_notifications: stored_focus_hides_notifications(),
+        muted_apps: stored_muted_apps(),
+        notification_queue: NotificationQueue::default(),
+        notification_source: windows_notifications.then(|| NotificationSource::start(island_window)),
+        active_notification: None,
+        shown_notification: false,
         network_quiet_until: 0,
         clipboard_quiet_until: 0,
         clip_expected_until: 0,
@@ -425,6 +446,23 @@ pub fn run() -> Result<()> {
         indicator_demo_step: None,
     };
     app.apply_material();
+    app.notification_queue.set_muted(app.muted_apps.clone());
+    if std::env::args().any(|a| a == "--demo-notification") {
+        let now = app.now();
+        let notice = Notice {
+            id: u32::MAX,
+            app_id: "Islora.Demo".into(),
+            app: "Islora Demo".into(),
+            title: "Yeni mesaj".into(),
+            body: "Bildirim önizlemesi".into(),
+            logo: None,
+        };
+        let mut activity = notice.activity(now);
+        activity.expires_at = Some(now + 30_000);
+        app.active_notification = Some((notice, now + 30_000));
+        app.island.upsert(activity);
+        app.refresh();
+    }
     if std::env::args().any(|a| a == "--demo") {
         app.toggle_demo();
     }
@@ -497,6 +535,10 @@ impl App {
     /// its next deadline. This is the only path that changes what is shown.
     fn refresh(&mut self) {
         let now = self.now();
+        if self.active_notification.as_ref().is_some_and(|(_, until)| now >= *until) {
+            self.active_notification = None;
+            self.show_next_notification(now);
+        }
         let frame = self.island.frame(now);
         // The code timed out, or the view with it was closed.
         if self.island.transfer_stage().is_none() && (self.sharing.is_some() || self.direct.is_some()) {
@@ -546,6 +588,7 @@ impl App {
         };
         self.seekable_ms = media.filter(|media| media.can_seek && media.duration_ms > 0).map(|media| media.duration_ms);
         self.alert_file = frame.activity.as_ref().and_then(|activity| activity.file.clone());
+        self.shown_notification = frame.activity.as_ref().is_some_and(|activity| activity.kind == Kind::ExternalNotification);
         self.alert_reveals = frame.activity.as_ref().is_some_and(|activity| activity.reveal);
         self.shown_media = media.cloned();
         self.companion = frame.companion.as_ref().map(|activity| activity.kind);
@@ -702,6 +745,15 @@ impl App {
         if self.on_companion(x, y, pill) {
             self.island.click_companion();
             self.refresh();
+            return;
+        }
+        if self.shown_notification {
+            if let Some((notice, _)) = self.active_notification.take() {
+                shell::launch_app(notice.app_id, notice.title);
+                self.island.remove(Kind::ExternalNotification);
+                self.show_next_notification(now);
+                self.refresh();
+            }
             return;
         }
         if let Some(file) = self.alert_file.take() {
@@ -1008,7 +1060,58 @@ impl App {
                 on_break,
             },
         };
+        if self.focus_hides_notifications {
+            let focused = matches!(view, FocusView::Running { .. } | FocusView::Open);
+            self.notification_queue.set_focus(focused);
+            if focused {
+                self.active_notification = None;
+                self.island.remove(Kind::ExternalNotification);
+            }
+        }
         self.island.set_focus(view, now);
+        self.refresh();
+    }
+
+    fn on_notifications(&mut self) {
+        let Some(source) = &self.notification_source else { return };
+        let updates: Vec<_> = source.updates().collect();
+        for update in updates {
+            match update {
+                NotificationUpdate::Seed(ids) => self.notification_queue.seed(ids),
+                NotificationUpdate::Added(notice) => self.notification_queue.add(notice),
+                NotificationUpdate::Removed(id) => {
+                    self.notification_queue.remove(id);
+                    if self.active_notification.as_ref().is_some_and(|(notice, _)| notice.id == id) {
+                        self.active_notification = None;
+                        self.island.remove(Kind::ExternalNotification);
+                    }
+                }
+            }
+        }
+        self.show_next_notification(self.now());
+        self.refresh();
+    }
+
+    fn show_next_notification(&mut self, now: Millis) {
+        if self.active_notification.is_some() { return; }
+        if let Some(notice) = self.notification_queue.pop() {
+            let activity = notice.activity(now);
+            let until = activity.expires_at.unwrap_or(now);
+            self.active_notification = Some((notice, until));
+            self.island.upsert(activity);
+        }
+    }
+
+    fn mute_shown_app(&mut self) {
+        if !self.shown_notification { return; }
+        let Some((notice, _)) = self.active_notification.take() else { return };
+        if !self.muted_apps.contains(&notice.app_id) {
+            self.muted_apps.push(notice.app_id);
+            settings::remember("muted_apps", &self.muted_apps.join(","));
+            self.notification_queue.set_muted(self.muted_apps.clone());
+        }
+        self.island.remove(Kind::ExternalNotification);
+        self.show_next_notification(self.now());
         self.refresh();
     }
 
@@ -1088,9 +1191,29 @@ impl App {
 
     fn reload(&mut self) {
         apply_settings(&mut self.island);
+        let monitor = stored_monitor();
+        if monitor != self.selected_monitor {
+            self.selected_monitor = monitor;
+            self.on_display_changed();
+        }
         self.progress_style = stored_progress_style();
         self.task_layout = stored_task_layout();
         self.notices_off = stored_notices_off();
+        self.focus_hides_notifications = stored_focus_hides_notifications();
+        self.notification_queue.set_focus(self.focus_hides_notifications
+            && matches!(self.focus_state.status(), FocusStatus::Running { .. } | FocusStatus::Open));
+        self.muted_apps = stored_muted_apps();
+        self.notification_queue.set_muted(self.muted_apps.clone());
+        let wanted_notifications = stored_windows_notifications() && !self.quiet;
+        if wanted_notifications != self.windows_notifications {
+            self.windows_notifications = wanted_notifications;
+            self.notification_source = wanted_notifications.then(|| NotificationSource::start(self.island_window));
+            if !wanted_notifications {
+                self.notification_queue.clear();
+                self.active_notification = None;
+                self.island.remove(Kind::ExternalNotification);
+            }
+        }
         self.update_native_osd();
         self.calendar.refresh();
         self.sound_wave = stored_sound_wave();
@@ -1140,10 +1263,14 @@ impl App {
             style: self.placement.style,
             layout: self.task_layout,
             progress: self.progress_style,
+            monitor_label: self.monitor_label(),
             sound_wave: self.sound_wave,
             battery_saver: self.battery_saver,
             wave_style: self.wave_style,
             notices_off: self.notices_off.clone(),
+            windows_notifications: self.windows_notifications,
+            focus_hides_notifications: self.focus_hides_notifications,
+            muted_app_count: self.muted_apps.len(),
             presets: self.island.presets(),
             mode: self.island.start_mode(),
             autostart: autostart::is_on(),
@@ -1196,6 +1323,7 @@ impl App {
                 self.island.set_progress_style(style);
                 self.refresh();
             }
+            Action::MonitorStep { next } => self.choose_monitor(next),
             Action::SoundWave => {
                 self.sound_wave = !self.sound_wave;
                 settings::remember("sound_wave", if self.sound_wave { "on" } else { "off" });
@@ -1209,6 +1337,32 @@ impl App {
                 }
             }
             Action::Notice(index) => self.toggle_notice(NOTICES[index].0),
+            Action::WindowsNotifications => {
+                self.windows_notifications = !self.windows_notifications;
+                settings::remember("windows_notifications", if self.windows_notifications { "on" } else { "off" });
+                if self.windows_notifications {
+                    let source = NotificationSource::start(self.island_window);
+                    if let Err(error) = source.request_access() { eprintln!("notification access request failed: {error}"); }
+                    self.notification_source = Some(source);
+                } else {
+                    self.notification_source = None;
+                    self.notification_queue.clear();
+                    self.active_notification = None;
+                    self.island.remove(Kind::ExternalNotification);
+                    self.refresh();
+                }
+            }
+            Action::FocusHidesNotifications => {
+                self.focus_hides_notifications = !self.focus_hides_notifications;
+                settings::remember("focus_hides_notifications", if self.focus_hides_notifications { "on" } else { "off" });
+                self.notification_queue.set_focus(self.focus_hides_notifications
+                    && matches!(self.focus_state.status(), FocusStatus::Running { .. } | FocusStatus::Open));
+            }
+            Action::ClearMutedApps => {
+                self.muted_apps.clear();
+                settings::remember("muted_apps", "");
+                self.notification_queue.set_muted(Vec::new());
+            }
             Action::Preset { index, longer } => {
                 let mut presets = self.island.presets();
                 presets[index] = stepped_preset(presets[index], longer);
@@ -1312,6 +1466,28 @@ impl App {
             eprintln!("style failed: {error}");
         }
         self.reappear();
+    }
+
+    fn monitor_label(&self) -> String {
+        let monitors = window::monitors();
+        if let Some(selected) = &self.selected_monitor
+            && !monitors.iter().any(|monitor| &monitor.device == selected) {
+            return "Seçilen ekran bağlı değil · Birincil kullanılıyor".into();
+        }
+        let Some(monitor) = window::selected_monitor(&monitors, self.selected_monitor.as_deref()) else { return "Ekran bulunamadı".into() };
+        let name = monitor.device.rsplit('\\').next().unwrap_or(&monitor.device);
+        format!("{} · {} × {}{}", name, monitor.rect.right - monitor.rect.left, monitor.rect.bottom - monitor.rect.top,
+            if monitor.primary { " · Birincil" } else { "" })
+    }
+
+    fn choose_monitor(&mut self, next: bool) {
+        let monitors = window::monitors();
+        let Some(monitor) = window::step_monitor(&monitors, self.selected_monitor.as_deref(), next) else { return };
+        self.selected_monitor = Some(monitor.device.clone());
+        settings::remember("monitor", &monitor.device);
+        self.on_display_changed();
+        self.island.peek(self.now());
+        self.refresh();
     }
 
     /// Brings the pill back from nothing, after a change to how it is placed.
@@ -1998,7 +2174,7 @@ impl App {
     }
 
     fn on_display_changed(&mut self) {
-        match window::place(self.island_window, self.edge_window, self.placement.style) {
+        match window::place(self.island_window, self.edge_window, self.placement.style, self.selected_monitor.as_deref()) {
             Ok(placement) => {
                 self.placement = placement;
                 if let Err(error) = self.renderer.set_metrics(placement.scale, placement.width) {
@@ -2007,6 +2183,10 @@ impl App {
                 self.reappear();
                 if let Some(indicator) = self.tracker.monitors_changed(monitor_count()) {
                     self.show_indicator(indicator);
+                }
+                if let Some(page) = self.settings.as_ref().map(|window| window.state().page) {
+                    let state = self.settings_state(page);
+                    if let Some(window) = &mut self.settings { window.update(state); }
                 }
             }
             Err(error) => eprintln!("placement failed: {error}"),
@@ -2275,6 +2455,25 @@ fn stored_notices_off() -> Vec<String> {
     settings::read().map_or_else(Vec::new, |text| config::read_notices_off(&text))
 }
 
+fn stored_windows_notifications() -> bool {
+    settings::read().and_then(|text| config::read_value(&text, "windows_notifications"))
+        .as_deref() == Some("on")
+}
+
+fn stored_monitor() -> Option<String> {
+    settings::read().and_then(|text| config::read_value(&text, "monitor"))
+}
+
+fn stored_focus_hides_notifications() -> bool {
+    settings::read().and_then(|text| config::read_value(&text, "focus_hides_notifications"))
+        .as_deref() != Some("off")
+}
+
+fn stored_muted_apps() -> Vec<String> {
+    settings::read().and_then(|text| config::read_value(&text, "muted_apps"))
+        .map_or_else(Vec::new, |value| value.split(',').map(str::trim).filter(|part| !part.is_empty()).map(str::to_owned).collect())
+}
+
 /// Tests ask for the notch directly, which leaves the user's choice alone.
 fn stored_style() -> IslandStyle {
     if std::env::args().any(|a| a == "--notch") {
@@ -2387,6 +2586,9 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             let (x, _) = pointer_position(lparam);
             with_app(|app| app.on_button_up(x));
         }
+        WM_RBUTTONDOWN => {
+            with_app(App::mute_shown_app);
+        }
         WM_CAPTURECHANGED => {
             with_app(App::on_capture_lost);
         }
@@ -2456,6 +2658,9 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         MSG_MEDIA => {
             with_app(App::on_media);
+        }
+        MSG_NOTIFICATIONS => {
+            with_app(App::on_notifications);
         }
         MSG_INDICATOR => {
             with_app(App::on_indicators);

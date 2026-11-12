@@ -2,10 +2,11 @@
 //! and showing them in their folder.
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, IDataObject};
+use windows::Win32::System::Com::{CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IDataObject};
 use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
+    ACTIVATEOPTIONS, ApplicationActivationManager, IApplicationActivationManager,
     BHID_DataObject, ILCreateFromPathW, ILFree, SHCreateShellItemArrayFromIDLists, SHDoDragDrop,
     SHOpenFolderAndSelectItems, ShellExecuteW,
 };
@@ -53,6 +54,26 @@ pub fn drag_out(window: HWND, paths: &[String]) -> Result<DROPEFFECT> {
 pub fn open(path: &str) {
     let path = HSTRING::from(path);
     unsafe { ShellExecuteW(None, w!("open"), &path, None, None, SW_SHOWNORMAL) };
+}
+
+/// Opens the app that sent a Windows notification. The listener does not offer
+/// activation of the original notification action or conversation.
+pub fn launch_app(app_id: String, title: String) {
+    std::thread::spawn(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if super::browser::is_whatsapp_notice(&app_id, &title) && super::browser::open_whatsapp_tab() {
+            return;
+        }
+        let manager: Result<IApplicationActivationManager> =
+            CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER);
+        let launched = manager.and_then(|manager| {
+            manager.ActivateApplication(&HSTRING::from(app_id.as_str()), w!(""), ACTIVATEOPTIONS::default())
+        }).is_ok();
+        if !launched {
+            let path = HSTRING::from(format!("shell:AppsFolder\\{app_id}"));
+            ShellExecuteW(None, w!("open"), &path, None, None, SW_SHOWNORMAL);
+        }
+    });
 }
 
 /// Opens the folder of the first file with all of the files in it selected.

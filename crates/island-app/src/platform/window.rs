@@ -2,20 +2,20 @@ use std::mem::size_of;
 
 use island_core::layout::{EDGE_TRIGGER_WIDTH, NOTCH_SHOULDER, WINDOW_HEIGHT, WINDOW_WIDTH};
 use island_core::{IslandStyle, Pill};
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetMonitorInfoW, HRGN,
-    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, RGN_OR, SetWindowRgn,
+    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, HRGN,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, RGN_OR, SetWindowRgn,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, Result, w};
+use windows::core::{BOOL, PCWSTR, Result, w};
 
 const ISLAND_CLASS: PCWSTR = w!("IsloraWindow");
 const EDGE_CLASS: PCWSTR = w!("IsloraEdge");
 
-/// Geometry of the island window on the primary monitor.
+/// Geometry of the island window on its current monitor.
 #[derive(Clone, Copy)]
 pub struct Placement {
     pub scale: f32,
@@ -90,10 +90,57 @@ fn create(class: PCWSTR, style: WINDOW_EX_STYLE) -> Result<HWND> {
     }
 }
 
-/// Centers both windows on the primary monitor's top edge.
-pub fn place(island: HWND, edge: HWND, style: IslandStyle) -> Result<Placement> {
-    let monitor = primary_monitor()?;
+#[derive(Clone, Debug)]
+pub struct Monitor {
+    pub device: String,
+    pub rect: RECT,
+    pub primary: bool,
+}
+
+pub fn monitors() -> Vec<Monitor> {
+    unsafe extern "system" fn collect(handle: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
+        let monitors = unsafe { &mut *(data.0 as *mut Vec<Monitor>) };
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+        if unsafe { GetMonitorInfoW(handle, &mut info.monitorInfo) }.as_bool() {
+            let end = info.szDevice.iter().position(|c| *c == 0).unwrap_or(info.szDevice.len());
+            monitors.push(Monitor {
+                device: String::from_utf16_lossy(&info.szDevice[..end]),
+                rect: info.monitorInfo.rcMonitor,
+                primary: info.monitorInfo.dwFlags & 1 != 0,
+            });
+        }
+        BOOL(1)
+    }
+    let mut found = Vec::new();
+    unsafe { let _ = EnumDisplayMonitors(None, None, Some(collect), LPARAM(&mut found as *mut _ as isize)); }
+    found.sort_by(|a: &Monitor, b| b.primary.cmp(&a.primary).then(a.rect.left.cmp(&b.rect.left)).then(a.rect.top.cmp(&b.rect.top)));
+    found
+}
+
+pub fn selected_monitor<'a>(available: &'a [Monitor], selected: Option<&str>) -> Option<&'a Monitor> {
+    available.iter().find(|monitor| Some(monitor.device.as_str()) == selected)
+        .or_else(|| available.iter().find(|monitor| monitor.primary))
+        .or_else(|| available.first())
+}
+
+pub fn step_monitor<'a>(available: &'a [Monitor], selected: Option<&str>, next: bool) -> Option<&'a Monitor> {
+    let current = selected_monitor(available, selected)?;
+    let index = available.iter().position(|monitor| monitor.device == current.device)?;
+    let index = if next { (index + 1) % available.len() } else { (index + available.len() - 1) % available.len() };
+    available.get(index)
+}
+
+/// Centers both windows on the chosen monitor, falling back to the primary.
+pub fn place(island: HWND, edge: HWND, style: IslandStyle, selected: Option<&str>) -> Result<Placement> {
+    let available = monitors();
+    let monitor = match selected_monitor(&available, selected) {
+        Some(monitor) => monitor.rect,
+        None => primary_monitor()?,
+    };
     let monitor_width = monitor.right - monitor.left;
+    // Move first so GetDpiForWindow reports the target monitor's DPI.
+    unsafe { SetWindowPos(island, None, monitor.left, monitor.top, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER)?; }
     let scale = unsafe { GetDpiForWindow(island) } as f32 / 96.0;
 
     let width = (WINDOW_WIDTH * scale).round() as i32;
@@ -217,4 +264,26 @@ fn rounded_region(left: f32, top: f32, pill: Pill) -> HRGN {
     let bottom = y + pill.height.ceil() as i32 + 1;
     let diameter = (pill.radius * 2.0).ceil() as i32;
     unsafe { CreateRoundRectRgn(x, y, right, bottom, diameter, diameter) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn monitor(device: &str, primary: bool, left: i32) -> Monitor {
+        Monitor { device: device.into(), primary, rect: RECT { left, top: 0, right: left + 1920, bottom: 1080 } }
+    }
+
+    #[test]
+    fn selection_survives_reordering_and_falls_back_while_disconnected() {
+        let both = vec![monitor("primary", true, 0), monitor("external", false, -1920)];
+        assert_eq!(selected_monitor(&both, Some("external")).unwrap().rect.left, -1920);
+        let disconnected = vec![both[0].clone()];
+        assert_eq!(selected_monitor(&disconnected, Some("external")).unwrap().device, "primary");
+        let reconnected = vec![both[1].clone(), both[0].clone()];
+        assert_eq!(selected_monitor(&reconnected, Some("external")).unwrap().device, "external");
+        assert_eq!(step_monitor(&both, Some("primary"), true).unwrap().device, "external");
+        assert_eq!(step_monitor(&both, Some("primary"), false).unwrap().device, "external");
+        assert!(step_monitor(&[], None, true).is_none());
+    }
 }

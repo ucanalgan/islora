@@ -10,6 +10,7 @@ pub type Millis = u64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
     Alert,
+    ExternalNotification,
     Notification,
     TimerFinished,
     NowPlaying,
@@ -28,7 +29,7 @@ pub enum Kind {
 impl Kind {
     /// Transient kinds interrupt whatever is showing and leave on their own.
     pub fn is_transient(self) -> bool {
-        matches!(self, Kind::Alert | Kind::Notification | Kind::TimerFinished | Kind::NowPlaying)
+        matches!(self, Kind::Alert | Kind::ExternalNotification | Kind::Notification | Kind::TimerFinished | Kind::NowPlaying)
     }
 }
 
@@ -64,6 +65,7 @@ pub enum Icon {
     Convert,
     Check,
     Warning,
+    Message,
 }
 
 /// What an activity shows when it only gets the small bubble beside the pill.
