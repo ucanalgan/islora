@@ -68,6 +68,41 @@ const WAVE_BARS: usize = 4;
 const WAVE_BAR_WIDTH: f32 = 3.0;
 const WAVE_BAR_GAP: f32 = 3.0;
 const WAVE_BAR_HEIGHT: f32 = 15.0;
+
+/// Position the wave in the reserved strip, converting DIPs to pixels once.
+fn wave_origin(pill: Pill, origin: Vector2, scale: f32) -> Vector2 {
+    let total = WAVE_BAR_WIDTH * WAVE_BARS as f32 + WAVE_BAR_GAP * (WAVE_BARS - 1) as f32;
+    let left = (WAVE_RESERVED - total) / 2.0 - 6.0;
+    Vector2 {
+        X: origin.X + pill.width - (WAVE_RESERVED - left) * scale,
+        Y: origin.Y + (pill.height / scale - WAVE_BAR_HEIGHT) / 2.0 * scale,
+    }
+}
+
+#[cfg(test)]
+mod wave_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn all_styles_stay_within_the_reserved_strip_at_each_scale() {
+        let wave_width = WAVE_BAR_WIDTH * WAVE_BARS as f32 + WAVE_BAR_GAP * (WAVE_BARS - 1) as f32;
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for width in [84.0, 160.0, 260.0] {
+                let pill = Pill { width, ..Pill::COMPACT }.scaled(scale);
+                let origin = Vector2 { X: 31.0 * scale, Y: 8.0 * scale };
+                let wave = wave_origin(pill, origin, scale);
+                assert!(wave.X >= origin.X + pill.width - WAVE_RESERVED * scale);
+                assert!(wave.X + wave_width * scale <= origin.X + pill.width);
+                assert!(wave.Y >= origin.Y);
+                assert!(wave.Y + WAVE_BAR_HEIGHT * scale <= origin.Y + pill.height);
+            }
+        }
+        for style in WaveStyle::ALL {
+            assert!(style.low() >= 0.0 && style.low() <= style.high());
+            assert!(style.high() <= 1.0);
+        }
+    }
+}
 /// Where a notch's curve starts to turn solid, which softens its edge.
 const SHOULDER_EDGE: f32 = 0.92;
 
@@ -232,35 +267,43 @@ pub enum WaveMotion {
 struct Wave {
     container: ContainerVisual,
     bars: Vec<SpriteVisual>,
+    bar_clips: Vec<CompositionRoundedRectangleGeometry>,
     visible: bool,
     moving: bool,
     style: WaveStyle,
+    placement: Option<(f32, f32, f32)>,
 }
 
 impl Wave {
     fn new(compositor: &Compositor, style: WaveStyle) -> Result<Self> {
         let container = compositor.CreateContainerVisual()?;
         container.SetOpacity(0.0)?;
+        container.SetClip(&compositor.CreateInsetClip()?)?;
         let white = compositor.CreateColorBrushWithColor(Color { A: 220, R: 255, G: 255, B: 255 })?;
         let mut bars = Vec::with_capacity(WAVE_BARS);
+        let mut bar_clips = Vec::with_capacity(WAVE_BARS);
         for index in 0..WAVE_BARS {
             let bar = compositor.CreateSpriteVisual()?;
             bar.SetBrush(&white)?;
             bar.SetScale(rest_scale(index))?;
+            let geometry = compositor.CreateRoundedRectangleGeometry()?;
+            bar.SetClip(&compositor.CreateGeometricClipWithGeometry(&geometry)?)?;
             container.Children()?.InsertAtTop(&bar)?;
             bars.push(bar);
+            bar_clips.push(geometry);
         }
-        Ok(Self { container, bars, visible: false, moving: false, style })
+        Ok(Self { container, bars, bar_clips, visible: false, moving: false, style, placement: None })
     }
 
     /// The right edge of a pill moves with its spring, so bars already on show
     /// follow it rather than jump to where it will end up.
-    fn place(&self, compositor: &Compositor, pill: Pill, origin: Vector2, scale: f32) -> Result<()> {
-        let total = WAVE_BAR_WIDTH * WAVE_BARS as f32 + WAVE_BAR_GAP * (WAVE_BARS - 1) as f32;
-        let left = (WAVE_RESERVED - total) / 2.0 - 6.0;
-        let top = (pill.height / scale - WAVE_BAR_HEIGHT) / 2.0;
-        let x = origin.X + pill.width - (WAVE_RESERVED - left) * scale;
-        let y = origin.Y + top * scale;
+    fn place(&mut self, compositor: &Compositor, pill: Pill, origin: Vector2, scale: f32) -> Result<()> {
+        let point = wave_origin(pill, origin, scale);
+        let (x, y) = (point.X, point.Y);
+        let placement = (x, y, scale);
+        if self.placement == Some(placement) {
+            return Ok(());
+        }
         if self.visible {
             // Both ways: the pill's height and its distance from the top edge
             // change too, not only its width.
@@ -271,9 +314,13 @@ impl Wave {
             self.container.StopAnimation(h!("Offset.Y"))?;
             self.container.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 })?;
         }
-        for (index, bar) in self.bars.iter().enumerate() {
+        let wave_width = WAVE_BAR_WIDTH * WAVE_BARS as f32 + WAVE_BAR_GAP * (WAVE_BARS - 1) as f32;
+        self.container.SetSize(Vector2 { X: wave_width * scale, Y: WAVE_BAR_HEIGHT * scale })?;
+        for (index, (bar, clip)) in self.bars.iter().zip(&self.bar_clips).enumerate() {
             let height = WAVE_BAR_HEIGHT * scale;
             bar.SetSize(Vector2 { X: WAVE_BAR_WIDTH * scale, Y: height })?;
+            clip.SetSize(Vector2 { X: WAVE_BAR_WIDTH * scale, Y: height })?;
+            clip.SetCornerRadius(Vector2 { X: WAVE_BAR_WIDTH * scale / 2.0, Y: WAVE_BAR_WIDTH * scale / 2.0 })?;
             bar.SetOffset(Vector3 {
                 X: index as f32 * (WAVE_BAR_WIDTH + WAVE_BAR_GAP) * scale,
                 Y: 0.0,
@@ -281,6 +328,7 @@ impl Wave {
             })?;
             bar.SetCenterPoint(Vector3 { X: 0.0, Y: height / 2.0, Z: 0.0 })?;
         }
+        self.placement = Some(placement);
         Ok(())
     }
 
@@ -300,17 +348,18 @@ impl Wave {
         self.container.SetOpacity(0.0)?;
         self.visible = false;
         self.moving = false;
+        self.placement = None;
         Ok(())
     }
 
     fn set_visible(&mut self, compositor: &Compositor, visible: bool) -> Result<()> {
         if self.visible != visible {
-            self.visible = visible;
             let (opacity, duration, delay) = match visible {
                 true => (1.0, FADE_IN, FADE_IN_DELAY),
                 false => (0.0, FADE_OUT, Duration::ZERO),
             };
             fade(compositor, &self.container, opacity, duration, delay)?;
+            self.visible = visible;
         }
         Ok(())
     }
@@ -392,6 +441,7 @@ struct Surfaces {
 
 pub struct Renderer {
     density: island_core::layout::UiDensity,
+    indicator_alert: bool,
     compositor: Compositor,
     _target: DesktopWindowTarget,
     hwnd: HWND,
@@ -524,6 +574,7 @@ impl Renderer {
         let painter = Painter::new(&compositor)?;
         let mut renderer = Self {
             density: island_core::layout::UiDensity::default(),
+            indicator_alert: false,
             compositor,
             _target: target,
             hwnd,
@@ -713,6 +764,8 @@ impl Renderer {
     pub fn pill_for(&self, presentation: Presentation) -> Pill {
         let pill = match presentation {
             Presentation::Compact => Pill { width: self.compact_width, ..Pill::COMPACT },
+            Presentation::Level => self.density.level_layout().pill,
+            Presentation::Alert if self.indicator_alert => self.density.level_layout().pill,
             Presentation::Expanded if self.strip => Pill::EXPANDED_WITH_STRIP,
             other => Pill::for_presentation(other),
         };
@@ -795,6 +848,7 @@ impl Renderer {
         let hidden = frame.presentation == Presentation::Hidden;
         let mut scene = Scene::new(frame, clock, now, scrub, self.wave_motion != WaveMotion::Hidden);
         scene.density = self.density;
+        self.indicator_alert = scene.indicator_alert;
         if frame.presentation == Presentation::Compact {
             self.fit_compact(&mut scene);
         }
@@ -848,6 +902,11 @@ impl Renderer {
 
         if self.scene.as_ref() == Some(&scene) {
             return Ok(resized);
+        }
+        // The companion occupies the wave's old space. Remove the old visual
+        // before painting it, rather than letting both overlap during a fade.
+        if scene.has_task_beside() && self.wave.visible {
+            self.wave.hide_now()?;
         }
         let in_place = self.scene.as_ref().is_some_and(|shown| shown.differs_only_in_value(&scene));
         if in_place {

@@ -50,8 +50,8 @@ const LATER_NOTICES: &str = "
 ";
 
 const LEVEL_NOTICES: &str = "
-# notices_off için ek seçenekler: volume, brightness. Bunlardan biri kapalıysa
-# Windows'un ses/parlaklık göstergesi de görünür kalır.
+# notices_off için ek seçenekler: volume, brightness. Windows'un kendi ses ve
+# parlaklık göstergesi de görünür kalır.
 ";
 
 const WAVE_SETTINGS: &str = "

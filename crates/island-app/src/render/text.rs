@@ -148,6 +148,7 @@ pub struct RingRun {
     pub width: f32,
     pub fraction: f32,
     pub opacity: f32,
+    pub track_color: Option<[f32; 3]>,
 }
 
 /// A square image, cropped to fill its bounds, as covers usually are shown.
@@ -516,7 +517,7 @@ impl Painter {
         let full = D2D1_ELLIPSE { point: center, radiusX: ring.radius, radiusY: ring.radius };
         unsafe {
             // The track fades with the ring, so a ring on its way out leaves nothing.
-            let [r, g, b] = super::tokens::RING_TRACK;
+            let [r, g, b] = ring.track_color.unwrap_or(super::tokens::RING_TRACK);
             let track = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a: ring.opacity }, None)?;
             dc.DrawEllipse(&full, &track, ring.width, None);
 

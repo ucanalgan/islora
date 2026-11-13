@@ -347,9 +347,9 @@ pub fn run() -> Result<()> {
     let notices_off = stored_notices_off();
     let windows_notifications = stored_windows_notifications()
         && !std::env::args().any(|a| a == "--no-real-notices");
-    let osd_enabled = !std::env::args().any(|a| a == "--no-real-notices")
-        && !notices_off.iter().any(|name| name == "volume" || name == "brightness");
-    let native_osd = optional("Windows level flyout", native_osd::NativeOsd::start(osd_enabled));
+    // The shell uses one host for both levels, while brightness event delivery
+    // is not guaranteed for every display. Leave Windows' fallback available.
+    let native_osd = optional("Windows level flyout", native_osd::NativeOsd::start(false));
 
     let mut island = Island::new();
     if std::env::args().any(|a| a == "--local-timers") {
@@ -1686,8 +1686,7 @@ impl App {
 
     fn update_native_osd(&self) {
         if let Some(osd) = &self.native_osd {
-            osd.set_enabled(!self.quiet
-                && !self.notices_off.iter().any(|name| name == "volume" || name == "brightness"));
+            osd.set_enabled(false);
         }
     }
 

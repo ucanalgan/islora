@@ -106,6 +106,8 @@ pub struct Activity {
     pub icon: Option<Icon>,
     /// A percentage to show as a bar, which also selects the slim pill.
     pub level: Option<u8>,
+    /// An informational battery percentage; unlike `level`, it does not alter scheduling.
+    pub indicator_percent: Option<u8>,
     /// From this moment on it outranks everything that is not an interruption.
     pub urgent_at: Option<Millis>,
     /// How it looks as a bubble, unless derived from its media.
@@ -136,6 +138,7 @@ impl Activity {
             media: None,
             icon: None,
             level: None,
+            indicator_percent: None,
             urgent_at: None,
             badge: None,
             timer: None,

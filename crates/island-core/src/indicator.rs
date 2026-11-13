@@ -38,6 +38,8 @@ pub enum Indicator {
     NumLock { on: bool },
     PluggedIn { percent: u8 },
     Unplugged { percent: u8 },
+    /// Power changed before Windows supplied a battery percentage.
+    PowerSource { on_battery: bool },
     LowBattery { percent: u8 },
     BluetoothConnected { name: String },
     BluetoothDisconnected { name: String },
@@ -153,13 +155,17 @@ impl Indicator {
             }
             Indicator::NumLock { on } => notice(Icon::Keyboard, "Num Lock", switch_text(on), now),
             Indicator::PluggedIn { percent } => {
-                notice(Icon::Charging, "Şarj oluyor", format!("%{percent}"), now)
+                Activity { indicator_percent: Some(percent.min(100)), ..notice(Icon::Charging, "Güç bağlı", format!("%{}", percent.min(100)), now) }
             }
             Indicator::Unplugged { percent } => {
-                notice(Icon::Battery, "Pille çalışıyor", format!("%{percent}"), now)
+                Activity { indicator_percent: Some(percent.min(100)), ..notice(Icon::Battery, "Pille çalışıyor", format!("%{}", percent.min(100)), now) }
+            }
+            Indicator::PowerSource { on_battery } => {
+                if on_battery { notice(Icon::Battery, "Pille çalışıyor", "", now) }
+                else { notice(Icon::Charging, "Güç bağlı", "", now) }
             }
             Indicator::LowBattery { percent } => {
-                notice(Icon::BatteryLow, "Pil azaldı", format!("%{percent} kaldı"), now)
+                Activity { indicator_percent: Some(percent.min(100)), ..notice(Icon::BatteryLow, "Pil azaldı", format!("%{} kaldı", percent.min(100)), now) }
             }
             Indicator::BluetoothConnected { name } => {
                 notice(Icon::Bluetooth, "Bağlandı", name, now)
@@ -281,7 +287,7 @@ impl SystemTracker {
         if previous == on_battery {
             return None;
         }
-        let percent = self.battery.unwrap_or(0);
+        let Some(percent) = self.battery else { return Some(Indicator::PowerSource { on_battery }); };
         Some(if on_battery { Indicator::Unplugged { percent } } else { Indicator::PluggedIn { percent } })
     }
 
@@ -418,6 +424,27 @@ pub fn capability_app_name(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_power_change_without_a_battery_reading_does_not_invent_a_percentage() {
+        let mut tracker = SystemTracker::new();
+        assert_eq!(tracker.power_source_changed(false), None);
+        let event = tracker.power_source_changed(true).unwrap();
+        assert_eq!(event, Indicator::PowerSource { on_battery: true });
+        let activity = event.into_activity(0);
+        assert!(activity.detail.is_empty());
+        assert_eq!(activity.level, None);
+    }
+
+    #[test]
+    fn battery_percentages_are_clamped_without_changing_alert_priority() {
+        for value in [0, 1, 25, 50, 75, 99, 100, 255] {
+            let activity = Indicator::LowBattery { percent: value }.into_activity(0);
+            assert_eq!(activity.indicator_percent, Some(value.min(100)));
+            assert_eq!(activity.level, None);
+            assert_eq!(activity.kind, Kind::Alert);
+        }
+    }
 
     fn network(online: bool, wifi: Option<&str>) -> NetworkState {
         NetworkState { online, wifi: wifi.map(str::to_owned), vpn: None }

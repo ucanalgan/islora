@@ -209,6 +209,7 @@ pub struct Scene {
     pub media: Option<MediaScene>,
     pub icon: Option<Icon>,
     pub level: Option<u8>,
+    pub indicator_alert: bool,
     /// For an open timer view: whether it runs, and whether it has buttons.
     pub timer: Option<TimerView>,
     pub home: Option<HomeScene>,
@@ -307,6 +308,7 @@ impl Scene {
                 media: None,
                 icon: None,
                 level: None,
+                indicator_alert: false,
                 timer: None,
                 home,
                 hideable: false,
@@ -357,10 +359,11 @@ impl Scene {
             leading: activity.leading.clone(),
             trailing: activity.trailing.clone(),
             title: activity.title.clone(),
-            detail: activity.detail.clone(),
+            detail: activity.indicator_percent.map_or_else(|| activity.detail.clone(), |value| format!("%{}", value.min(100))),
             media,
             icon: activity.icon,
-            level: activity.level,
+            level: activity.level.or(activity.indicator_percent),
+            indicator_alert: activity.indicator_percent.is_some(),
             timer: activity.timer,
             home: None,
             hideable: activity.kind == Kind::Upcoming,
@@ -387,13 +390,15 @@ impl Scene {
     pub fn fit_key(&self) -> String {
         let cover = self.media.as_ref().map(|media| media.playing);
         format!(
-            "{cover:?}|{}|{}|{}|{}|{}|{}",
+            "{cover:?}|{}|{}|{}|{}|{}|{}|{:?}|{}",
             self.wave_visible,
             self.has_task_beside(),
             self.icon.is_some(),
             self.clock.as_deref().map(all_zeros).unwrap_or_default(),
             self.leading,
             all_zeros(&self.trailing),
+            self.density,
+            if self.density == UiDensity::Detailed && self.media.is_some() { &self.detail } else { "" },
         )
     }
 
@@ -405,7 +410,11 @@ impl Scene {
         let wanted = if let Some(clock) = &self.clock {
             measure(&all_zeros(clock), COMPACT_CLOCK_SIZE, true).ceil() + COMPACT_CLOCK_PADDING * 2.0
         } else if let Some(media) = &self.media {
-            COMPACT_ART_TEXT_X + text(&self.leading, true) + compact_media_end(media, self.companion.as_ref(), self.wave_visible)
+            let title = text(&self.leading, true);
+            let artist = if self.density == UiDensity::Detailed && !self.detail.is_empty() {
+                measure(&self.detail, 10.0, false).ceil() + MEASURE_SPARE
+            } else { 0.0 };
+            COMPACT_ART_TEXT_X + title.max(artist) + compact_media_end(media, self.companion.as_ref(), self.wave_visible)
         } else {
             let gap = if trailing > 0.0 { COMPACT_TEXT_GAP } else { 0.0 };
             self.text_start() + text(&self.leading, true) + gap + trailing + COMPACT_TEXT_END
@@ -513,6 +522,9 @@ impl Scene {
         if let (Presentation::Expanded, Some(timer)) = (self.presentation, self.timer) {
             return self.expanded_timer(timer, &canvas);
         }
+        if self.presentation == Presentation::Alert && self.indicator_alert {
+            return self.level_bar(&canvas);
+        }
         match (self.presentation, &self.media) {
             (Presentation::Compact, Some(media)) => self.compact_media(media, &canvas),
             (Presentation::Expanded, Some(media)) => self.expanded_media(media, &canvas),
@@ -540,6 +552,7 @@ impl Scene {
                 width: 2.2 * canvas.scale,
                 fraction: f32::from(permille) / 1000.0,
                 opacity: 1.0,
+                track_color: None,
             });
         } else if let Some(icon) = self.icon {
             let run = canvas.icon(glyph(icon), canvas.bounds(12.0, 0.0, 24.0, height), 15.0);
@@ -587,27 +600,47 @@ impl Scene {
 
     fn level_bar(&self, canvas: &Canvas) -> Painting<'_> {
         let mut painting = Painting::default();
-        let height = canvas.height;
+        let layout = self.density.level_layout();
+        let icon_bounds = canvas.rect(layout.icon);
+        if self.density != UiDensity::Minimal {
+            painting.shapes.push(ShapeRun { bounds: icon_bounds, radius: 11.0 * canvas.scale, fill: with_alpha(super::tokens::SURFACE, 1.0), border: None });
+        }
         if let Some(icon) = self.icon {
-            painting.texts.push(canvas.icon(glyph(icon), canvas.bounds(14.0, 0.0, 30.0, height), 18.0));
+            painting.texts.push(canvas.icon(glyph(icon), icon_bounds, 18.0));
         }
-
-        const BAR_X: f32 = 52.0;
-        const BAR_HEIGHT: f32 = 4.0;
-        const LABEL_WIDTH: f32 = 42.0;
-        let width = canvas.width - BAR_X - LABEL_WIDTH - 22.0;
-        let filled = width * self.level.unwrap_or(0) as f32 / 100.0;
-        let top = if self.density == UiDensity::Detailed && !self.leading.is_empty() { height - 13.0 } else { (height - BAR_HEIGHT) / 2.0 };
-        if self.density == UiDensity::Detailed && !self.leading.is_empty() {
-            painting.texts.push(canvas.text(&self.leading, canvas.bounds(BAR_X, 4.0, width, 18.0), 10.5, false, 0.8, Align::Leading));
+        let value = self.level.unwrap_or(0).min(100);
+        painting.texts.push(canvas.text(&self.detail, canvas.rect(layout.value), 15.0, true, 1.0, Align::Center));
+        if self.density == UiDensity::Minimal {
+            let ring = layout.progress;
+            painting.rings.push(RingRun { center_x: (ring.x + ring.width / 2.0) * canvas.scale,
+                center_y: (ring.y + ring.height / 2.0) * canvas.scale, radius: 9.0 * canvas.scale,
+                width: 3.0 * canvas.scale, fraction: f32::from(value) / 100.0, opacity: 1.0, track_color: Some(super::tokens::INDICATOR_TRACK) });
+        } else {
+            let label = if self.title.is_empty() { &self.leading } else { &self.title };
+            painting.texts.push(canvas.text(label, canvas.rect(layout.title), 14.0, true, 1.0, Align::Leading));
+            let context = match self.icon { Some(Icon::Muted) => "Sessize alındı", Some(Icon::Volume) => "Sistem sesi", Some(Icon::Brightness) => "Ekran parlaklığı", Some(Icon::Charging) => "Harici güç", Some(Icon::Battery) => "Pil gücü", Some(Icon::BatteryLow) => "Pil seviyesi düşük", _ => "" };
+            painting.texts.push(canvas.text(context, canvas.rect(layout.detail), 11.0, false, 0.65, Align::Leading));
+            let track = layout.progress;
+            painting.shapes.push(ShapeRun { bounds: canvas.rect(track), radius: track.height * canvas.scale / 2.0, fill: with_alpha(super::tokens::INDICATOR_TRACK, 1.0), border: None });
+            if value > 0 {
+                let width = track.width * f32::from(value) / 100.0;
+                painting.shapes.push(ShapeRun { bounds: canvas.bounds(track.x, track.y, width, track.height), radius: (width.min(track.height) / 2.0) * canvas.scale, fill: with_alpha(super::tokens::PRIMARY, 1.0), border: None });
+            }
+            if self.density == UiDensity::Detailed {
+                let chip = match self.icon {
+                    Some(Icon::Muted) => Some("Sessiz"),
+                    Some(Icon::Volume) => Some("Ses açık"),
+                    Some(Icon::Charging) => Some("Güç bağlı"),
+                    Some(Icon::Battery) => Some("Pilde"),
+                    _ => None,
+                };
+                if let Some(label) = chip {
+                    let bounds = canvas.bounds(20.0, 79.0, 76.0, 14.0);
+                    painting.shapes.push(ShapeRun { bounds, radius: 7.0 * canvas.scale, fill: with_alpha(super::tokens::SURFACE, 1.0), border: None });
+                    painting.texts.push(canvas.text(label, bounds, 9.0, false, 0.85, Align::Center));
+                }
+            }
         }
-        painting.bars.push(BarRun { bounds: canvas.bounds(BAR_X, top, width, BAR_HEIGHT), opacity: 0.25 });
-        if filled > 0.0 {
-            painting.bars.push(BarRun { bounds: canvas.bounds(BAR_X, top, filled.max(BAR_HEIGHT), BAR_HEIGHT), opacity: 1.0 });
-        }
-
-        let label_x = canvas.width - LABEL_WIDTH - 16.0;
-        painting.texts.push(canvas.text(&self.detail, canvas.bounds(label_x, 0.0, LABEL_WIDTH, height), 12.5, false, 0.8, Align::Trailing));
         painting
     }
 
@@ -695,6 +728,7 @@ impl Scene {
                             width: 7.0 * canvas.scale,
                             fraction,
                             opacity: 1.0,
+                            track_color: None,
                         });
                         painting.owned_labels.push((format!("%{}", permille / 10), canvas.bounds(TRANSFER_CODE.x, middle_y - 36.0, TRANSFER_CODE.width, 72.0)));
                     }
@@ -822,6 +856,7 @@ impl Scene {
             width: TIMER_RING_WIDTH * canvas.scale,
             fraction: timer.left.map_or(0.0, |left| left as f32 / 1000.0),
             opacity,
+            track_color: None,
         });
 
         let size = if self.title.len() > LONG_COUNTDOWN { LONG_COUNTDOWN_SIZE } else { COUNTDOWN_SIZE };
@@ -993,6 +1028,7 @@ fn task_mark(painting: &mut Painting<'_>, shown: &Shown, canvas: &Canvas, center
             width: 2.2 * canvas.scale,
             fraction: f32::from(*permille) / 1000.0,
             opacity: 1.0,
+            track_color: None,
         }),
         Shown::Done => painting.colored.push((canvas.icon(glyph(Icon::Check), bounds, 15.0), PHONE_COLOR)),
     }
@@ -1011,6 +1047,7 @@ fn timed_mark<'a>(painting: &mut Painting<'a>, badge: &'a Bubble, canvas: &Canva
                     width: 2.0 * canvas.scale,
                     fraction: *percent as f32 / 100.0,
                     opacity: 1.0,
+                    track_color: None,
                 });
             }
             painting.texts.push(canvas.text(value, bounds, 11.0, true, 1.0, Align::Center));
@@ -1066,6 +1103,7 @@ pub fn bubble_painting(bubble: &Bubble, size: f32, scale: f32) -> Painting<'_> {
                     width: 2.0 * scale,
                     fraction: *percent as f32 / 100.0,
                     opacity: 1.0,
+                    track_color: None,
                 });
             }
             let (text_top, text_height) = match icon {
@@ -1479,6 +1517,7 @@ mod tests {
             }),
             icon: None,
             level: None,
+            indicator_alert: false,
             timer: None,
             home: None,
             hideable: false,
@@ -1512,6 +1551,66 @@ mod tests {
     }
 
     #[test]
+    fn compact_media_reserves_space_for_the_wave_or_its_companion_at_each_scale() {
+        for density in UiDensity::ALL {
+            for title in ["Song", "A very long track title that must be clipped safely inside the island"] {
+                for scale in [1.0, 1.25, 1.5, 2.0] {
+                    let mut scene = playing_music(true);
+                    scene.density = density;
+                    scene.leading = title.into();
+                    scene.detail = "A much longer artist name".into();
+                    scene.fit = scene.fit(|text, size, _| text.chars().count() as f32 * size * 0.55);
+                    let pill = Pill { width: scene.fit.width, ..Pill::COMPACT }.scaled(scale);
+                    let painting = scene.painting(pill, scale, Pill::COMPACT.radius, false);
+                    assert!(scene.shows_wave());
+                    let title_run = painting.texts.iter().find(|run| run.text == title).unwrap();
+                    assert!(title_run.bounds.x >= COMPACT_ART_TEXT_X * scale);
+                    assert!(title_run.bounds.x + title_run.bounds.width <= pill.width - WAVE_RESERVED * scale + 0.01);
+                    scene.companion = Some(Companion::Timed(Bubble::Count { value: "3".into(), icon: None, ring: Some(50) }));
+                    assert!(!scene.shows_wave());
+                    scene.fit = scene.fit(|text, size, _| text.chars().count() as f32 * size * 0.55);
+                    let pill = Pill { width: scene.fit.width, ..Pill::COMPACT }.scaled(scale);
+                    let painting = scene.painting(pill, scale, Pill::COMPACT.radius, false);
+                    let title_run = painting.texts.iter().find(|run| run.text == title).unwrap();
+                    assert!(title_run.bounds.x + title_run.bounds.width <= pill.width - TASK_RESERVED * scale + 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detailed_artist_participates_in_compact_width_and_cache_key() {
+        let mut scene = playing_music(false);
+        scene.density = UiDensity::Detailed;
+        scene.leading = "A".into();
+        let measure = |text: &str, size: f32, _: bool| text.len() as f32 * size * 0.5;
+        let before = scene.fit(measure);
+        let key = scene.fit_key();
+        scene.detail = "An artist name much longer than the title".into();
+        assert_ne!(scene.fit_key(), key);
+        assert!(scene.fit(measure).width > before.width);
+    }
+
+    #[test]
+    fn wave_only_runs_for_playing_compact_media_without_a_companion() {
+        let mut scene = playing_music(true);
+        assert!(scene.shows_wave());
+        scene.presentation = Presentation::Expanded;
+        assert!(!scene.shows_wave());
+        scene.presentation = Presentation::Hidden;
+        assert!(!scene.shows_wave());
+        scene.presentation = Presentation::Compact;
+        scene.media.as_mut().unwrap().playing = false;
+        assert!(!scene.shows_wave());
+        scene.media.as_mut().unwrap().playing = true;
+        scene.companion = Some(Companion::Timed(Bubble::Count { value: "1".into(), icon: None, ring: None }));
+        assert!(!scene.shows_wave());
+        scene.companion = None;
+        scene.wave_visible = false;
+        assert!(!scene.shows_wave());
+    }
+
+    #[test]
     fn detailed_system_level_keeps_the_value_and_adds_its_name() {
         let mut scene = playing_music(false);
         scene.presentation = Presentation::Level;
@@ -1521,10 +1620,50 @@ mod tests {
         scene.level = Some(42);
         for density in UiDensity::ALL {
             scene.density = density;
-            let painting = scene.painting(Pill::LEVEL, 1.0, Pill::LEVEL.radius, false);
+            let pill = density.level_layout().pill;
+            let painting = scene.painting(pill, 1.0, pill.radius, false);
             assert!(painting.texts.iter().any(|text| text.text == "42%"));
-            assert_eq!(painting.texts.iter().any(|text| text.text == "Volume"), density == UiDensity::Detailed);
-            assert_eq!(painting.bars.len(), 2);
+            assert_eq!(painting.texts.iter().any(|text| text.text == "Volume"), density != UiDensity::Minimal);
+            assert_eq!(painting.rings.len(), usize::from(density == UiDensity::Minimal));
+            assert_eq!(painting.shapes.len(), if density == UiDensity::Minimal { 0 } else { 3 });
+        }
+    }
+
+    #[test]
+    fn indicator_levels_render_in_bounds_for_all_densities_and_scales() {
+        let mut scene = playing_music(false);
+        scene.presentation = Presentation::Level;
+        scene.media = None;
+        scene.title = "Ses".into();
+        scene.detail = "%75".into();
+        scene.icon = Some(Icon::Volume);
+        for density in UiDensity::ALL {
+            scene.density = density;
+            for value in [0, 1, 25, 50, 75, 99, 100, 255] {
+                scene.level = Some(value);
+                for scale in [1.0, 1.25, 1.5, 2.0] {
+                    let layout = density.level_layout();
+                    let pill = layout.pill.scaled(scale);
+                    let painting = scene.painting(pill, scale, layout.pill.radius, false);
+                    if density == UiDensity::Minimal {
+                        assert_eq!(painting.rings.len(), 1);
+                        assert_eq!(painting.rings[0].fraction, f32::from(value.min(100)) / 100.0);
+                    } else {
+                        for shape in &painting.shapes {
+                            assert!(shape.bounds.x >= 0.0 && shape.bounds.y >= 0.0);
+                            assert!(shape.bounds.x + shape.bounds.width <= pill.width + 0.01);
+                            assert!(shape.bounds.y + shape.bounds.height <= pill.height + 0.01);
+                        }
+                        let chip = usize::from(density == UiDensity::Detailed);
+                        assert_eq!(painting.shapes.len(), if value == 0 { 2 + chip } else { 3 + chip });
+                        if value > 0 {
+                            let filled = painting.shapes[2].bounds.width;
+                            let expected = layout.progress.width * scale * f32::from(value.min(100)) / 100.0;
+                            assert!((filled - expected).abs() < 0.01);
+                        }
+                    }
+                }
+            }
         }
     }
 

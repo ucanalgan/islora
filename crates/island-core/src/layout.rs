@@ -21,6 +21,44 @@ impl UiDensity {
     }
 }
 
+/// Level indicator geometry in logical pixels, shared by the compositor and painter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LevelLayout {
+    pub pill: Pill,
+    pub icon: crate::geometry::Rect,
+    pub title: crate::geometry::Rect,
+    pub detail: crate::geometry::Rect,
+    pub value: crate::geometry::Rect,
+    pub progress: crate::geometry::Rect,
+}
+
+impl UiDensity {
+    pub fn level_layout(self) -> LevelLayout {
+        use crate::geometry::Rect;
+        let rect = |x, y, width, height| Rect { x, y, width, height };
+        match self {
+            Self::Minimal => LevelLayout {
+                pill: Pill { width: 168.0, height: 44.0, radius: 22.0 },
+                icon: rect(14.0, 8.0, 28.0, 28.0), title: rect(0.0, 0.0, 0.0, 0.0),
+                detail: rect(0.0, 0.0, 0.0, 0.0), value: rect(50.0, 8.0, 60.0, 28.0),
+                progress: rect(126.0, 11.0, 22.0, 22.0),
+            },
+            Self::Balanced => LevelLayout {
+                pill: Pill { width: 296.0, height: 70.0, radius: 24.0 },
+                icon: rect(16.0, 12.0, 38.0, 38.0), title: rect(66.0, 9.0, 130.0, 23.0),
+                detail: rect(66.0, 32.0, 130.0, 18.0), value: rect(212.0, 12.0, 64.0, 32.0),
+                progress: rect(20.0, 57.0, 256.0, 3.0),
+            },
+            Self::Detailed => LevelLayout {
+                pill: Pill { width: 320.0, height: 96.0, radius: 26.0 },
+                icon: rect(16.0, 14.0, 42.0, 42.0), title: rect(70.0, 11.0, 160.0, 25.0),
+                detail: rect(70.0, 37.0, 160.0, 19.0), value: rect(242.0, 16.0, 58.0, 30.0),
+                progress: rect(20.0, 68.0, 280.0, 7.0),
+            },
+        }
+    }
+}
+
 /// Size of the transparent window that hosts the pill, in DIPs. The pill can
 /// overshoot its target while springing, so this is larger than `EXPANDED`.
 pub const WINDOW_WIDTH: f32 = 460.0;
@@ -481,6 +519,31 @@ impl Pill {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indicator_layouts_fit_and_keep_content_separate_at_common_scales() {
+        assert_eq!(UiDensity::default(), UiDensity::Balanced);
+        for density in UiDensity::ALL {
+            let layout = density.level_layout();
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                for r in [layout.icon, layout.title, layout.detail, layout.value, layout.progress] {
+                    assert!(r.x >= 0.0 && r.y >= 0.0);
+                    assert!((r.x + r.width) * scale <= layout.pill.width * scale);
+                    assert!((r.y + r.height) * scale <= layout.pill.height * scale);
+                }
+                assert!((layout.pill.width * 1.1) <= WINDOW_WIDTH);
+                assert!((layout.pill.height * 1.1 + TOP_MARGIN) <= WINDOW_HEIGHT);
+            }
+            assert!(layout.icon.x + layout.icon.width <= layout.value.x);
+            if density != UiDensity::Minimal {
+                assert!(layout.title.x + layout.title.width <= layout.value.x);
+                assert!(layout.detail.x + layout.detail.width <= layout.value.x);
+                assert!(layout.progress.y >= layout.detail.y + layout.detail.height);
+            } else {
+                assert!(layout.value.x + layout.value.width <= layout.progress.x);
+            }
+        }
+    }
 
     #[test]
     fn wave_styles_keep_the_old_motion_and_change_its_range_and_pace() {

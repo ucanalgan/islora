@@ -72,7 +72,7 @@ Before replacing settings, Islora keeps the previous complete version in `config
 | `start_mode` | What those buttons start: `focus` for a Windows Focus session, `timer` for Islora's own countdown. | `focus` |
 | `material` | `black`, or `glass` for a frosted view of what is behind the pill. Glass turns black in Energy Saver and with Windows transparency off. | `black` |
 | `island_style` | `island` floats below the top edge, `notch` is attached to it. | `island` |
-| `notices_off` | Islora notices to hide, separated by commas. This includes `volume` and `brightness`. When both are enabled, Islora hides the Windows level flyout. The file lists the names. | empty |
+| `notices_off` | Islora notices to hide, separated by commas. This includes `volume` and `brightness`. The file lists the names. | empty |
 | `task_layout` | How focus, timers or a file send share the island with music: `bubble` keeps the music in the pill and the task in the bubble beside it, `shared` shows both in one pill, `front` gives the pill to the task. | `bubble` |
 | `progress_style` | How the open view shows a send to a phone: `ring`, `edge` for light running along the island's edge, or `fill`. | `ring` |
 | `sound_wave` | `off` removes the wave from the small pill. Energy Saver hides it too, restoring your choice when it ends. | `on` |
@@ -108,7 +108,7 @@ The exception is the sound wave in the small pill while music plays. It loops, s
   scenarios still need hands-on validation.
 - Display selection is available, but reconnect and multi-monitor behavior still
   need broader hardware validation.
-- Windows notification banners still appear beside the island. Islora hides the Windows level flyout while its own volume and brightness notices are enabled.
+- Windows notification banners and the Windows volume and brightness flyout may appear beside the island. The Windows flyout remains enabled because brightness events are not reliable on every display.
 - The first time you send to a phone, Windows asks whether Islora may use the network. Allow it, or the phone cannot connect. The open code says so when the firewall turns phones away on the network you are on.
 - **Doğrudan bağlan** needs a Wi-Fi card that supports Wi-Fi Direct, as most laptops have. The phone shows that its network has no internet while it is joined, which is expected. With Windows' Mobile Hotspot on, the phone has to be on the hotspot already, as Islora cannot read its password to offer a code for joining it.
 - Telling songs from videos rests on what each site sends. A page that sends nothing counts as a video, and an odd title can be misread.

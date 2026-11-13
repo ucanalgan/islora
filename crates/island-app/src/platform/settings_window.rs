@@ -667,6 +667,7 @@ impl SettingsWindow {
                         width: width * scale,
                         fraction: *fraction,
                         opacity,
+                        track_color: None,
                     });
                 }
                 Mark::Edge { fraction } => {
