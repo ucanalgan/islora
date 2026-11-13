@@ -7,7 +7,9 @@ param(
     [int]$Seconds = 15,
     # dwm.exe is noisy, since it also draws everything else on screen, so the
     # wave modes are alternated over several rounds and compared by median.
-    [int]$Rounds = 5
+    [int]$Rounds = 5,
+    # Keep the user's running copy and measure an isolated second instance.
+    [switch]$KeepRunningApp
 )
 
 . "$PSScriptRoot\media-fixture.ps1"
@@ -19,17 +21,32 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class Win {
+  public delegate bool WindowCallback(IntPtr h, IntPtr data);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(WindowCallback cb, IntPtr data);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder name, int size);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string c, string n);
   [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  public static IntPtr IslandFor(uint wanted) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, d) => {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      var name = new System.Text.StringBuilder(256);
+      GetClassNameW(h, name, name.Capacity);
+      if (pid == wanted && name.ToString() == "IsloraWindow") { found = h; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
 }
 '@
 
-function Close-Island {
-    $hwnd = [Win]::FindWindowW('IsloraWindow', [NullString]::Value)
+function Close-Island($Process) {
+    if (-not $Process -or $Process.HasExited) { return }
+    $hwnd = [Win]::IslandFor([uint32]$Process.Id)
     if ($hwnd -ne [IntPtr]::Zero) { [void][Win]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
-    Start-Sleep -Milliseconds 500
-    Get-Process islora -ErrorAction SilentlyContinue | Stop-Process -Force
+    if (-not $Process.WaitForExit(5000)) { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue }
 }
 
 # Reading dwm.exe's process times is denied, so this uses the performance
@@ -84,23 +101,27 @@ function Measure-Window($Process) {
 }
 
 function Measure-Island([string]$Name, [string[]]$Arguments, [switch]$MustShow) {
-    $process = Start-Process -FilePath $Exe -ArgumentList $Arguments -PassThru
-    Start-Sleep -Seconds 2
-    if ($process.HasExited) { throw "$Name`: the app exited during startup with code $($process.ExitCode)" }
-    $sample = Measure-Window $process
-    # A measurement of a pill that was not there would look like a great result.
-    if ($MustShow -and -not [Win]::IsWindowVisible([Win]::FindWindowW('IsloraWindow', [NullString]::Value))) {
-        Close-Island
-        throw "$Name`: the pill was not on screen, so this sample means nothing"
+    $extra = @('--no-real-notices')
+    if ($KeepRunningApp) { $extra += '--second-copy' }
+    $process = Start-Process -FilePath $Exe -ArgumentList ($Arguments + $extra) -WindowStyle Hidden -PassThru
+    try {
+        Start-Sleep -Seconds 2
+        if ($process.HasExited) { throw "$Name`: the app exited during startup with code $($process.ExitCode)" }
+        $sample = Measure-Window $process
+        # A measurement of a pill that was not there would look like a great result.
+        if ($MustShow -and -not [Win]::IsWindowVisible([Win]::IslandFor([uint32]$process.Id))) {
+            throw "$Name`: the pill was not on screen, so this sample means nothing"
+        }
+        $sample.Scenario = $Name
+        [pscustomobject]$sample
+    } finally {
+        Close-Island $process
     }
-    Close-Island
-    $sample.Scenario = $Name
-    [pscustomobject]$sample
 }
 
-Get-Process islora -ErrorAction SilentlyContinue | Stop-Process -Force
-# A killed copy holds the single-instance lock for a moment.
-Start-Sleep -Milliseconds 800
+if (-not $KeepRunningApp -and (Get-Process islora -ErrorAction SilentlyContinue)) {
+    throw 'Islora is already running. Close it normally or use -KeepRunningApp for a non-isolated comparison.'
+}
 
 $fixture = New-MediaFixture (Join-Path $env:TEMP 'islora-measure')
 $playerLog = Join-Path $env:TEMP 'islora-measure\player.txt'
@@ -109,21 +130,24 @@ $playerLog = Join-Path $env:TEMP 'islora-measure\player.txt'
 $playerSeconds = $Rounds * 2 * ($Seconds + 20) + 60
 
 $baseline = Measure-Window $null
-$baseline.Scenario = 'no app (baseline)'
+$baseline.Scenario = if ($KeepRunningApp) { 'desktop including running Islora (baseline)' } else { 'no app (baseline)' }
 $baseline = [pscustomobject]$baseline
 
 $idle = Measure-Island 'idle (hidden)' $NoSession
 $demo = Measure-Island 'demo (all transitions)' ($NoSession + '--demo')
 
 $player = Start-TestPlayer $fixture $playerSeconds $playerLog
-Start-Sleep -Seconds 1
-$samples = @{ always = @(); still = @() }
-foreach ($round in 1..$Rounds) {
-    foreach ($motion in 'always', 'still') {
-        $samples[$motion] += Measure-Island "playing, $motion wave" @('--only-session', $TestSession, '--wave', $motion) -MustShow
+try {
+    Start-Sleep -Seconds 1
+    $samples = @{ always = @(); still = @() }
+    foreach ($round in 1..$Rounds) {
+        foreach ($motion in 'always', 'still') {
+            $samples[$motion] += Measure-Island "playing, $motion wave" @('--only-session', $TestSession, '--wave', $motion) -MustShow
+        }
     }
+} finally {
+    if (-not $player.HasExited) { Stop-Process -Id $player.Id -Force -ErrorAction SilentlyContinue }
 }
-Stop-Process -Id $player.Id -Force -ErrorAction SilentlyContinue
 
 function Get-Median([double[]]$Values) {
     $sorted = @($Values | Sort-Object)

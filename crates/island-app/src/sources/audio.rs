@@ -122,6 +122,27 @@ impl AudioWatch {
         name
     }
 
+    /// Read the actual output state for the controls panel.
+    pub fn output_level(&self) -> Result<Option<(u8, bool)>> {
+        let Some(endpoint) = &self.endpoint else { return Ok(None) };
+        let level = unsafe { endpoint.GetMasterVolumeLevelScalar()? };
+        let muted = unsafe { endpoint.GetMute()? }.as_bool();
+        Ok(Some(((level * 100.0).round().clamp(0.0, 100.0) as u8, muted)))
+    }
+
+    pub fn set_output_level(&self, percent: u8) -> Result<Option<(u8, bool)>> {
+        let Some(endpoint) = &self.endpoint else { return Ok(None) };
+        unsafe { endpoint.SetMasterVolumeLevelScalar(f32::from(percent.min(100)) / 100.0, std::ptr::null())?; }
+        self.output_level()
+    }
+
+    pub fn toggle_output_mute(&self) -> Result<Option<(u8, bool)>> {
+        let Some(endpoint) = &self.endpoint else { return Ok(None) };
+        let muted = unsafe { endpoint.GetMute()? }.as_bool();
+        unsafe { endpoint.SetMute(!muted, std::ptr::null())?; }
+        self.output_level()
+    }
+
     /// Reports its mute state right away, which is the starting point for
     /// telling a change.
     pub fn follow_default_microphone(&mut self) {

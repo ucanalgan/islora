@@ -6,6 +6,7 @@ use crate::schedule::{EVENT_LEAD_MS, Upcoming};
 use crate::shelf::{Shelf, ShelfView};
 use crate::timer::Timer;
 use crate::qr::QrMatrix;
+use crate::quick_controls::QuickControls;
 use crate::transfer::{DONE_MS, Direct, Stage, Transfer, WAIT_MS};
 
 /// How long the clock stays up after a peek with nothing else to show.
@@ -73,6 +74,26 @@ pub struct HomeView {
     pub presets: [u64; TIMER_PRESETS.len()],
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuickCalendarView {
+    pub state: CalendarState,
+    pub coming: Vec<Upcoming>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuickControlsView {
+    pub page: crate::quick_controls::Page,
+    pub focused: Option<crate::quick_controls::Target>,
+    pub calendar: QuickCalendarView,
+    pub presets: [u64; TIMER_PRESETS.len()],
+    pub mode: StartMode,
+    pub modes_offered: bool,
+    pub volume: Option<(u8, bool)>,
+    pub brightness: Option<u8>,
+    pub wifi: crate::quick_controls::RadioState,
+    pub bluetooth: crate::quick_controls::RadioState,
+}
+
 /// A Windows focus session on the island's clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusView {
@@ -105,6 +126,7 @@ pub enum PanelView {
     Drop(DropView),
     Shelf(ShelfView),
     Convert(ConvertView),
+    QuickControls(QuickControlsView),
 }
 
 /// What should be on screen right now.
@@ -153,6 +175,11 @@ pub struct Island {
     /// What the user opened from a bubble, shown ahead of the usual order.
     focused: Option<Kind>,
     home: bool,
+    quick_controls: Option<QuickControls>,
+    quick_volume: Option<(u8, bool)>,
+    quick_brightness: Option<u8>,
+    quick_wifi: crate::quick_controls::RadioState,
+    quick_bluetooth: crate::quick_controls::RadioState,
     chime: bool,
     start_mode: StartMode,
     modes_offered: bool,
@@ -197,7 +224,33 @@ impl Island {
 
     /// Whether a view is open, which a small confirmation would only disturb.
     pub fn is_open(&self) -> bool {
-        self.expanded || self.home || self.panel.is_some() || self.dragging.is_some()
+        self.expanded || self.home || self.panel.is_some() || self.dragging.is_some() || self.quick_controls.is_some()
+    }
+
+    /// Opens Quick Controls in the same island state machine as the other views.
+    pub fn open_quick_controls(&mut self, now: Millis, inactivity: Option<Millis>) {
+        self.close_expanded();
+        self.quick_controls = Some(QuickControls::new(now, inactivity));
+    }
+
+    pub fn quick_controls(&self) -> Option<&QuickControls> { self.quick_controls.as_ref() }
+    pub fn quick_controls_mut(&mut self) -> Option<&mut QuickControls> { self.quick_controls.as_mut() }
+    pub fn set_quick_volume(&mut self, volume: Option<(u8, bool)>) { self.quick_volume = volume; }
+    pub fn set_quick_brightness(&mut self, brightness: Option<u8>) { self.quick_brightness = brightness; }
+    pub fn quick_brightness(&self) -> Option<u8> { self.quick_brightness }
+    pub fn quick_volume(&self) -> Option<(u8, bool)> { self.quick_volume }
+    pub fn set_quick_radios(&mut self, wifi: crate::quick_controls::RadioState, bluetooth: crate::quick_controls::RadioState) {
+        self.quick_wifi = wifi;
+        self.quick_bluetooth = bluetooth;
+    }
+
+    /// The existing calendar schedule, shared with the home view.
+    pub fn quick_calendar(&self) -> QuickCalendarView {
+        QuickCalendarView { state: self.calendar, coming: self.coming_events() }
+    }
+
+    fn coming_events(&self) -> Vec<Upcoming> {
+        self.schedule.iter().filter(|event| !self.is_hidden(event)).take(HOME_EVENTS).cloned().collect()
     }
 
     pub fn set_task_layout(&mut self, layout: TaskLayout) {
@@ -283,6 +336,7 @@ impl Island {
     }
 
     fn open_panel(&mut self, panel: Panel, now: Millis) {
+        self.quick_controls = None;
         self.dragging = None;
         self.home = false;
         self.expanded = false;
@@ -293,6 +347,7 @@ impl Island {
 
     /// Shows the code for the phone, and keeps it open until it is answered.
     pub fn start_transfer(&mut self, transfer: Transfer) {
+        self.quick_controls = None;
         self.dragging = None;
         self.panel = None;
         self.home = false;
@@ -578,6 +633,7 @@ impl Island {
 
     /// Opens the home view from another expanded view.
     pub fn open_home(&mut self) {
+        self.quick_controls = None;
         self.home = true;
         self.collapse_at = None;
     }
@@ -600,6 +656,7 @@ impl Island {
     }
 
     fn open_kind(&mut self, kind: Kind) {
+        self.quick_controls = None;
         self.home = false;
         self.panel = None;
         self.focused = Some(kind);
@@ -613,6 +670,7 @@ impl Island {
     }
 
     fn close_expanded(&mut self) {
+        self.quick_controls = None;
         self.expanded = false;
         self.home = false;
         self.panel = None;
@@ -638,7 +696,7 @@ impl Island {
         self.expire(now);
         match self.top(now).map(|a| a.kind) {
             Some(kind) if kind.is_transient() => self.remove(kind),
-            _ if self.home || self.panel.is_some() => self.close_expanded(),
+            _ if self.home || self.panel.is_some() || self.quick_controls.is_some() => self.close_expanded(),
             Some(_) if self.expanded => self.close_expanded(),
             Some(_) => {
                 self.expanded = true;
@@ -654,6 +712,9 @@ impl Island {
     /// Pointer entered or left the pill.
     pub fn set_hovered(&mut self, hovered: bool, now: Millis) {
         self.hovered = hovered;
+        if let Some(controls) = &mut self.quick_controls {
+            controls.touch(now);
+        }
         if hovered {
             self.collapse_at = None;
             self.peek_until = None;
@@ -676,7 +737,7 @@ impl Island {
             // This one waits to be answered, which the keyboard can do too.
             Some(Kind::TimerFinished) => self.remove(Kind::TimerFinished),
             Some(kind) if kind.is_transient() => {}
-            _ if self.home || self.panel.is_some() => self.close_expanded(),
+            _ if self.home || self.panel.is_some() || self.quick_controls.is_some() => self.close_expanded(),
             Some(_) => {
                 self.expanded = !self.expanded;
                 self.collapse_at = self.expanded.then_some(now + KEYBOARD_EXPAND_MS);
@@ -709,6 +770,9 @@ impl Island {
     pub fn frame(&mut self, now: Millis) -> Frame {
         self.update_derived(now);
         self.expire(now);
+        if self.quick_controls.as_ref().and_then(QuickControls::deadline).is_some_and(|deadline| deadline <= now) {
+            self.close_expanded();
+        }
         if self.collapse_at.is_some_and(|at| at <= now) {
             self.close_expanded();
         }
@@ -729,6 +793,7 @@ impl Island {
         // view a drop opened: they go in the bubble while it stays open.
         let task_open = self.dragging.is_some()
             || self.panel.is_some()
+            || self.quick_controls.is_some()
             || (self.expanded && lasting.first().is_some_and(|a| a.kind == Kind::Transfer));
         let (top, level) = match top {
             Some(level) if level.level.is_some() && task_open => (lasting.first().cloned(), Some(level)),
@@ -743,7 +808,7 @@ impl Island {
             Some(activity) if activity.level.is_some() => Presentation::Level,
             Some(activity) if activity.brief => Presentation::Compact,
             Some(activity) if activity.kind.is_transient() => Presentation::Alert,
-            _ if self.panel.is_some() => Presentation::Expanded,
+            _ if self.panel.is_some() || self.quick_controls.is_some() => Presentation::Expanded,
             _ if self.home => Presentation::Expanded,
             Some(_) if self.expanded => Presentation::Expanded,
             Some(_) => Presentation::Compact,
@@ -754,6 +819,18 @@ impl Island {
         let expanded = presentation == Presentation::Expanded;
         let panel = match (&self.dragging, &self.panel) {
             (Some(view), _) if expanded => Some(PanelView::Drop(view.clone())),
+            (None, _) if expanded && !interrupted && self.quick_controls.is_some() => self.quick_controls.as_ref().map(|controls| PanelView::QuickControls(QuickControlsView {
+                page: controls.page,
+                focused: controls.focused,
+                calendar: self.quick_calendar(),
+                presets: self.presets,
+                mode: self.start_mode,
+                modes_offered: self.modes_offered,
+                volume: self.quick_volume,
+                brightness: self.quick_brightness,
+                wifi: self.quick_wifi,
+                bluetooth: self.quick_bluetooth,
+            })),
             (None, Some(Panel::Shelf)) if expanded && !interrupted => Some(PanelView::Shelf(self.shelf.view())),
             (None, Some(Panel::Convert(view))) if expanded && !interrupted => Some(PanelView::Convert(view.clone())),
             _ => None,
@@ -805,13 +882,7 @@ impl Island {
             secondary,
             companion,
             home: in_home.then(|| HomeView {
-                coming: self
-                    .schedule
-                    .iter()
-                    .filter(|event| !self.is_hidden(event))
-                    .take(HOME_EVENTS)
-                    .cloned()
-                    .collect(),
+                coming: self.coming_events(),
                 calendar: self.calendar,
                 mode: self.start_mode,
                 modes_offered: self.modes_offered,
@@ -1021,6 +1092,7 @@ impl Island {
             .chain(self.schedule.first().map(|event| event.start))
             .chain(self.transfer.as_ref().and_then(|transfer| transfer.next_moment(now, transfer_counts)))
             .chain(self.collapse_at)
+            .chain(self.quick_controls.as_ref().and_then(QuickControls::deadline))
             .chain(self.peek_until)
             .min()
     }
@@ -1029,6 +1101,51 @@ impl Island {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_controls_use_the_island_deadline_and_close_without_removing_media() {
+        let mut island = Island::new();
+        island.upsert_media(snapshot(true), 0);
+        island.open_quick_controls(100, Some(1_000));
+        assert_eq!(island.frame(100).wake_at, Some(1_100));
+        island.quick_controls_mut().unwrap().set_interacting(true, 500);
+        assert!(island.quick_controls().unwrap().deadline().is_none());
+        island.frame(2_000);
+        assert!(island.quick_controls().is_some());
+        island.quick_controls_mut().unwrap().set_interacting(false, 2_000);
+        island.frame(3_000);
+        assert!(island.quick_controls().is_none());
+        assert_eq!(shown(&island.frame(3_000)), Some(Kind::Media));
+    }
+
+    #[test]
+    fn opening_an_existing_view_dismisses_quick_controls() {
+        let mut island = Island::new();
+        island.open_quick_controls(0, None);
+        assert!(island.is_open());
+        let frame = island.frame(0);
+        assert_eq!(frame.presentation, Presentation::Expanded);
+        assert!(matches!(frame.panel, Some(PanelView::QuickControls(_))));
+        island.open_home();
+        assert!(island.quick_controls().is_none());
+        assert!(island.frame(1).home.is_some());
+    }
+
+    #[test]
+    fn quick_calendar_uses_the_existing_schedule_and_connection_state() {
+        let mut island = Island::new();
+        island.set_calendar_state(CalendarState::NotSet);
+        assert_eq!(island.quick_calendar().state, CalendarState::NotSet);
+        assert!(island.quick_calendar().coming.is_empty());
+        island.set_calendar_state(CalendarState::Ready);
+        island.set_schedule(vec![event(30 * MINUTE), event(20 * MINUTE)], 0);
+        let calendar = island.quick_calendar();
+        assert_eq!(calendar.state, CalendarState::Ready);
+        assert_eq!(calendar.coming.len(), 2);
+        assert_eq!(calendar.coming[0].start, 20 * MINUTE);
+        island.open_home();
+        assert_eq!(island.frame(1).home.unwrap().coming, calendar.coming);
+    }
     use crate::drop::DropView;
 
     fn activity(kind: Kind) -> Activity {

@@ -350,7 +350,7 @@ fn answer(stream: &mut TcpStream, status: u16, kind: &str, body: &[u8]) -> io::R
     stream.write_all(body)
 }
 
-fn send_file(stream: &mut TcpStream, shared: &Shared, index: usize, method: Method, range: Option<&str>) -> io::Result<()> {
+fn send_file(stream: &mut impl Write, shared: &Shared, index: usize, method: Method, range: Option<&str>) -> io::Result<()> {
     let file = &shared.files[index];
     let mut source = std::fs::File::open(&file.path)?;
     let size = source.metadata()?.len();
@@ -373,10 +373,15 @@ fn send_file(stream: &mut TcpStream, shared: &Shared, index: usize, method: Meth
         headers.push(("Content-Range", format!("bytes {first}-{last}/{size}")));
     }
     stream.write_all(http::response_head(status, &headers).as_bytes())?;
-    if method == Method::Head || length == 0 {
-        if size == 0 {
-            finish(shared, index, true);
-        }
+    if method == Method::Head {
+        return Ok(());
+    }
+
+    if length == 0 {
+        // A real empty download completes, but it must not decrement another
+        // active download or treat a metadata-only HEAD request as a download.
+        started(shared);
+        finish(shared, index, true);
         return Ok(());
     }
 
@@ -387,7 +392,7 @@ fn send_file(stream: &mut TcpStream, shared: &Shared, index: usize, method: Meth
 }
 
 fn copy_span(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     shared: &Shared,
     source: &mut std::fs::File,
     index: usize,
@@ -462,5 +467,44 @@ fn finish(shared: &Shared, index: usize, reached_the_end: bool) {
 pub fn describe(network: &LocalNetwork) -> String {
     let kind = if network.wifi { "Wi-Fi" } else { "Ethernet" };
     if network.name.is_empty() { kind.to_owned() } else { format!("{kind} · {}", network.name) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn head_for_empty_file_does_not_complete_or_interrupt_a_download() {
+        let path = std::env::temp_dir().join(format!("islora-empty-transfer-{}", std::process::id()));
+        std::fs::write(&path, []).unwrap();
+        let (sender, events) = channel();
+        let shared = Shared {
+            token: "test".into(),
+            files: vec![SharedFile { path: path.to_string_lossy().into_owned(), name: "empty.txt".into(), size: 0 }],
+            total: 0,
+            stop: AtomicBool::new(false),
+            visited: AtomicBool::new(false),
+            progress: Mutex::new(Progress { sent: vec![0], done: vec![false], downloads: 1, connections: 0, deadline: None, reported_percent: 0 }),
+            wake: Condvar::new(),
+            window: 0,
+            events: Mutex::new(sender),
+        };
+        let mut response = Vec::new();
+        send_file(&mut response, &shared, 0, Method::Head, None).unwrap();
+        {
+            let progress = shared.progress.lock().unwrap();
+            assert_eq!(progress.downloads, 1);
+            assert!(!progress.done[0]);
+        }
+        assert!(events.try_recv().is_err());
+        response.clear();
+        send_file(&mut response, &shared, 0, Method::Get, None).unwrap();
+        let progress = shared.progress.lock().unwrap();
+        assert_eq!(progress.downloads, 1);
+        assert!(progress.done[0]);
+        assert!(matches!(events.try_recv(), Ok(SharingEvent::Done)));
+        drop(progress);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 

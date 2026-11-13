@@ -90,6 +90,8 @@ pub enum Action {
     Progress(ProgressStyle),
     MonitorStep { next: bool },
     SoundWave,
+    ReducedMotion,
+    QuickTimeout { next: bool },
     WaveStyle(WaveStyle),
     Notice(usize),
     WindowsNotifications,
@@ -149,6 +151,8 @@ pub struct SettingsState {
     pub progress: ProgressStyle,
     pub monitor_label: String,
     pub sound_wave: bool,
+    pub reduced_motion: bool,
+    pub quick_timeout: u64,
     pub battery_saver: bool,
     pub wave_style: WaveStyle,
     pub notices_off: Vec<String>,
@@ -395,6 +399,14 @@ fn general(view: &mut View, state: &SettingsState) {
         let bounds = Rect { x: LEFT, y, width: 240.0, height: BUTTON_HEIGHT };
         view.control(action, Look::Button, bounds, label);
     }
+    let motion = Rect { x: LEFT, y: 348.0, width: WIDTH, height: ROW_HEIGHT };
+    view.control(Action::ReducedMotion, Look::Switch { on: state.reduced_motion }, motion, "Hareketi azalt");
+    view.caption("Hızlı Kontroller otomatik kapansın", 405.0);
+    let y = 432.0;
+    view.control(Action::QuickTimeout { next: false }, Look::Step, Rect { x: LEFT, y, width: STEP_SIZE, height: STEP_SIZE }, "−");
+    view.control(Action::QuickTimeout { next: true }, Look::Step, Rect { x: LEFT + WIDTH - STEP_SIZE, y, width: STEP_SIZE, height: STEP_SIZE }, "+");
+    let timeout = if state.quick_timeout == 0 { "Kapalı".to_owned() } else { format!("{} sn", state.quick_timeout) };
+    view.labels.push(Label { text: timeout, bounds: Rect { x: LEFT + STEP_SIZE, y, width: WIDTH - STEP_SIZE * 2.0, height: STEP_SIZE }, size: 14.0, bold: true, opacity: 1.0, centered: true });
     view.caption(format!("Islora {}", env!("CARGO_PKG_VERSION")), WINDOW_HEIGHT - 44.0);
 }
 
@@ -440,6 +452,8 @@ mod tests {
             progress: ProgressStyle::Ring,
             monitor_label: "Ekran 1 · Birincil".into(),
             sound_wave: true,
+            reduced_motion: false,
+            quick_timeout: 8,
             battery_saver: false,
             wave_style: WaveStyle::Normal,
             notices_off: Vec::new(),

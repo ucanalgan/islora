@@ -232,6 +232,8 @@ pub fn on_settings_shortcut(x: f32, y: f32) -> bool {
         && (y - SETTINGS_SHORTCUT_Y).abs() <= SETTINGS_SHORTCUT_SIZE / 2.0
 }
 
+pub const QUICK_SHORTCUT: crate::geometry::Rect = crate::geometry::Rect { x: 225.0, y: 84.0, width: 112.0, height: 24.0 };
+
 /// What a preset in the home view starts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StartMode {
@@ -283,7 +285,7 @@ impl StartMode {
 }
 
 /// Timer lengths offered in the home view by default, in minutes.
-pub const TIMER_PRESETS: [u64; 4] = [5, 15, 25, 45];
+pub const TIMER_PRESETS: [u64; 4] = [5, 10, 15, 25];
 pub const PRESET_Y: f32 = 130.0;
 pub const PRESET_WIDTH: f32 = 76.0;
 pub const PRESET_HEIGHT: f32 = 38.0;

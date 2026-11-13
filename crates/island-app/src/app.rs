@@ -20,8 +20,9 @@ use island_core::qr::QrMatrix;
 use island_core::transfer::{NUDGE_MS, Stage, Transfer, WAIT_MS};
 use island_core::layout::{
     TIMER_PRESETS, on_event_hide, on_home_shortcut, on_progress_bar, on_settings_shortcut,
-    preset_at, progress_fraction, WaveStyle,
+    preset_at, progress_fraction, WaveStyle, QUICK_SHORTCUT,
 };
+use island_core::quick_controls::{self, Control as QuickControl, Page as QuickPage, Target as QuickTarget};
 use crate::settings_view::{
     Action, NOTICES, Page, SettingsState, is_calendar_address, stepped_preset, toggled_notice,
 };
@@ -42,7 +43,8 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VIRTUAL_KEY, VK_ESCAPE, VK_SHIFT,
+    VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
+    VK_TAB, VK_UP,
 };
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::UI::Shell::ABN_FULLSCREENAPP;
@@ -70,6 +72,8 @@ use crate::sources::media::{MSG_MEDIA, MediaSource};
 use crate::sources::notifications::{MSG_NOTIFICATIONS, NotificationSource, Update as NotificationUpdate};
 use crate::sources::power::{self, PowerEvent, PowerWatch};
 use crate::sources::privacy::{CameraWatch, MSG_CAMERA};
+use crate::sources::quick_radios::{MSG_QUICK_RADIOS, QuickRadios};
+use crate::sources::quick_brightness::{MSG_QUICK_BRIGHTNESS, QuickBrightness};
 use crate::sources::sharing::{self, MSG_SHARING, SharedFile, Sharing, SharingEvent};
 use crate::sources::keys::KeyEvent;
 use crate::sources::{IndicatorSink, MSG_INDICATOR, MSG_NETWORK_CHANGED, clipboard, keys, network, screenshots};
@@ -147,6 +151,7 @@ static DROP_HANDLERS: drop_target::Handlers = drop_target::Handlers {
 };
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+const MSG_QUICK_FOCUS_LOST: u32 = WM_APP + 28;
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
@@ -170,11 +175,12 @@ enum OpenView {
     Drop,
     Shelf,
     Convert,
+    QuickControls,
     Other,
 }
 
 impl OpenView {
-    /// Views of an activity have a way to the home view in their corner.
+    /// Views of an activity have a way to Quick Controls in their corner.
     fn has_home_shortcut(self) -> bool {
         matches!(self, OpenView::Media | OpenView::Timer | OpenView::Focus | OpenView::Event | OpenView::Other)
     }
@@ -198,6 +204,8 @@ struct App {
     /// What the user chose, which Energy Saver can overrule for a while.
     material: Material,
     sound_wave: bool,
+    reduced_motion: bool,
+    quick_timeout: u64,
     wave_still: bool,
     wave_style: WaveStyle,
     battery_saver: bool,
@@ -211,6 +219,9 @@ struct App {
     clock_timer_watch: ClockTimerWatch,
     clock_timers: Vec<ClockTimer>,
     camera_watch: CameraWatch,
+    quick_radios: QuickRadios,
+    quick_brightness: QuickBrightness,
+    quick_previous_window: Option<HWND>,
     drives: Drives,
     /// Names of the notices the user turned off.
     notices_off: Vec<String>,
@@ -317,9 +328,12 @@ pub fn run() -> Result<()> {
     let selected_monitor = stored_monitor();
     let placement = window::place(island_window, edge_window, stored_style(), selected_monitor.as_deref())?;
     let sound_wave = stored_sound_wave();
+    let reduced_motion = stored_reduced_motion();
+    let quick_timeout = stored_quick_timeout();
+    render::set_reduced_motion(reduced_motion);
     let wave_still = argument_after("--wave").as_deref() == Some("still");
     let wave_style = stored_wave_style();
-    let wave_motion = selected_wave_motion(sound_wave, false, wave_still);
+    let wave_motion = selected_wave_motion(sound_wave, false, wave_still || reduced_motion);
     let renderer = Renderer::new(island_window, placement.scale, placement.width, placement.style, wave_motion, wave_style)?;
 
     if !hotkey::register(island_window) {
@@ -383,6 +397,8 @@ pub fn run() -> Result<()> {
         settings: None,
         material: stored_material(),
         sound_wave,
+        reduced_motion,
+        quick_timeout,
         wave_still,
         wave_style,
         battery_saver: false,
@@ -395,6 +411,9 @@ pub fn run() -> Result<()> {
         clock_timer_watch: ClockTimerWatch::start(island_window),
         clock_timers: Vec::new(),
         camera_watch,
+        quick_radios: QuickRadios::new(island_window),
+        quick_brightness: QuickBrightness::start(island_window),
+        quick_previous_window: None,
         drives: Drives::default(),
         notices_off,
         windows_notifications,
@@ -447,6 +466,10 @@ pub fn run() -> Result<()> {
     };
     app.apply_material();
     app.notification_queue.set_muted(app.muted_apps.clone());
+    if std::env::args().any(|a| a == "--demo-quick-controls") {
+        app.island.open_quick_controls(app.now(), None);
+        app.refresh();
+    }
     if std::env::args().any(|a| a == "--demo-notification") {
         let now = app.now();
         let notice = Notice {
@@ -540,6 +563,9 @@ impl App {
             self.show_next_notification(now);
         }
         let frame = self.island.frame(now);
+        if self.island.quick_controls().is_none() && let Some(previous) = self.quick_previous_window.take() {
+            window::controls_blur(self.island_window, previous);
+        }
         // The code timed out, or the view with it was closed.
         if self.island.transfer_stage().is_none() && (self.sharing.is_some() || self.direct.is_some()) {
             self.sharing = None;
@@ -579,6 +605,7 @@ impl App {
             _ if matches!(frame.panel, Some(PanelView::Drop(_))) => OpenView::Drop,
             _ if matches!(frame.panel, Some(PanelView::Shelf(_))) => OpenView::Shelf,
             _ if matches!(frame.panel, Some(PanelView::Convert(_))) => OpenView::Convert,
+            _ if matches!(frame.panel, Some(PanelView::QuickControls(_))) => OpenView::QuickControls,
             Some(activity) if activity.kind == Kind::Transfer => OpenView::Transfer,
             Some(activity) if activity.media.is_some() => OpenView::Media,
             Some(activity) if activity.kind == Kind::Focus => OpenView::Focus,
@@ -766,8 +793,7 @@ impl App {
         if self.shown == Presentation::Expanded {
             let (pill_x, pill_y) = self.to_expanded_pill(x, y);
             if self.open_view.has_home_shortcut() && on_home_shortcut(pill_x, pill_y) {
-                self.island.open_home();
-                self.refresh();
+                self.open_quick_controls(now);
                 return;
             }
             match self.open_view {
@@ -817,6 +843,10 @@ impl App {
                     }
                 }
                 OpenView::Home => {
+                    if QUICK_SHORTCUT.contains(pill_x, pill_y) {
+                        self.open_quick_controls(now);
+                        return;
+                    }
                     if on_settings_shortcut(pill_x, pill_y) {
                         self.open_settings();
                         return;
@@ -877,6 +907,10 @@ impl App {
                         return;
                     }
                 }
+                OpenView::QuickControls => {
+                    self.on_quick_controls_click(pill_x, pill_y, now);
+                    return;
+                }
                 OpenView::Other => {}
             }
         }
@@ -885,6 +919,185 @@ impl App {
         }
         self.island.click(now);
         self.refresh();
+    }
+
+    fn open_quick_controls(&mut self, now: Millis) {
+        self.island.open_quick_controls(now, (self.quick_timeout != 0).then_some(self.quick_timeout * 1_000));
+        if self.quick_previous_window.is_none() {
+            self.quick_previous_window = window::controls_focus(self.island_window);
+        }
+        self.island.set_quick_radios(quick_controls::RadioState::Unknown, quick_controls::RadioState::Unknown);
+        self.quick_radios.refresh();
+        let volume = self.audio.as_ref().and_then(|audio| match audio.output_level() {
+            Ok(level) => level,
+            Err(error) => { eprintln!("reading output volume failed: {error}"); None }
+        });
+        self.island.set_quick_volume(volume);
+        self.refresh();
+    }
+
+    fn on_quick_radios(&mut self) {
+        if let Some((wifi, bluetooth)) = self.quick_radios.latest() {
+            self.island.set_quick_radios(wifi, bluetooth);
+            if self.island.quick_controls().is_some() { self.refresh(); }
+        }
+    }
+
+    fn on_quick_brightness(&mut self) {
+        if let Some(brightness) = self.quick_brightness.latest() {
+            self.island.set_quick_brightness(brightness);
+            if self.island.quick_controls().is_some() { self.refresh(); }
+        }
+    }
+
+    fn on_quick_controls_click(&mut self, x: f32, y: f32, now: Millis) {
+        let Some(controls) = self.island.quick_controls() else { return };
+        let page = controls.page;
+        if let Some(controls) = self.island.quick_controls_mut() { controls.touch(now); }
+        if quick_controls::SETTINGS_BOUNDS.contains(x, y) {
+            self.island.close_views();
+            self.refresh();
+            self.open_settings();
+            return;
+        }
+        if page != QuickPage::Main && quick_controls::BACK_BOUNDS.contains(x, y) {
+            if let Some(controls) = self.island.quick_controls_mut() { controls.set_page(QuickPage::Main, now); }
+            self.refresh();
+            return;
+        }
+        match page {
+            QuickPage::Main => match QuickTarget::at(x, y) {
+                Some(QuickTarget::Control(QuickControl::Wifi)) => shell::open("ms-settings:network-wifi"),
+                Some(QuickTarget::Control(QuickControl::Bluetooth)) => shell::open("ms-settings:bluetooth"),
+                Some(QuickTarget::Control(control)) => {
+                    let page = match control {
+                        QuickControl::Volume => QuickPage::Volume,
+                        QuickControl::Brightness => QuickPage::Brightness,
+                        QuickControl::Timer => QuickPage::Timer,
+                        QuickControl::Calendar => QuickPage::Calendar,
+                        QuickControl::Wifi | QuickControl::Bluetooth => QuickPage::Main,
+                    };
+                    if page == QuickPage::Brightness {
+                        self.island.set_quick_brightness(None);
+                        self.quick_brightness.read();
+                    }
+                    if let Some(controls) = self.island.quick_controls_mut() { controls.set_page(page, now); }
+                }
+                _ => {}
+            },
+            QuickPage::Timer => {
+                if let Some(index) = preset_at(x, y) {
+                    self.island.close_views();
+                    self.start_preset(index, now);
+                    return;
+                }
+                if let Some(mode) = StartMode::at(x, y) && self.island.set_start_mode(mode) {
+                    settings::remember("start_mode", mode.setting());
+                }
+            }
+            QuickPage::Calendar => {
+                if self.island.quick_calendar().state == CalendarState::NotSet && quick_controls::CALENDAR_SETUP_BOUNDS.contains(x, y) {
+                    self.island.close_views();
+                    self.refresh();
+                    self.open_settings();
+                    self.on_settings_action(Action::Open(Page::Calendar));
+                    return;
+                }
+            }
+            QuickPage::Volume => {
+                let result = if let Some(percent) = quick_controls::slider_percent(x, y) {
+                    self.audio.as_ref().map(|audio| audio.set_output_level(percent))
+                } else if quick_controls::MUTE_BOUNDS.contains(x, y) {
+                    self.audio.as_ref().map(AudioWatch::toggle_output_mute)
+                } else { None };
+                match result {
+                    Some(Ok(Some(level))) => self.island.set_quick_volume(Some(level)),
+                    Some(Ok(None)) => { self.island.set_quick_volume(None); shell::open("ms-settings:sound"); }
+                    Some(Err(error)) => { eprintln!("output control failed: {error}"); shell::open("ms-settings:sound"); }
+                    None if quick_controls::SLIDER_BOUNDS.contains(x, y) => shell::open("ms-settings:sound"),
+                    None => {}
+                }
+            }
+            QuickPage::Brightness => {
+                if let Some(percent) = quick_controls::slider_percent(x, y) {
+                    if self.island.quick_brightness().is_some() { self.quick_brightness.set(percent); }
+                    else { shell::open("ms-settings:display"); }
+                }
+            }
+        }
+        self.refresh();
+    }
+
+    fn on_quick_controls_key(&mut self, key: VIRTUAL_KEY, shift: bool) {
+        let now = self.now();
+        let Some(controls) = self.island.quick_controls() else { return };
+        let page = controls.page;
+        let focused = controls.focused;
+        if key == VK_ESCAPE {
+            self.island.close_views();
+            self.refresh();
+            return;
+        }
+        if focused == Some(QuickTarget::Slider) && matches!(key, VK_LEFT | VK_DOWN | VK_RIGHT | VK_UP) {
+            let current = match page {
+                QuickPage::Volume => self.island.quick_volume().map(|(level, _)| level),
+                QuickPage::Brightness => self.island.quick_brightness(),
+                _ => None,
+            };
+            if let Some(current) = current {
+                let next = if matches!(key, VK_RIGHT | VK_UP) { current.saturating_add(5).min(100) } else { current.saturating_sub(5) };
+                let x = (quick_controls::SLIDER_BOUNDS.x + quick_controls::SLIDER_BOUNDS.width * f32::from(next) / 100.0).min(quick_controls::SLIDER_BOUNDS.x + quick_controls::SLIDER_BOUNDS.width - 0.01);
+                self.on_quick_controls_click(x, quick_controls::SLIDER_BOUNDS.y + 10.0, now);
+            }
+            return;
+        }
+        if matches!(key, VK_TAB | VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN) {
+            let targets = match page {
+                QuickPage::Main => QuickTarget::ALL.to_vec(),
+                QuickPage::Timer => {
+                    let mut targets = vec![QuickTarget::Back];
+                    if let Some(PanelView::QuickControls(view)) = self.island.frame(now).panel && view.modes_offered {
+                        targets.extend(StartMode::ALL.into_iter().map(QuickTarget::TimerMode));
+                    }
+                    targets.extend((0..4).map(QuickTarget::TimerPreset));
+                    targets.push(QuickTarget::Settings);
+                    targets
+                }
+                QuickPage::Calendar => {
+                    let mut targets = vec![QuickTarget::Back];
+                    if self.island.quick_calendar().state == CalendarState::NotSet { targets.push(QuickTarget::CalendarSetup); }
+                    targets.push(QuickTarget::Settings);
+                    targets
+                }
+                QuickPage::Volume => {
+                    let mut targets = vec![QuickTarget::Back, QuickTarget::Slider];
+                    if self.island.quick_volume().is_some() { targets.push(QuickTarget::Mute); }
+                    targets.push(QuickTarget::Settings);
+                    targets
+                }
+                QuickPage::Brightness => vec![QuickTarget::Back, QuickTarget::Slider, QuickTarget::Settings],
+            };
+            let forward = !matches!(key, VK_LEFT | VK_UP) && !(key == VK_TAB && shift);
+            if let Some(controls) = self.island.quick_controls_mut() { controls.move_focus_in(&targets, forward, now); }
+            self.refresh();
+            return;
+        }
+        if !matches!(key, VK_RETURN | VK_SPACE) { return; }
+        let point = match focused {
+            Some(QuickTarget::Control(control)) => {
+                let bounds = control.bounds();
+                Some((bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0))
+            }
+            Some(QuickTarget::Settings) => Some((quick_controls::SETTINGS_BOUNDS.x + 10.0, quick_controls::SETTINGS_BOUNDS.y + 10.0)),
+            Some(QuickTarget::Back) => Some((quick_controls::BACK_BOUNDS.x + 10.0, quick_controls::BACK_BOUNDS.y + 10.0)),
+            Some(QuickTarget::Mute) => Some((quick_controls::MUTE_BOUNDS.x + 10.0, quick_controls::MUTE_BOUNDS.y + 10.0)),
+            Some(QuickTarget::CalendarSetup) => Some((quick_controls::CALENDAR_SETUP_BOUNDS.x + 10.0, quick_controls::CALENDAR_SETUP_BOUNDS.y + 10.0)),
+            Some(QuickTarget::TimerMode(mode)) => { let (left, width) = mode.tab(); Some((left + width / 2.0, island_core::layout::MODE_TAB_Y)) }
+            Some(QuickTarget::TimerPreset(index)) if index < 4 => Some((island_core::layout::preset_center_x(index as usize), island_core::layout::PRESET_Y)),
+            Some(QuickTarget::Slider) if (page == QuickPage::Brightness && self.island.quick_brightness().is_none()) || (page == QuickPage::Volume && self.island.quick_volume().is_none()) => Some((quick_controls::SLIDER_BOUNDS.x + 10.0, quick_controls::SLIDER_BOUNDS.y + 10.0)),
+            _ => None,
+        };
+        if let Some((x, y)) = point { self.on_quick_controls_click(x, y, now); }
     }
 
     /// Beside play, a button skips a track, or jumps within a video that has
@@ -1217,6 +1430,9 @@ impl App {
         self.update_native_osd();
         self.calendar.refresh();
         self.sound_wave = stored_sound_wave();
+        self.reduced_motion = stored_reduced_motion();
+        self.quick_timeout = stored_quick_timeout();
+        render::set_reduced_motion(self.reduced_motion);
         self.wave_style = stored_wave_style();
         if let Err(error) = self.renderer.set_wave_style(self.wave_style) {
             eprintln!("wave style failed: {error}");
@@ -1265,6 +1481,8 @@ impl App {
             progress: self.progress_style,
             monitor_label: self.monitor_label(),
             sound_wave: self.sound_wave,
+            reduced_motion: self.reduced_motion,
+            quick_timeout: self.quick_timeout,
             battery_saver: self.battery_saver,
             wave_style: self.wave_style,
             notices_off: self.notices_off.clone(),
@@ -1328,6 +1546,19 @@ impl App {
                 self.sound_wave = !self.sound_wave;
                 settings::remember("sound_wave", if self.sound_wave { "on" } else { "off" });
                 self.apply_wave();
+            }
+            Action::ReducedMotion => {
+                self.reduced_motion = !self.reduced_motion;
+                settings::remember("reduced_motion", if self.reduced_motion { "on" } else { "off" });
+                render::set_reduced_motion(self.reduced_motion);
+                self.apply_wave();
+            }
+            Action::QuickTimeout { next } => {
+                let choices = config::QUICK_TIMEOUTS;
+                let current = choices.iter().position(|value| *value == self.quick_timeout).unwrap_or(2);
+                let index = if next { (current + 1) % choices.len() } else { (current + choices.len() - 1) % choices.len() };
+                self.quick_timeout = choices[index];
+                settings::remember("quick_controls_timeout", &self.quick_timeout.to_string());
             }
             Action::WaveStyle(style) => {
                 self.wave_style = style;
@@ -1425,7 +1656,7 @@ impl App {
     /// Both the user's off switch and Energy Saver remove the wave. The stored
     /// choice returns when Energy Saver ends.
     fn apply_wave(&mut self) {
-        let motion = selected_wave_motion(self.sound_wave, self.battery_saver, self.wave_still);
+        let motion = selected_wave_motion(self.sound_wave, self.battery_saver, self.wave_still || self.reduced_motion);
         if let Err(error) = self.renderer.set_wave_motion(motion) {
             eprintln!("wave failed: {error}");
         }
@@ -1583,6 +1814,11 @@ impl App {
     /// Returns files to drag out of the island, once a press on the shelf
     /// has moved far enough to be a drag.
     fn on_pointer_moved(&mut self, x: i32, y: i32) -> Option<Vec<String>> {
+        let now = self.now();
+        if let Some(controls) = self.island.quick_controls_mut() {
+            controls.touch(now);
+            self.refresh();
+        }
         if let Some((index, start_x, start_y)) = self.pressed_file {
             let (reach_x, reach_y) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
             if (x - start_x).abs() > reach_x || (y - start_y).abs() > reach_y {
@@ -1998,9 +2234,14 @@ impl App {
             while self.indicators.try_recv().is_ok() {}
             return;
         }
+        let mut quick_updated = false;
         while let Ok(indicator) = self.indicators.try_recv() {
             let shown = match indicator {
-                Indicator::Volume { percent, muted } => self.tracker.volume_changed(percent, muted),
+                Indicator::Volume { percent, muted } => {
+                    self.island.set_quick_volume(Some((percent, muted)));
+                    quick_updated = true;
+                    self.tracker.volume_changed(percent, muted)
+                }
                 Indicator::Microphone { muted } => self.tracker.microphone_changed(muted),
                 other if other.is_about_network() && self.now() < self.network_quiet_until => None,
                 other => Some(other),
@@ -2009,6 +2250,7 @@ impl App {
                 self.show_indicator(indicator);
             }
         }
+        if quick_updated && self.island.quick_controls().is_some() { self.refresh(); }
     }
 
     fn on_power(&mut self, event: PowerEvent) {
@@ -2490,6 +2732,14 @@ fn stored_sound_wave() -> bool {
     settings::read().is_none_or(|text| config::read_sound_wave(&text))
 }
 
+fn stored_reduced_motion() -> bool {
+    settings::read().is_some_and(|text| config::read_reduced_motion(&text))
+}
+
+fn stored_quick_timeout() -> u64 {
+    settings::read().map_or(8, |text| config::read_quick_timeout(&text))
+}
+
 fn stored_wave_style() -> WaveStyle {
     settings::read().map_or(WaveStyle::Normal, |text| config::read_wave_style(&text))
 }
@@ -2575,9 +2825,63 @@ fn clock_text() -> ClockText {
     }
 }
 
+/// The native popup runs its own message loop, so it must not borrow App.
+fn quick_context_menu(hwnd: HWND, target: Option<QuickControl>) -> usize {
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            eprintln!("could not create the Quick Controls menu");
+            return 0;
+        };
+        let label = match target {
+            Some(QuickControl::Wifi) => Some(w!("Wi-Fi ayarları")),
+            Some(QuickControl::Bluetooth) => Some(w!("Bluetooth ayarları")),
+            Some(QuickControl::Volume) => Some(w!("Ses kontrolü")),
+            Some(QuickControl::Brightness) => Some(w!("Parlaklık kontrolü")),
+            Some(QuickControl::Timer) => Some(w!("Zamanlayıcı")),
+            Some(QuickControl::Calendar) => Some(w!("Takvim")),
+            None => None,
+        };
+        let mut ok = AppendMenuW(menu, MF_STRING, 1, w!("Islora ayarları")).is_ok();
+        if let Some(label) = label { ok &= AppendMenuW(menu, MF_STRING, 2, label).is_ok(); }
+        let mut point = POINT::default();
+        ok &= GetCursorPos(&mut point).is_ok();
+        let chosen = if ok {
+            let _ = SetForegroundWindow(hwnd);
+            TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, point.x, point.y, None, hwnd, None).0 as usize
+        } else {
+            eprintln!("could not open the Quick Controls menu");
+            0
+        };
+        let _ = DestroyMenu(menu);
+        chosen
+    }
+}
+
 unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+        WM_KEYDOWN => {
+            let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+            if with_app(|app| {
+                if app.island.quick_controls().is_some() {
+                    app.on_quick_controls_key(VIRTUAL_KEY(wparam.0 as u16), shift);
+                    true
+                } else { false }
+            }) == Some(true) { return LRESULT(0); }
+        }
+        WM_KILLFOCUS => {
+            unsafe { let _ = PostMessageW(Some(hwnd), MSG_QUICK_FOCUS_LOST, WPARAM(0), LPARAM(0)); }
+        }
+        MSG_QUICK_FOCUS_LOST => {
+            with_app(|app| {
+                if app.quick_previous_window.is_some()
+                    && app.island.quick_controls().is_some_and(|controls| !controls.is_interacting())
+                    && unsafe { GetForegroundWindow() } != hwnd {
+                    app.island.close_views();
+                    app.refresh();
+                }
+            });
+        }
         WM_LBUTTONDOWN => {
             let (x, y) = pointer_position(lparam);
             with_app(|app| app.on_button_down(x, y));
@@ -2587,7 +2891,43 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             with_app(|app| app.on_button_up(x));
         }
         WM_RBUTTONDOWN => {
-            with_app(App::mute_shown_app);
+            let (x, y) = pointer_position(lparam);
+            let quick = with_app(|app| {
+                let (x, y) = app.to_expanded_pill(x, y);
+                let now = app.now();
+                let controls = app.island.quick_controls_mut()?;
+                let target = if controls.page == QuickPage::Main {
+                    match QuickTarget::at(x, y) { Some(QuickTarget::Control(control)) => Some(control), _ => None }
+                } else { None };
+                controls.set_interacting(true, now);
+                Some(target)
+            }).flatten();
+            if let Some(target) = quick {
+                let selected = quick_context_menu(hwnd, target);
+                with_app(|app| {
+                    let now = app.now();
+                    if let Some(controls) = app.island.quick_controls_mut() { controls.set_interacting(false, now); }
+                    if selected == 0 && unsafe { GetForegroundWindow() } != hwnd {
+                        app.island.close_views();
+                        app.refresh();
+                        return;
+                    }
+                    match selected {
+                        1 => { app.island.close_views(); app.refresh(); app.open_settings(); }
+                        2 => if let Some(control) = target {
+                            let bounds = control.bounds();
+                            app.on_quick_controls_click(bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0, now);
+                        },
+                        _ => app.refresh(),
+                    }
+                });
+            } else {
+                if with_app(|app| app.shown_notification) == Some(true) {
+                    with_app(App::mute_shown_app);
+                } else {
+                    open_tray_menu(hwnd);
+                }
+            }
         }
         WM_CAPTURECHANGED => {
             with_app(App::on_capture_lost);
@@ -2661,6 +3001,12 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         MSG_NOTIFICATIONS => {
             with_app(App::on_notifications);
+        }
+        MSG_QUICK_RADIOS => {
+            with_app(App::on_quick_radios);
+        }
+        MSG_QUICK_BRIGHTNESS => {
+            with_app(App::on_quick_brightness);
         }
         MSG_INDICATOR => {
             with_app(App::on_indicators);

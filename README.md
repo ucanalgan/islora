@@ -53,7 +53,9 @@ Under **Ayarlar > Düzen**, choose which connected display shows the island. If 
 | Expand or collapse it | Click the pill. Moving the pointer away also collapses it. |
 | Switch to the second thing | Click the bubble. |
 | Keep, send or convert files | Drag them to the middle of the top screen edge, or onto the island, and drop them on one of the three places. Files on the shelf wait in a bubble beside the island: click it to drag them out again. |
-| Start a timer or see your next events | Open the home view with the timer icon or by pressing the shortcut twice. |
+| Open Quick Controls | Expand an activity and select the controls icon at the upper right. The panel offers Wi-Fi, Bluetooth, volume, brightness, timer and calendar controls. |
+| Start a timer or see your next events | Open Quick Controls and choose Timer or Calendar. The home view remains available by pressing the shortcut twice. |
+| Navigate Quick Controls | Use Tab or arrow keys to move focus, Enter or Space to select, and Escape to close. Right-click a control for its native menu. |
 | Choose how focus, timers or a send share the island with music | On the settings window's Düzen page: **Baloncukta**, **Yan yana** or **Öne çıkar**. The picture shows a send as an example and changes with each choice. |
 | Change settings | Open Islora again from the Start menu or its exe, or use the gear in the home view or the tray menu. The window works with the keyboard too: Tab and the arrows move, Enter or Space press, Esc closes. |
 
@@ -61,10 +63,12 @@ Under **Ayarlar > Düzen**, choose which connected display shows the island. If 
 
 The settings window opens by itself on first run, and changes apply at once. Everything in it is stored in `%APPDATA%\Islora\config.toml`, which you can also edit by hand. After editing the file, choose **Takvimi ve ayarları yenile** on the window's Genel page.
 
+Before replacing settings, Islora keeps the previous complete version in `config.toml.bak`. If the main file is missing after an interrupted update, it restores that backup. The backup can contain the private calendar address as well.
+
 | Setting | Meaning | Default |
 |---|---|---|
 | `calendar_ics_url` | Private iCal address of your calendar. Treat it like a password. | empty |
-| `timer_presets` | The four durations in the home view, in minutes. | `5, 15, 25, 45` |
+| `timer_presets` | The four durations in the home view, in minutes. | `5, 10, 15, 25` |
 | `start_mode` | What those buttons start: `focus` for a Windows Focus session, `timer` for Islora's own countdown. | `focus` |
 | `material` | `black`, or `glass` for a frosted view of what is behind the pill. Glass turns black in Energy Saver and with Windows transparency off. | `black` |
 | `island_style` | `island` floats below the top edge, `notch` is attached to it. | `island` |
@@ -73,6 +77,8 @@ The settings window opens by itself on first run, and changes apply at once. Eve
 | `progress_style` | How the open view shows a send to a phone: `ring`, `edge` for light running along the island's edge, or `fill`. | `ring` |
 | `sound_wave` | `off` removes the wave from the small pill. Energy Saver hides it too, restoring your choice when it ends. | `on` |
 | `wave_style` | The moving wave's pace and height: `calm`, `normal` or `lively`. | `normal` |
+| `reduced_motion` | `on` minimizes transitions and keeps the sound wave still. Also available under **Genel**. | `off` |
+| `quick_controls_timeout` | Inactivity before Quick Controls closes: `5`, `8`, `15`, `30`, or `60` seconds; `0` keeps it open. Also available under **Genel**. | `8` |
 | `autostart` | `on` starts Islora with Windows. A new copy turns it on by itself until you turn it off on the Genel page. | `on` |
 
 ## Privacy
@@ -80,6 +86,8 @@ The settings window opens by itself on first run, and changes apply at once. Eve
 Islora has no account and no telemetry. On its own it makes one kind of network request: it downloads the calendar address you set, every 15 minutes.
 
 While you send files to a phone, and only then, Islora runs a small web server on your computer that only devices on the same network can reach. It answers only at an address with a one-time code in it, which the QR code carries, offers only the files you dropped, and stops once they are downloaded or after 5 minutes without a download. The files go straight from your computer to the phone and never through the internet. With **Doğrudan bağlan**, Islora also opens a Wi-Fi network of its own for the same time, with a new random password each time that only the code carries. The computer's internet is not shared over it, and the computer stays on its own network meanwhile. To tell whether a phone can get through, Islora reads Windows' firewall settings and the rules that name it. It never changes the firewall.
+
+These local transfers currently use unencrypted HTTP. The temporary code limits access, but someone able to observe traffic on the network could see the code and file contents. Use a trusted network for sensitive files.
 
 To start with Windows, Islora adds itself to your account's startup list, the one Task Manager shows, and nothing else.
 
@@ -95,8 +103,10 @@ The exception is the sound wave in the small pill while music plays. It loops, s
 
 ## Known limits
 
-- App notifications are not shown yet.
-- Only the primary display is used.
+- Notification access requires permission in Windows; some real-app notification
+  scenarios still need hands-on validation.
+- Display selection is available, but reconnect and multi-monitor behavior still
+  need broader hardware validation.
 - Windows notification banners still appear beside the island. Islora hides the Windows level flyout while its own volume and brightness notices are enabled.
 - The first time you send to a phone, Windows asks whether Islora may use the network. Allow it, or the phone cannot connect. The open code says so when the firewall turns phones away on the network you are on.
 - **Doğrudan bağlan** needs a Wi-Fi card that supports Wi-Fi Direct, as most laptops have. The phone shows that its network has no internet while it is joined, which is expected. With Windows' Mobile Hotspot on, the phone has to be on the hotspot already, as Islora cannot read its password to offer a code for joining it.

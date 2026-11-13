@@ -15,6 +15,8 @@ pub mod network;
 pub mod notifications;
 pub mod power;
 pub mod privacy;
+pub mod quick_radios;
+pub mod quick_brightness;
 mod registry;
 pub mod screenshots;
 pub mod sharing;

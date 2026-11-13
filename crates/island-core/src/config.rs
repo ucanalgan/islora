@@ -61,6 +61,20 @@ pub fn read_sound_wave(text: &str) -> bool {
     read_value(text, "sound_wave").as_deref() != Some("off")
 }
 
+pub const QUICK_TIMEOUTS: [u64; 6] = [0, 5, 8, 15, 30, 60];
+
+/// Zero disables automatic collapse; malformed settings use eight seconds.
+pub fn read_quick_timeout(text: &str) -> u64 {
+    read_value(text, "quick_controls_timeout")
+        .and_then(|value| value.parse().ok())
+        .filter(|value| QUICK_TIMEOUTS.contains(value))
+        .unwrap_or(8)
+}
+
+pub fn read_reduced_motion(text: &str) -> bool {
+    read_value(text, "reduced_motion").as_deref() == Some("on")
+}
+
 pub fn read_wave_style(text: &str) -> WaveStyle {
     let value = read_value(text, "wave_style");
     WaveStyle::ALL.into_iter().find(|style| value.as_deref() == Some(style.setting())).unwrap_or_default()
@@ -155,6 +169,17 @@ mod tests {
         assert!(read_sound_wave(""));
         assert!(read_sound_wave("sound_wave = \"on\""));
         assert!(!read_sound_wave("sound_wave = \"off\""));
+    }
+
+    #[test]
+    fn quick_controls_timeout_and_motion_settings_survive_parsing() {
+        assert_eq!(read_quick_timeout(""), 8);
+        assert_eq!(read_quick_timeout("quick_controls_timeout = \"0\""), 0);
+        assert_eq!(read_quick_timeout("quick_controls_timeout = \"30\""), 30);
+        assert_eq!(read_quick_timeout("quick_controls_timeout = \"999\""), 8);
+        assert!(!read_reduced_motion(""));
+        assert!(read_reduced_motion("reduced_motion = \"on\""));
+        assert!(!read_reduced_motion("reduced_motion = \"off\""));
     }
 
     #[test]

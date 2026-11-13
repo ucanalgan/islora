@@ -1,5 +1,4 @@
 use crate::activity::{Activity, Bubble, Icon, Kind, Millis, TimerView};
-use crate::media::format_time;
 
 /// In its last minute a timer takes the pill, whatever else is going on.
 pub const TIMER_URGENT_MS: Millis = 60_000;
@@ -18,7 +17,7 @@ pub struct Timer {
 
 impl Timer {
     pub fn start(total: Millis, now: Millis) -> Self {
-        Self { total, progress: Progress::Running { ends_at: now + total } }
+        Self { total, progress: Progress::Running { ends_at: now.saturating_add(total) } }
     }
 
     /// One that is already under way, such as a Windows focus session.
@@ -51,19 +50,24 @@ impl Timer {
     pub fn toggle(&mut self, now: Millis) {
         self.progress = match self.progress {
             Progress::Running { ends_at } => Progress::Paused { remaining: ends_at.saturating_sub(now) },
-            Progress::Paused { remaining } => Progress::Running { ends_at: now + remaining },
+            Progress::Paused { remaining } => Progress::Running { ends_at: now.saturating_add(remaining) },
         };
     }
 
     pub fn activity(&self, now: Millis) -> Activity {
         let remaining = self.remaining(now);
         let running = self.ends_at().is_some();
-        let shown = remaining.div_ceil(1000) * 1000;
-        let left = (remaining.min(self.total) * 1000 / self.total.max(1)) as u16;
+        let seconds = remaining.div_ceil(1000);
+        let shown = if seconds >= 3600 {
+            format!("{:02}:{:02}:{:02}", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+        } else {
+            format!("{:02}:{:02}", seconds / 60, seconds % 60)
+        };
+        let left = (u128::from(remaining.min(self.total)) * 1000 / u128::from(self.total.max(1))) as u16;
         Activity {
             leading: "Zamanlayıcı".into(),
-            trailing: format_time(shown),
-            title: format_time(shown),
+            trailing: shown.clone(),
+            title: shown,
             detail: if running { "Zamanlayıcı".into() } else { "Duraklatıldı".into() },
             urgent_at: self.ends_at().map(|ends_at| ends_at.saturating_sub(TIMER_URGENT_MS)),
             icon: Some(Icon::Timer),
@@ -175,6 +179,14 @@ mod tests {
         assert_eq!(left_at(0), Some(1000));
         assert_eq!(left_at(25_000), Some(750));
         assert_eq!(left_at(100_000), Some(0));
+    }
+
+    #[test]
+    fn countdown_and_progress_are_safe_at_duration_boundaries() {
+        assert_eq!(Timer::start(5_000, 0).activity(0).title, "00:05");
+        assert_eq!(Timer::start(3_600_000, 0).activity(0).title, "01:00:00");
+        assert_eq!(Timer::start(0, 0).activity(0).timer.unwrap().left, Some(0));
+        assert_eq!(Timer::paused(u64::MAX, u64::MAX).activity(0).timer.unwrap().left, Some(1000));
     }
 
     #[test]

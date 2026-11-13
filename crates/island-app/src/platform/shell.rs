@@ -53,7 +53,11 @@ pub fn drag_out(window: HWND, paths: &[String]) -> Result<DROPEFFECT> {
 /// Opens a file with the app Windows uses for it.
 pub fn open(path: &str) {
     let path = HSTRING::from(path);
-    unsafe { ShellExecuteW(None, w!("open"), &path, None, None, SW_SHOWNORMAL) };
+    let result = unsafe { ShellExecuteW(None, w!("open"), &path, None, None, SW_SHOWNORMAL) };
+    if result.0 as isize <= 32 {
+        // Avoid logging a potentially sensitive file path or URI.
+        eprintln!("Windows could not open the requested item (shell code {}).", result.0 as isize);
+    }
 }
 
 /// Opens the app that sent a Windows notification. The listener does not offer

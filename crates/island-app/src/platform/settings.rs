@@ -1,6 +1,7 @@
 //! The settings file, which the user edits by hand and may hold a secret.
 
 use std::path::{Path, PathBuf};
+use std::io::{self, Write};
 
 use island_core::config::write_value;
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -20,7 +21,7 @@ calendar_ics_url = \"\"
 /// Also added to files made before these settings existed.
 const START_SETTINGS: &str = "
 # Ana görünümdeki süre düğmeleri, dakika olarak. Tam dört tane olmalı.
-timer_presets = \"5, 15, 25, 45\"
+timer_presets = \"5, 10, 15, 25\"
 
 # Düğmelerin ne başlatacağı: focus, Windows Odak oturumu demek ve Windows
 # ayarlarına göre bildirimleri susturabilir. timer, yalnızca island'ın kendi
@@ -78,7 +79,11 @@ progress_style = \"ring\"
 
 /// Whether this is the very first start on this account.
 pub fn is_first_run() -> bool {
-    path().is_some_and(|path| !path.exists())
+    path().is_some_and(|path| is_new_install(&path))
+}
+
+fn is_new_install(path: &Path) -> bool {
+    !path.exists() && !path.with_extension("toml.bak").is_file()
 }
 
 fn path() -> Option<PathBuf> {
@@ -94,10 +99,17 @@ fn path() -> Option<PathBuf> {
 /// Creates the file on first run, so there is something to fill in.
 pub fn read() -> Option<String> {
     let path = path()?;
+    if let Err(error) = recover(&path) {
+        eprintln!("settings recovery failed: {error}");
+        return None;
+    }
     if !path.exists() {
         std::fs::create_dir_all(path.parent()?).ok()?;
         let text = format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}");
-        std::fs::write(&path, text).ok()?;
+        if let Err(error) = replace(&path, &text) {
+            eprintln!("settings could not be created: {error}");
+            return None;
+        }
     }
     let mut text = std::fs::read_to_string(&path).ok()?;
     let mut added = false;
@@ -117,26 +129,46 @@ pub fn read() -> Option<String> {
             added = true;
         }
     }
-    if added {
-        replace(&path, &text);
+    if added && let Err(error) = replace(&path, &text) {
+        eprintln!("settings could not be saved: {error}");
     }
     Some(text)
 }
 
 /// Stores a choice made in the island. Every other line stays as it was.
 pub fn remember(key: &str, value: &str) {
-    if let (Some(path), Some(text)) = (path(), read()) {
-        replace(&path, &write_value(&text, key, value));
+    if let (Some(path), Some(text)) = (path(), read())
+        && let Err(error) = replace(&path, &write_value(&text, key, value)) {
+        eprintln!("settings could not be saved: {error}");
     }
 }
 
 /// A crash half way must not cost the user their calendar address.
-fn replace(path: &Path, text: &str) {
+fn replace(path: &Path, text: &str) -> io::Result<()> {
     let draft = path.with_extension("toml.new");
-    let written = std::fs::write(&draft, text).and_then(|()| std::fs::rename(&draft, path));
-    if written.is_err() {
-        eprintln!("settings could not be saved");
+    let mut file = std::fs::File::create(&draft)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    if path.exists() {
+        let backup_draft = path.with_extension("toml.bak.new");
+        std::fs::copy(path, &backup_draft)?;
+        std::fs::OpenOptions::new().write(true).open(&backup_draft)?.sync_all()?;
+        std::fs::rename(backup_draft, path.with_extension("toml.bak"))?;
     }
+    std::fs::rename(draft, path)
+}
+
+/// An incomplete draft is never promoted: recover the last completed file.
+fn recover(path: &Path) -> io::Result<()> {
+    let backup = path.with_extension("toml.bak");
+    if !path.exists() && backup.is_file() {
+        let recovery = path.with_extension("toml.recover");
+        std::fs::copy(backup, &recovery)?;
+        std::fs::OpenOptions::new().write(true).open(&recovery)?.sync_all()?;
+        std::fs::rename(recovery, path)?;
+    }
+    Ok(())
 }
 
 pub fn open_in_editor() {
@@ -146,4 +178,28 @@ pub fn open_in_editor() {
         let file = HSTRING::from(format!("\"{}\"", path.display()));
         ShellExecuteW(None, w!("open"), w!("notepad.exe"), &file, None, SW_SHOWNORMAL);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_update_recovers_last_complete_settings() {
+        let folder = std::env::temp_dir().join(format!("islora-settings-recovery-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "original = \"safe\"\n").unwrap();
+        replace(&path, "updated = \"saved\"\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "updated = \"saved\"\n");
+        std::fs::write(path.with_extension("toml.new"), "partial").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(!is_new_install(&path));
+        recover(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original = \"safe\"\n");
+        std::fs::remove_file(path.with_extension("toml.new")).unwrap();
+        std::fs::remove_file(path.with_extension("toml.bak")).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
 }

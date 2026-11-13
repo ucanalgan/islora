@@ -35,7 +35,7 @@ function New-MediaFixture([string]$Directory) {
 }
 
 function Start-TestPlayer($Fixture, [int]$Seconds, [string]$Log) {
-    Start-Process -FilePath $TestPlayerExe -ArgumentList "`"$($Fixture.Wav)`"", "`"$($Fixture.Cover)`"", $Seconds -NoNewWindow -PassThru -RedirectStandardOutput $Log
+    Start-Process -FilePath $TestPlayerExe -ArgumentList "`"$($Fixture.Wav)`"", "`"$($Fixture.Cover)`"", $Seconds -WindowStyle Hidden -PassThru -RedirectStandardOutput $Log
 }
 
 # A made-up calendar: one event soon enough to show, one later. The u with dots

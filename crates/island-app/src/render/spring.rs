@@ -1,9 +1,16 @@
 use std::time::Duration;
+use std::cell::Cell;
 
 use windows::Foundation::TimeSpan;
 use windows::UI::Composition::{CompositionObject, Compositor};
 use windows::core::{HSTRING, Interface, Result, h};
-use windows_numerics::Vector2;
+use windows_numerics::{Vector2, Vector3};
+
+thread_local! { static REDUCED_MOTION: Cell<bool> = const { Cell::new(false) }; }
+
+pub fn set_reduced_motion(reduced: bool) { REDUCED_MOTION.with(|value| value.set(reduced)); }
+pub fn reduced_motion() -> bool { REDUCED_MOTION.with(Cell::get) }
+const INSTANT: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy)]
 pub struct Spring {
@@ -33,6 +40,12 @@ pub fn spring_vector2(
     (x, y): (f32, f32),
     spring: Spring,
 ) -> Result<()> {
+    if reduced_motion() {
+        let animation = compositor.CreateVector2KeyFrameAnimation()?;
+        animation.InsertKeyFrame(1.0, Vector2 { X: x, Y: y })?;
+        animation.SetDuration(TimeSpan::from(INSTANT))?;
+        return target.cast::<CompositionObject>()?.StartAnimation(property, &animation);
+    }
     let animation = compositor.CreateSpringVector2Animation()?;
     animation.SetDampingRatio(spring.damping)?;
     animation.SetPeriod(TimeSpan::from(spring.period))?;
@@ -49,6 +62,12 @@ pub fn spring_vector3(
     (x, y, z): (f32, f32, f32),
     spring: Spring,
 ) -> Result<()> {
+    if reduced_motion() {
+        let animation = compositor.CreateVector3KeyFrameAnimation()?;
+        animation.InsertKeyFrame(1.0, Vector3 { X: x, Y: y, Z: z })?;
+        animation.SetDuration(TimeSpan::from(INSTANT))?;
+        return target.cast::<CompositionObject>()?.StartAnimation(property, &animation);
+    }
     let animation = compositor.CreateSpringVector3Animation()?;
     animation.SetDampingRatio(spring.damping)?;
     animation.SetPeriod(TimeSpan::from(spring.period))?;
@@ -65,6 +84,12 @@ pub fn spring_scalar(
     value: f32,
     spring: Spring,
 ) -> Result<()> {
+    if reduced_motion() {
+        let animation = compositor.CreateScalarKeyFrameAnimation()?;
+        animation.InsertKeyFrame(1.0, value)?;
+        animation.SetDuration(TimeSpan::from(INSTANT))?;
+        return target.cast::<CompositionObject>()?.StartAnimation(property, &animation);
+    }
     let animation = compositor.CreateSpringScalarAnimation()?;
     animation.SetDampingRatio(spring.damping)?;
     animation.SetPeriod(TimeSpan::from(spring.period))?;
@@ -80,6 +105,12 @@ pub fn fade(
     duration: Duration,
     delay: Duration,
 ) -> Result<()> {
+    if reduced_motion() {
+        let animation = compositor.CreateScalarKeyFrameAnimation()?;
+        animation.InsertKeyFrame(1.0, opacity)?;
+        animation.SetDuration(TimeSpan::from(INSTANT))?;
+        return target.cast::<CompositionObject>()?.StartAnimation(h!("Opacity"), &animation);
+    }
     let easing = compositor
         .CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?;
     let animation = compositor.CreateScalarKeyFrameAnimation()?;

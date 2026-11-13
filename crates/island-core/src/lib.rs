@@ -20,6 +20,7 @@ pub mod media;
 pub mod media_kind;
 pub mod notifications;
 pub mod qr;
+pub mod quick_controls;
 pub mod schedule;
 pub mod scheduler;
 pub mod shelf;

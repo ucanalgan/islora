@@ -725,6 +725,7 @@ impl Renderer {
 
     /// Gives way a little under a click, which makes it feel like a real object.
     pub fn press(&self) -> Result<()> {
+        if super::spring::reduced_motion() { return Ok(()); }
         let rest = Vector3 { X: 1.0, Y: 1.0, Z: 1.0 };
         let animation = self.compositor.CreateVector3KeyFrameAnimation()?;
         animation.InsertKeyFrame(0.0, rest)?;
@@ -736,6 +737,7 @@ impl Renderer {
 
     /// A small hop when something finished, such as files reaching a phone.
     pub fn bounce(&self) -> Result<()> {
+        if super::spring::reduced_motion() { return Ok(()); }
         let rest = Vector3 { X: 1.0, Y: 1.0, Z: 1.0 };
         let animation = self.compositor.CreateVector3KeyFrameAnimation()?;
         animation.InsertKeyFrame(0.0, rest)?;

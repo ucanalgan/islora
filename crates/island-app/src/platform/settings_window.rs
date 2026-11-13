@@ -215,13 +215,14 @@ impl SettingsWindow {
         let shapes = preview_shapes(&state);
         // A new choice on the same page moves the preview there. Another page
         // simply shows its own.
-        if state.page == self.state.page && shapes != self.shapes && !self.shapes.is_empty() {
+        if !state.reduced_motion && state.page == self.state.page && shapes != self.shapes && !self.shapes.is_empty() {
             let from = std::mem::replace(&mut self.shapes, shapes);
             self.transition = Some((from, Instant::now()));
             unsafe { SetTimer(Some(self.hwnd), PREVIEW_TIMER, TRANSITION_TICK_MS, None) };
         } else {
             self.shapes = shapes;
             self.transition = None;
+            unsafe { let _ = KillTimer(Some(self.hwnd), PREVIEW_TIMER); }
         }
         self.state = state;
         // A page change can take away what the keyboard was on.

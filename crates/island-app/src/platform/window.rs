@@ -38,6 +38,35 @@ pub fn find_running() -> Option<HWND> {
     unsafe { FindWindowW(ISLAND_CLASS, None) }.ok()
 }
 
+/// Temporarily accepts keyboard focus after the user explicitly opens controls.
+pub fn controls_focus(hwnd: HWND) -> Option<HWND> {
+    unsafe {
+        let previous = GetForegroundWindow();
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_NOACTIVATE.0 as isize));
+        if !SetForegroundWindow(hwnd).as_bool() {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
+            eprintln!("Windows did not give Quick Controls keyboard focus");
+            return None;
+        }
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(hwnd));
+        Some(previous)
+    }
+}
+
+/// Restore the non-activating island and the previous foreground window only
+/// while the island itself still owns focus.
+pub fn controls_blur(hwnd: HWND, previous: HWND) {
+    unsafe {
+        let focused = GetForegroundWindow() == hwnd;
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
+        if focused && !previous.is_invalid() {
+            let _ = SetForegroundWindow(previous);
+        }
+    }
+}
+
 /// Leaves the island out of screenshots, recordings and shared screens, where
 /// it would only be in the way. What is behind it shows there instead.
 pub fn exclude_from_capture(hwnd: HWND) {

@@ -8,7 +8,7 @@ use island_core::layout::{
     HOME_SHORTCUT_X, HOME_SHORTCUT_Y, MEDIA_BUTTON_Y, MODE_TAB_HEIGHT,
     MODE_TAB_Y, MediaButton, PRESET_HEIGHT, PRESET_WIDTH, PRESET_Y, PROGRESS_HEIGHT,
     PROGRESS_WIDTH, PROGRESS_X, PROGRESS_Y, SETTINGS_SHORTCUT_SIZE, SETTINGS_SHORTCUT_X,
-    SETTINGS_SHORTCUT_Y, STRIP_HEIGHT, StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS,
+    SETTINGS_SHORTCUT_Y, STRIP_HEIGHT, StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS, QUICK_SHORTCUT,
     TIMER_RING_RADIUS, TIMER_RING_WIDTH, TIMER_RING_X, TIMER_RING_Y, TimerButton, preset_center_x,
 };
 use island_core::convert::Target;
@@ -25,6 +25,8 @@ use island_core::{
     Bubble, CalendarState, ConvertView, Frame, HomeView, Icon, Kind, Millis, PanelView, Pill,
     Presentation, ProgressStyle, TimerView,
 };
+use island_core::quick_controls::{BACK_BOUNDS, CALENDAR_SETUP_BOUNDS, Control as QuickControl, MUTE_BOUNDS, Page as QuickPage, RadioState, SLIDER_BOUNDS, Target as QuickTarget, SETTINGS_BOUNDS};
+use island_core::scheduler::QuickControlsView;
 
 use super::text::{
     Align, BarRun, Bounds, CodeRun, Font, ImageRun, OutlineRun, Painting, RingRun, ShapeRun, TextRun,
@@ -138,8 +140,6 @@ const COUNTDOWN_SIZE: f32 = 34.0;
 const LONG_COUNTDOWN_SIZE: f32 = 26.0;
 const LONG_COUNTDOWN: usize = "24:13".len();
 const COUNTDOWN_LABEL_WIDTH: f32 = 96.0;
-/// A paused countdown steps back, so its state reads without any words.
-const PAUSED_OPACITY: f32 = 0.55;
 
 /// Digits differ in width, so a countdown is measured as if all were zeros, or
 /// the pill would twitch every second.
@@ -460,6 +460,15 @@ impl Scene {
                 Some(PanelView::Drop(view)) => view.hovered = None,
                 Some(PanelView::Shelf(view)) => view.items.iter_mut().for_each(|item| item.thumbnail = None),
                 Some(PanelView::Convert(view)) => view.busy = false,
+                Some(PanelView::QuickControls(view)) => {
+                    // Level and keyboard-focus updates repaint the current panel
+                    // in place instead of fading the entire panel on every step.
+                    view.focused = None;
+                    view.volume = view.volume.map(|_| (0, false));
+                    view.brightness = view.brightness.map(|_| 0);
+                    view.wifi = RadioState::Unknown;
+                    view.bluetooth = RadioState::Unknown;
+                },
                 None => {}
             }
             scene.trailing.clear();
@@ -489,6 +498,7 @@ impl Scene {
                 PanelView::Drop(view) => drop_panel(view, &canvas),
                 PanelView::Shelf(view) => shelf_panel(view, &canvas),
                 PanelView::Convert(view) => convert_panel(view, &canvas),
+                PanelView::QuickControls(view) => quick_controls_panel(view, &canvas),
             };
         }
         if let Some(home) = &self.home {
@@ -783,7 +793,11 @@ impl Scene {
     fn expanded_timer(&self, timer: TimerView, canvas: &Canvas) -> Painting<'_> {
         let mut painting = Painting::default();
         canvas.home_shortcut(&mut painting);
-        let opacity = if timer.running { 1.0 } else { PAUSED_OPACITY };
+        let opacity = 1.0;
+        let header_icon = self.icon.unwrap_or(Icon::Timer);
+        let header = if header_icon == Icon::Focus { "Focus" } else { "Timer" };
+        painting.texts.push(canvas.icon(glyph(header_icon), canvas.bounds(18.0, 14.0, 20.0, 20.0), 15.0));
+        painting.texts.push(canvas.text(header, canvas.bounds(42.0, 14.0, 74.0, 20.0), 13.0, true, 1.0, Align::Leading));
         painting.rings.push(RingRun {
             center_x: TIMER_RING_X * canvas.scale,
             center_y: TIMER_RING_Y * canvas.scale,
@@ -801,7 +815,12 @@ impl Scene {
             ..canvas.text(&self.title, countdown, size, true, opacity, Align::Center)
         });
         let label = canvas.bounds(TIMER_RING_X - COUNTDOWN_LABEL_WIDTH / 2.0, TIMER_RING_Y + 18.0, COUNTDOWN_LABEL_WIDTH, 18.0);
-        painting.texts.push(canvas.text(&self.detail, label, 11.5, false, 0.6, Align::Center));
+        let state = if header_icon == Icon::Timer && timer.has_controls {
+            if timer.running { "Running" } else { "Paused" }
+        } else {
+            &self.detail
+        };
+        painting.texts.push(canvas.text(state, label, 11.5, false, 0.6, Align::Center));
 
         let buttons: &[TimerButton] = if timer.has_controls { &TimerButton::ALL } else { &[] };
         for &button in buttons {
@@ -812,8 +831,11 @@ impl Scene {
             };
             let half = TIMER_BUTTON_SIZE / 2.0;
             let bounds = canvas.bounds(button.center_x() - half, TIMER_RING_Y - half, TIMER_BUTTON_SIZE, TIMER_BUTTON_SIZE);
-            painting.bars.push(BarRun { bounds, opacity: 0.14 });
-            painting.texts.push(canvas.icon(glyph, bounds, 19.0));
+            painting.shapes.push(ShapeRun { bounds, radius: 12.0 * canvas.scale, fill: with_alpha(super::tokens::SURFACE, 1.0), border: None });
+            let top = TIMER_RING_Y - half;
+            painting.texts.push(canvas.icon(glyph, canvas.bounds(button.center_x() - half, top + 6.0, TIMER_BUTTON_SIZE, 21.0), 16.0));
+            let label = match button { TimerButton::Toggle if timer.running => "Pause", TimerButton::Toggle => "Resume", TimerButton::Cancel => "Stop" };
+            painting.texts.push(canvas.text(label, canvas.bounds(button.center_x() - half, top + 28.0, TIMER_BUTTON_SIZE, 16.0), 10.0, false, 1.0, Align::Center));
         }
         painting
     }
@@ -875,6 +897,9 @@ impl Scene {
         let half = SETTINGS_SHORTCUT_SIZE / 2.0;
         let gear = canvas.bounds(SETTINGS_SHORTCUT_X - half, SETTINGS_SHORTCUT_Y - half, SETTINGS_SHORTCUT_SIZE, SETTINGS_SHORTCUT_SIZE);
         painting.texts.push(canvas.icon(ICON_SETTINGS, gear, 15.0));
+        let quick = canvas.rect(QUICK_SHORTCUT);
+        painting.bars.push(BarRun { bounds: quick, opacity: 0.16 });
+        painting.texts.push(canvas.text("Quick Controls", quick, 10.5, true, 1.0, Align::Center));
         painting
     }
 
@@ -1038,7 +1063,114 @@ pub fn bubble_painting(bubble: &Bubble, size: f32, scale: f32) -> Painting<'_> {
     painting
 }
 
-/// The three places files can go, while they are dragged over the island.
+fn quick_controls_panel<'a>(view: &'a QuickControlsView, canvas: &Canvas) -> Painting<'a> {
+    let mut painting = Painting::default();
+    painting.shapes.push(ShapeRun {
+        bounds: canvas.bounds(0.0, 0.0, canvas.width, canvas.height),
+        radius: canvas.corner * canvas.scale,
+        fill: [0.0, 0.0, 0.0, 1.0],
+        border: None,
+    });
+    let title = match view.page { QuickPage::Main => "Quick Controls", QuickPage::Timer => "Timer", QuickPage::Calendar => "Calendar", QuickPage::Volume => "Volume", QuickPage::Brightness => "Brightness" };
+    let title_x = if view.page == QuickPage::Main { 22.0 } else { 60.0 };
+    painting.texts.push(canvas.text(title, canvas.bounds(title_x, 14.0, 270.0, 32.0), 17.0, true, 1.0, Align::Leading));
+    if view.page != QuickPage::Main {
+        let back = canvas.rect(BACK_BOUNDS);
+        painting.texts.push(canvas.icon("\u{E72B}", back, 17.0));
+        if view.focused == Some(QuickTarget::Back) { quick_focus(&mut painting, canvas, back); }
+    }
+    let settings = canvas.rect(SETTINGS_BOUNDS);
+    painting.texts.push(canvas.icon(ICON_SETTINGS, settings, 18.0));
+    if view.focused == Some(QuickTarget::Settings) {
+        painting.outlines.push(OutlineRun { bounds: settings, radius: 8.0 * canvas.scale, width: 2.0 * canvas.scale, color: [1.0, 1.0, 1.0, 1.0], fraction: 1.0, dash: None, open_top: false });
+    }
+    if view.page == QuickPage::Calendar {
+        if view.calendar.coming.is_empty() {
+            let label = match view.calendar.state { CalendarState::Ready => "No upcoming events", CalendarState::NotSet => "Calendar is not connected", CalendarState::Unreachable => "Calendar is unavailable" };
+            painting.texts.push(canvas.text(label, canvas.bounds(36.0, 62.0, 328.0, 24.0), 14.0, false, 0.8, Align::Center));
+            if view.calendar.state == CalendarState::NotSet {
+                let bounds = canvas.rect(CALENDAR_SETUP_BOUNDS);
+                painting.bars.push(BarRun { bounds, opacity: 0.18 });
+                painting.texts.push(canvas.text("Set up calendar", bounds, 12.0, true, 1.0, Align::Center));
+                if view.focused == Some(QuickTarget::CalendarSetup) { quick_focus(&mut painting, canvas, bounds); }
+            }
+        } else {
+            for (index, event) in view.calendar.coming.iter().enumerate() {
+                let y = 60.0 + index as f32 * 42.0;
+                painting.texts.push(canvas.text(&event.title, canvas.bounds(32.0, y, 220.0, 24.0), 14.0, true, 1.0, Align::Leading));
+                painting.texts.push(canvas.text(&event.when, canvas.bounds(252.0, y, 116.0, 24.0), 12.0, false, 0.7, Align::Trailing));
+            }
+        }
+        return painting;
+    }
+    if view.page == QuickPage::Timer {
+        for mode in StartMode::ALL {
+            let (left, width) = mode.tab();
+            let bounds = canvas.bounds(left, MODE_TAB_Y - MODE_TAB_HEIGHT / 2.0, width, MODE_TAB_HEIGHT);
+            if view.modes_offered {
+                if view.mode == mode { painting.bars.push(BarRun { bounds, opacity: 0.16 }); }
+                painting.texts.push(canvas.text(mode.label(), bounds, 11.5, view.mode == mode, 1.0, Align::Center));
+                if view.focused == Some(QuickTarget::TimerMode(mode)) { quick_focus(&mut painting, canvas, bounds); }
+            }
+        }
+        for (index, minutes) in view.presets.iter().enumerate() {
+            let bounds = canvas.bounds(preset_center_x(index) - PRESET_WIDTH / 2.0, PRESET_Y - PRESET_HEIGHT / 2.0, PRESET_WIDTH, PRESET_HEIGHT);
+            painting.bars.push(BarRun { bounds, opacity: 0.14 });
+            painting.owned_labels.push((format!("{minutes} dk"), bounds));
+            if view.focused == Some(QuickTarget::TimerPreset(index as u8)) { quick_focus(&mut painting, canvas, bounds); }
+        }
+        return painting;
+    }
+    if matches!(view.page, QuickPage::Volume | QuickPage::Brightness) {
+        let value = if view.page == QuickPage::Volume { view.volume.map(|(level, _)| level) } else { view.brightness };
+        if let Some(value) = value {
+            let bounds = canvas.rect(SLIDER_BOUNDS);
+            painting.shapes.push(ShapeRun { bounds, radius: 12.0 * canvas.scale, fill: [0.16, 0.16, 0.18, 1.0], border: None });
+            let fill = canvas.bounds(SLIDER_BOUNDS.x, SLIDER_BOUNDS.y, SLIDER_BOUNDS.width * f32::from(value) / 100.0, SLIDER_BOUNDS.height);
+            painting.shapes.push(ShapeRun { bounds: fill, radius: 12.0 * canvas.scale, fill: [0.6, 0.6, 0.65, 1.0], border: None });
+            painting.owned_labels.push((format!("{value}%"), bounds));
+        } else {
+            painting.texts.push(canvas.text("Use Windows settings", canvas.rect(SLIDER_BOUNDS), 13.0, false, 0.8, Align::Center));
+        }
+        if view.page == QuickPage::Volume && let Some((_, muted)) = view.volume {
+            let bounds = canvas.rect(MUTE_BOUNDS);
+            painting.bars.push(BarRun { bounds, opacity: 0.16 });
+            painting.texts.push(canvas.text(if muted { "Unmute" } else { "Mute" }, bounds, 12.0, true, 1.0, Align::Center));
+            if view.focused == Some(QuickTarget::Mute) { quick_focus(&mut painting, canvas, bounds); }
+        }
+        if view.focused == Some(QuickTarget::Slider) { quick_focus(&mut painting, canvas, canvas.rect(SLIDER_BOUNDS)); }
+        return painting;
+    }
+    for control in QuickControl::ALL {
+        let area = control.bounds();
+        let bounds = canvas.rect(area);
+        painting.shapes.push(ShapeRun { bounds, radius: 12.0 * canvas.scale, fill: [0.16, 0.16, 0.18, 1.0], border: None });
+        let (icon, label) = match control {
+            QuickControl::Wifi => (Icon::Wifi, "Wi-Fi"),
+            QuickControl::Bluetooth => (Icon::Bluetooth, "Bluetooth"),
+            QuickControl::Volume => (Icon::Volume, "Volume"),
+            QuickControl::Brightness => (Icon::Brightness, "Brightness"),
+            QuickControl::Timer => (Icon::Timer, "Timer"),
+            QuickControl::Calendar => (Icon::Calendar, "Calendar"),
+        };
+        painting.texts.push(canvas.icon(glyph(icon), bounds, 22.0));
+        painting.texts.push(canvas.text(label, canvas.bounds(area.x - 4.0, area.y + area.height + 5.0, area.width + 8.0, 18.0), 10.0, false, 0.9, Align::Center));
+        let radio = match control { QuickControl::Wifi => Some(view.wifi), QuickControl::Bluetooth => Some(view.bluetooth), _ => None };
+        if let Some(state) = radio {
+            let label = match state { RadioState::On => "On", RadioState::Off => "Off", RadioState::Unknown => "—" };
+            painting.texts.push(canvas.text(label, canvas.bounds(area.x, area.y + area.height + 22.0, area.width, 14.0), 9.0, false, 0.6, Align::Center));
+        }
+        if view.focused == Some(QuickTarget::Control(control)) {
+            painting.outlines.push(OutlineRun { bounds, radius: 12.0 * canvas.scale, width: 2.0 * canvas.scale, color: [1.0, 1.0, 1.0, 1.0], fraction: 1.0, dash: None, open_top: false });
+        }
+    }
+    painting
+}
+
+fn quick_focus(painting: &mut Painting<'_>, canvas: &Canvas, bounds: Bounds) {
+    painting.outlines.push(OutlineRun { bounds, radius: 8.0 * canvas.scale, width: 2.0 * canvas.scale, color: [1.0, 1.0, 1.0, 1.0], fraction: 1.0, dash: None, open_top: false });
+}
+
 fn drop_panel<'a>(view: &'a DropView, canvas: &Canvas) -> Painting<'a> {
     let mut painting = Painting::default();
     painting.texts.push(canvas.text(&view.header, canvas.rect(HEADER), 13.0, true, 0.9, Align::Center));
@@ -1196,11 +1328,22 @@ impl Canvas {
         }
     }
 
-    /// The way to the home view, which every expanded view has in the same spot.
+    /// The Quick Controls shortcut, in the same spot on expanded activity views.
     fn home_shortcut(&self, painting: &mut Painting<'_>) {
-        let half = HOME_SHORTCUT_SIZE / 2.0;
-        let bounds = self.bounds(HOME_SHORTCUT_X - half, HOME_SHORTCUT_Y - half, HOME_SHORTCUT_SIZE, HOME_SHORTCUT_SIZE);
-        painting.texts.push(self.icon(ICON_STOPWATCH, bounds, 16.0));
+        for (offset, knob) in [(-6.0, -3.0), (0.0, 3.0), (6.0, -2.0)] {
+            painting.shapes.push(ShapeRun {
+                bounds: self.bounds(HOME_SHORTCUT_X - 8.0, HOME_SHORTCUT_Y + offset - 0.75, 16.0, 1.5),
+                radius: self.scale,
+                fill: [0.75, 0.75, 0.75, 1.0],
+                border: None,
+            });
+            painting.shapes.push(ShapeRun {
+                bounds: self.bounds(HOME_SHORTCUT_X + knob - 2.0, HOME_SHORTCUT_Y + offset - 2.0, 4.0, 4.0),
+                radius: 2.0 * self.scale,
+                fill: [1.0, 1.0, 1.0, 1.0],
+                border: None,
+            });
+        }
     }
 
     fn artwork<'a>(&self, painting: &mut Painting<'a>, media: &'a MediaScene, x: f32, y: f32, size: f32, radius: f32) {
@@ -1223,6 +1366,35 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_controls_paint_six_buttons_inside_the_panel_at_supported_scales() {
+        let view = island_core::scheduler::QuickControlsView {
+            page: QuickPage::Main,
+            focused: None,
+            calendar: island_core::scheduler::QuickCalendarView { state: CalendarState::NotSet, coming: Vec::new() },
+            presets: TIMER_PRESETS,
+            mode: StartMode::Focus,
+            modes_offered: true,
+            volume: None,
+            brightness: None,
+            wifi: RadioState::Unknown,
+            bluetooth: RadioState::Unknown,
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let canvas = Canvas { scale, width: 400.0, height: 170.0, corner: 42.0, notch: false };
+            let painting = quick_controls_panel(&view, &canvas);
+            assert_eq!(painting.shapes.len(), 7);
+            assert_eq!(painting.texts.len(), 16);
+            for shape in painting.shapes.iter().skip(1) {
+                assert!(shape.bounds.x >= 0.0 && shape.bounds.x + shape.bounds.width <= canvas.width * scale);
+                assert!(shape.bounds.y >= 0.0 && shape.bounds.y + shape.bounds.height <= canvas.height * scale);
+            }
+            for text in &painting.texts {
+                assert!(text.bounds.x >= 0.0 && text.bounds.x + text.bounds.width <= canvas.width * scale);
+            }
+        }
+    }
 
     fn playing_music(wave_visible: bool) -> Scene {
         Scene {
@@ -1256,6 +1428,33 @@ mod tests {
             reveal: false,
             companion: None,
         }
+    }
+
+    #[test]
+    fn quick_control_level_and_focus_updates_do_not_crossfade_the_panel() {
+        let mut before = playing_music(false);
+        before.presentation = Presentation::Expanded;
+        before.panel = Some(PanelView::QuickControls(QuickControlsView {
+            page: QuickPage::Volume,
+            focused: Some(QuickTarget::Slider),
+            calendar: island_core::scheduler::QuickCalendarView { state: CalendarState::NotSet, coming: Vec::new() },
+            presets: TIMER_PRESETS,
+            mode: StartMode::Focus,
+            modes_offered: true,
+            volume: Some((30, false)),
+            brightness: Some(50),
+            wifi: RadioState::On,
+            bluetooth: RadioState::Unknown,
+        }));
+        let mut after = before.clone();
+        let Some(PanelView::QuickControls(view)) = &mut after.panel else { panic!("quick controls missing") };
+        view.volume = Some((45, true));
+        view.brightness = Some(65);
+        view.focused = Some(QuickTarget::Mute);
+        assert!(before.differs_only_in_value(&after));
+        let Some(PanelView::QuickControls(view)) = &mut after.panel else { unreachable!() };
+        view.page = QuickPage::Brightness;
+        assert!(!before.differs_only_in_value(&after));
     }
 
     #[test]
