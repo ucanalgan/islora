@@ -14,12 +14,13 @@ use windows::Win32::Storage::FileSystem::{
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadDirectoryChangesW,
 };
 use windows::Win32::System::Com::{
-    CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, IBindCtx,
+    CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    IBindCtx,
 };
 use windows::Win32::UI::Shell::{
     ApplicationActivationManager, FOLDERID_Screenshots, IApplicationActivationManager, IShellItem,
-    IShellItemArray, KF_FLAG_CREATE, SHCreateItemFromParsingName, SHCreateShellItemArrayFromShellItem,
-    SHGetKnownFolderPath, ShellExecuteW,
+    IShellItemArray, KF_FLAG_CREATE, SHCreateItemFromParsingName,
+    SHCreateShellItemArrayFromShellItem, SHGetKnownFolderPath, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow, SW_SHOWNORMAL};
 use windows::core::{HSTRING, PCWSTR, Result, w};
@@ -34,9 +35,11 @@ const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const SNIPPING_TOOL: PCWSTR = w!("Microsoft.ScreenSketch_8wekyb3d8bbwe!App");
 
 pub fn start(sink: IndicatorSink) {
-    let spawned = std::thread::Builder::new().name("screenshots".into()).spawn(move || {
-        watch(&sink);
-    });
+    let spawned = std::thread::Builder::new()
+        .name("screenshots".into())
+        .spawn(move || {
+            watch(&sink);
+        });
     if let Err(error) = spawned {
         eprintln!("screenshot thread failed to start: {error}");
     }
@@ -50,7 +53,14 @@ pub fn open(path: String) {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let _ = AllowSetForegroundWindow(ASFW_ANY);
         if open_in_snipping_tool(&path).is_err() {
-            ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_str()), None, None, SW_SHOWNORMAL);
+            ShellExecuteW(
+                None,
+                w!("open"),
+                &HSTRING::from(path.as_str()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            );
         }
     });
 }
@@ -59,9 +69,12 @@ fn open_in_snipping_tool(path: &str) -> Result<()> {
     unsafe {
         let manager: IApplicationActivationManager =
             CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)?;
-        let file: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(path), None::<&IBindCtx>)?;
+        let file: IShellItem =
+            SHCreateItemFromParsingName(&HSTRING::from(path), None::<&IBindCtx>)?;
         let files: IShellItemArray = SHCreateShellItemArrayFromShellItem(&file)?;
-        manager.ActivateForFile(SNIPPING_TOOL, &files, w!("open")).map(|_| ())
+        manager
+            .ActivateForFile(SNIPPING_TOOL, &files, w!("open"))
+            .map(|_| ())
     }
 }
 
@@ -95,7 +108,10 @@ fn watch(sink: &IndicatorSink) {
         if let Some(name) = new_image(&changes, written) {
             let path = Path::new(&folder).join(name);
             let image = read_image(&path);
-            sink.send(Indicator::Screenshot { path: path.display().to_string(), image });
+            sink.send(Indicator::Screenshot {
+                path: path.display().to_string(),
+                image,
+            });
         }
     }
 }
@@ -129,7 +145,8 @@ fn new_image(changes: &[u32], written: u32) -> Option<String> {
         let units = current.FileNameLength as usize / size_of::<u16>();
         let name = unsafe { std::slice::from_raw_parts(current.FileName.as_ptr(), units) };
         let name = String::from_utf16_lossy(name);
-        let is_new = current.Action == FILE_ACTION_ADDED || current.Action == FILE_ACTION_RENAMED_NEW_NAME;
+        let is_new =
+            current.Action == FILE_ACTION_ADDED || current.Action == FILE_ACTION_RENAMED_NEW_NAME;
         if is_new && is_image_file(&name) {
             found = Some(name);
         }

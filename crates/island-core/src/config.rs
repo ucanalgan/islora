@@ -1,12 +1,18 @@
 //! The settings file: one `key = "value"` per line, `#` for comments.
 
-use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout, UiDensity, WaveStyle};
+use crate::layout::{
+    IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout, UiDensity,
+    WaveStyle,
+};
 
 const LONGEST_PRESET_MINUTES: u64 = 720;
 
 fn is_setting(line: &str, key: &str) -> bool {
     let line = line.trim();
-    !line.starts_with('#') && line.split_once('=').is_some_and(|(name, _)| name.trim() == key)
+    !line.starts_with('#')
+        && line
+            .split_once('=')
+            .is_some_and(|(name, _)| name.trim() == key)
 }
 
 /// Finds a setting. Blank values count as missing.
@@ -44,15 +50,25 @@ pub fn write_value(text: &str, key: &str, value: &str) -> String {
 /// Reads four lengths in minutes, such as `5, 15, 25, 45`.
 pub fn read_presets(text: &str) -> Option<[u64; TIMER_PRESETS.len()]> {
     let value = read_value(text, "timer_presets")?;
-    let minutes: Vec<u64> = value.split(',').map(|part| part.trim().parse().ok()).collect::<Option<_>>()?;
+    let minutes: Vec<u64> = value
+        .split(',')
+        .map(|part| part.trim().parse().ok())
+        .collect::<Option<_>>()?;
     let presets: [u64; TIMER_PRESETS.len()] = minutes.try_into().ok()?;
-    presets.iter().all(|minutes| (1..=LONGEST_PRESET_MINUTES).contains(minutes)).then_some(presets)
+    presets
+        .iter()
+        .all(|minutes| (1..=LONGEST_PRESET_MINUTES).contains(minutes))
+        .then_some(presets)
 }
 
 /// The notices the user turned off, such as `wifi, usb`.
 pub fn read_notices_off(text: &str) -> Vec<String> {
     read_value(text, "notices_off").map_or_else(Vec::new, |value| {
-        value.split(',').map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).collect()
+        value
+            .split(',')
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .collect()
     })
 }
 
@@ -77,12 +93,18 @@ pub fn read_reduced_motion(text: &str) -> bool {
 
 pub fn read_ui_density(text: &str) -> UiDensity {
     let value = read_value(text, "ui_density");
-    UiDensity::ALL.into_iter().find(|density| value.as_deref() == Some(density.setting())).unwrap_or_default()
+    UiDensity::ALL
+        .into_iter()
+        .find(|density| value.as_deref() == Some(density.setting()))
+        .unwrap_or_default()
 }
 
 pub fn read_wave_style(text: &str) -> WaveStyle {
     let value = read_value(text, "wave_style");
-    WaveStyle::ALL.into_iter().find(|style| value.as_deref() == Some(style.setting())).unwrap_or_default()
+    WaveStyle::ALL
+        .into_iter()
+        .find(|style| value.as_deref() == Some(style.setting()))
+        .unwrap_or_default()
 }
 
 pub fn read_start_mode(text: &str) -> Option<StartMode> {
@@ -112,7 +134,10 @@ pub fn read_island_style(text: &str) -> Option<IslandStyle> {
 /// The ring is the default, so anything else unknown reads as the ring.
 pub fn read_progress_style(text: &str) -> ProgressStyle {
     let value = read_value(text, "progress_style");
-    ProgressStyle::ALL.into_iter().find(|style| value.as_deref() == Some(style.setting())).unwrap_or_default()
+    ProgressStyle::ALL
+        .into_iter()
+        .find(|style| value.as_deref() == Some(style.setting()))
+        .unwrap_or_default()
 }
 
 /// Whether the user chose to start with Windows or not. `None` until they
@@ -128,7 +153,10 @@ pub fn read_autostart(text: &str) -> Option<bool> {
 /// The bubble is the default, so anything else unknown reads as the bubble.
 pub fn read_task_layout(text: &str) -> TaskLayout {
     let value = read_value(text, "task_layout");
-    TaskLayout::ALL.into_iter().find(|layout| value.as_deref() == Some(layout.setting())).unwrap_or_default()
+    TaskLayout::ALL
+        .into_iter()
+        .find(|layout| value.as_deref() == Some(layout.setting()))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -139,7 +167,10 @@ mod tests {
     fn density_defaults_and_round_trips_without_changing_existing_settings() {
         let old = "task_layout = \"shared\"\ntimer_presets = \"3, 7, 20, 30\"\n";
         assert_eq!(read_ui_density(old), UiDensity::Balanced);
-        assert_eq!(read_ui_density("ui_density = \"invalid\""), UiDensity::Balanced);
+        assert_eq!(
+            read_ui_density("ui_density = \"invalid\""),
+            UiDensity::Balanced
+        );
         for density in UiDensity::ALL {
             let updated = write_value(old, "ui_density", density.setting());
             assert_eq!(read_ui_density(&updated), density);
@@ -159,25 +190,52 @@ mod tests {
 
     #[test]
     fn the_task_layout_is_read_by_its_name() {
-        assert_eq!(read_task_layout("task_layout = \"shared\""), TaskLayout::Shared);
-        assert_eq!(read_task_layout("task_layout = \"front\""), TaskLayout::Front);
-        assert_eq!(read_task_layout("task_layout = \"bubble\""), TaskLayout::Bubble);
-        assert_eq!(read_task_layout("task_layout = \"stack\""), TaskLayout::Bubble);
+        assert_eq!(
+            read_task_layout("task_layout = \"shared\""),
+            TaskLayout::Shared
+        );
+        assert_eq!(
+            read_task_layout("task_layout = \"front\""),
+            TaskLayout::Front
+        );
+        assert_eq!(
+            read_task_layout("task_layout = \"bubble\""),
+            TaskLayout::Bubble
+        );
+        assert_eq!(
+            read_task_layout("task_layout = \"stack\""),
+            TaskLayout::Bubble
+        );
         assert_eq!(read_task_layout(""), TaskLayout::Bubble);
     }
 
     #[test]
     fn the_progress_style_is_read_by_its_name() {
-        assert_eq!(read_progress_style("progress_style = \"edge\""), ProgressStyle::Edge);
-        assert_eq!(read_progress_style("progress_style = \"fill\""), ProgressStyle::Fill);
-        assert_eq!(read_progress_style("progress_style = \"ring\""), ProgressStyle::Ring);
-        assert_eq!(read_progress_style("progress_style = \"spiral\""), ProgressStyle::Ring);
+        assert_eq!(
+            read_progress_style("progress_style = \"edge\""),
+            ProgressStyle::Edge
+        );
+        assert_eq!(
+            read_progress_style("progress_style = \"fill\""),
+            ProgressStyle::Fill
+        );
+        assert_eq!(
+            read_progress_style("progress_style = \"ring\""),
+            ProgressStyle::Ring
+        );
+        assert_eq!(
+            read_progress_style("progress_style = \"spiral\""),
+            ProgressStyle::Ring
+        );
         assert_eq!(read_progress_style(""), ProgressStyle::Ring);
     }
 
     #[test]
     fn turned_off_notices_are_listed_by_name() {
-        assert_eq!(read_notices_off("notices_off = \"wifi, usb,\""), vec!["wifi", "usb"]);
+        assert_eq!(
+            read_notices_off("notices_off = \"wifi, usb,\""),
+            vec!["wifi", "usb"]
+        );
         assert_eq!(read_notices_off("notices_off = \"\""), Vec::<String>::new());
         assert_eq!(read_notices_off(""), Vec::<String>::new());
     }
@@ -204,8 +262,14 @@ mod tests {
     fn the_wave_style_defaults_to_the_existing_motion() {
         assert_eq!(read_wave_style(""), WaveStyle::Normal);
         assert_eq!(read_wave_style("wave_style = \"calm\""), WaveStyle::Calm);
-        assert_eq!(read_wave_style("wave_style = \"lively\""), WaveStyle::Lively);
-        assert_eq!(read_wave_style("wave_style = \"unknown\""), WaveStyle::Normal);
+        assert_eq!(
+            read_wave_style("wave_style = \"lively\""),
+            WaveStyle::Lively
+        );
+        assert_eq!(
+            read_wave_style("wave_style = \"unknown\""),
+            WaveStyle::Normal
+        );
     }
 
     #[test]
@@ -217,22 +281,37 @@ mod tests {
 
     #[test]
     fn the_style_is_read_by_its_name() {
-        assert_eq!(read_island_style("island_style = \"notch\""), Some(IslandStyle::Notch));
-        assert_eq!(read_island_style("island_style = \"island\""), Some(IslandStyle::Island));
+        assert_eq!(
+            read_island_style("island_style = \"notch\""),
+            Some(IslandStyle::Notch)
+        );
+        assert_eq!(
+            read_island_style("island_style = \"island\""),
+            Some(IslandStyle::Island)
+        );
         assert_eq!(read_island_style("island_style = \"baska\""), None);
         assert_eq!(read_island_style(""), None);
     }
 
     #[test]
     fn finds_a_value_with_or_without_quotes() {
-        assert_eq!(read_value("a = \"bir\"\nb = iki\n", "a").as_deref(), Some("bir"));
-        assert_eq!(read_value("a = \"bir\"\nb = iki\n", "b").as_deref(), Some("iki"));
+        assert_eq!(
+            read_value("a = \"bir\"\nb = iki\n", "a").as_deref(),
+            Some("bir")
+        );
+        assert_eq!(
+            read_value("a = \"bir\"\nb = iki\n", "b").as_deref(),
+            Some("iki")
+        );
     }
 
     #[test]
     fn keeps_equals_signs_inside_the_value() {
         let text = "url = \"https://example.com/a.ics?key=1\"";
-        assert_eq!(read_value(text, "url").as_deref(), Some("https://example.com/a.ics?key=1"));
+        assert_eq!(
+            read_value(text, "url").as_deref(),
+            Some("https://example.com/a.ics?key=1")
+        );
     }
 
     #[test]
@@ -249,20 +328,32 @@ mod tests {
     #[test]
     fn writing_changes_only_that_setting() {
         let text = "# not = \"this\"\r\na = \"bir\"\r\nb = \"iki\"\r\n";
-        assert_eq!(write_value(text, "a", "yeni"), "# not = \"this\"\r\na = \"yeni\"\r\nb = \"iki\"\r\n");
+        assert_eq!(
+            write_value(text, "a", "yeni"),
+            "# not = \"this\"\r\na = \"yeni\"\r\nb = \"iki\"\r\n"
+        );
     }
 
     #[test]
     fn writing_a_new_setting_adds_a_line() {
-        assert_eq!(write_value("a = \"bir\"\n", "b", "iki"), "a = \"bir\"\nb = \"iki\"\n");
-        assert_eq!(write_value("a = \"bir\"", "b", "iki"), "a = \"bir\"\nb = \"iki\"\n");
+        assert_eq!(
+            write_value("a = \"bir\"\n", "b", "iki"),
+            "a = \"bir\"\nb = \"iki\"\n"
+        );
+        assert_eq!(
+            write_value("a = \"bir\"", "b", "iki"),
+            "a = \"bir\"\nb = \"iki\"\n"
+        );
         assert_eq!(write_value("", "b", "iki"), "b = \"iki\"\n");
     }
 
     #[test]
     fn writing_ignores_comments_about_the_setting() {
         let text = "# a = \"eski\"\n";
-        assert_eq!(write_value(text, "a", "yeni"), "# a = \"eski\"\na = \"yeni\"\n");
+        assert_eq!(
+            write_value(text, "a", "yeni"),
+            "# a = \"eski\"\na = \"yeni\"\n"
+        );
     }
 
     #[test]
@@ -274,7 +365,10 @@ mod tests {
 
     #[test]
     fn presets_are_four_sensible_lengths() {
-        assert_eq!(read_presets("timer_presets = \"10, 20, 30, 90\""), Some([10, 20, 30, 90]));
+        assert_eq!(
+            read_presets("timer_presets = \"10, 20, 30, 90\""),
+            Some([10, 20, 30, 90])
+        );
         assert_eq!(read_presets("timer_presets = \"10, 20, 30\""), None);
         assert_eq!(read_presets("timer_presets = \"10, 20, 30, 40, 50\""), None);
         assert_eq!(read_presets("timer_presets = \"0, 20, 30, 40\""), None);
@@ -284,7 +378,10 @@ mod tests {
 
     #[test]
     fn an_unknown_start_mode_is_ignored() {
-        assert_eq!(read_start_mode("start_mode = \"focus\""), Some(StartMode::Focus));
+        assert_eq!(
+            read_start_mode("start_mode = \"focus\""),
+            Some(StartMode::Focus)
+        );
         assert_eq!(read_start_mode("start_mode = \"baska\""), None);
     }
 }

@@ -18,8 +18,12 @@ use super::{IndicatorSink, registry};
 
 pub const MSG_CAMERA: u32 = WM_APP + 11;
 
-const MICROPHONE: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone");
-const CAMERA: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam");
+const MICROPHONE: PCWSTR = w!(
+    "Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone"
+);
+const CAMERA: PCWSTR = w!(
+    "Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam"
+);
 /// Far more apps than anyone has, as a limit for a loop over foreign data.
 const MOST_APPS: u32 = 1024;
 
@@ -33,12 +37,16 @@ impl CameraWatch {
     pub fn start(hwnd: HWND, sink: IndicatorSink) -> Self {
         let (publish, updates) = mpsc::channel();
         let window = hwnd.0 as isize;
-        let microphone = std::thread::Builder::new().name("microphone use".into()).spawn(move || {
-            follow_microphone(&sink);
-        });
-        let camera = std::thread::Builder::new().name("camera use".into()).spawn(move || {
-            follow_camera(window, &publish);
-        });
+        let microphone = std::thread::Builder::new()
+            .name("microphone use".into())
+            .spawn(move || {
+                follow_microphone(&sink);
+            });
+        let camera = std::thread::Builder::new()
+            .name("camera use".into())
+            .spawn(move || {
+                follow_camera(window, &publish);
+            });
         if microphone.is_err() || camera.is_err() {
             eprintln!("privacy threads failed to start");
         }
@@ -58,7 +66,9 @@ fn open_below(parent: HKEY, path: PCWSTR) -> Option<HKEY> {
 }
 
 fn follow_microphone(sink: &IndicatorSink) {
-    let Some(store) = open_below(HKEY_CURRENT_USER, MICROPHONE) else { return };
+    let Some(store) = open_below(HKEY_CURRENT_USER, MICROPHONE) else {
+        return;
+    };
     let mut known = apps_in_use(store);
     registry::follow(store, || {
         let now = apps_in_use(store);
@@ -70,7 +80,9 @@ fn follow_microphone(sink: &IndicatorSink) {
 }
 
 fn follow_camera(window: isize, publish: &Sender<Option<String>>) {
-    let Some(store) = open_below(HKEY_CURRENT_USER, CAMERA) else { return };
+    let Some(store) = open_below(HKEY_CURRENT_USER, CAMERA) else {
+        return;
+    };
     let tell = |app: Option<String>| {
         if publish.send(app).is_ok() {
             unsafe {
@@ -111,7 +123,16 @@ fn add_apps_in_use(parent: HKEY, apps: &mut Vec<String>) {
     for index in 0..MOST_APPS {
         let mut length = name.len() as u32;
         let status = unsafe {
-            RegEnumKeyExW(parent, index, Some(PWSTR(name.as_mut_ptr())), &mut length, None, None, None, None)
+            RegEnumKeyExW(
+                parent,
+                index,
+                Some(PWSTR(name.as_mut_ptr())),
+                &mut length,
+                None,
+                None,
+                None,
+                None,
+            )
         };
         if status != ERROR_SUCCESS {
             return;
@@ -120,7 +141,9 @@ fn add_apps_in_use(parent: HKEY, apps: &mut Vec<String>) {
         let started = moment(parent, entry, w!("LastUsedTimeStart"));
         let stopped = moment(parent, entry, w!("LastUsedTimeStop"));
         if started.is_some_and(|started| started != 0) && stopped == Some(0) {
-            apps.push(capability_app_name(&String::from_utf16_lossy(&name[..length as usize])));
+            apps.push(capability_app_name(&String::from_utf16_lossy(
+                &name[..length as usize],
+            )));
         }
     }
 }

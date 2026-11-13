@@ -18,7 +18,13 @@ const SHORTCUTS: [HOT_KEY_MODIFIERS; 2] = [
 /// one, through the top edge, so this is not an error.
 pub fn register(hwnd: HWND) -> bool {
     SHORTCUTS.iter().any(|&modifiers| unsafe {
-        RegisterHotKey(Some(hwnd), SUMMON, modifiers | MOD_NOREPEAT, VK_SPACE.0 as u32).is_ok()
+        RegisterHotKey(
+            Some(hwnd),
+            SUMMON,
+            modifiers | MOD_NOREPEAT,
+            VK_SPACE.0 as u32,
+        )
+        .is_ok()
     })
 }
 

@@ -5,9 +5,12 @@
 use island_core::firewall::{self, Profile, Reach, Rule};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::NetworkManagement::WindowsFirewall::{
-    INetFwPolicy2, INetFwRule, NET_FW_ACTION_ALLOW, NET_FW_PROFILE_TYPE2, NET_FW_RULE_DIR_IN, NetFwPolicy2,
+    INetFwPolicy2, INetFwRule, NET_FW_ACTION_ALLOW, NET_FW_PROFILE_TYPE2, NET_FW_RULE_DIR_IN,
+    NetFwPolicy2,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, IDispatch};
+use windows::Win32::System::Com::{
+    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, IDispatch,
+};
 use windows::Win32::System::Ole::IEnumVARIANT;
 use windows::Win32::System::Variant::{VARIANT, VT_DISPATCH, VariantClear};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
@@ -19,16 +22,25 @@ pub const MSG_FIREWALL: u32 = WM_APP + 23;
 /// `ticket` to tell it apart from the answer for an earlier send.
 pub fn check(window: HWND, profile: u32, ticket: usize) {
     let window = window.0 as isize;
-    let looked = std::thread::Builder::new().name("firewall".into()).spawn(move || {
-        // A firewall that cannot be read is no reason to worry the user.
-        let reach = read(profile).unwrap_or(Reach::Open);
-        let code = match reach {
-            Reach::Open => 0,
-            Reach::Asks => 1,
-            Reach::Blocked => 2,
-        };
-        let _ = unsafe { PostMessageW(Some(HWND(window as _)), MSG_FIREWALL, WPARAM(code), LPARAM(ticket as isize)) };
-    });
+    let looked = std::thread::Builder::new()
+        .name("firewall".into())
+        .spawn(move || {
+            // A firewall that cannot be read is no reason to worry the user.
+            let reach = read(profile).unwrap_or(Reach::Open);
+            let code = match reach {
+                Reach::Open => 0,
+                Reach::Asks => 1,
+                Reach::Blocked => 2,
+            };
+            let _ = unsafe {
+                PostMessageW(
+                    Some(HWND(window as _)),
+                    MSG_FIREWALL,
+                    WPARAM(code),
+                    LPARAM(ticket as isize),
+                )
+            };
+        });
     if looked.is_err() {
         eprintln!("firewall thread failed to start");
     }
@@ -45,7 +57,9 @@ pub fn answer(wparam: WPARAM, lparam: LPARAM) -> (Reach, usize) {
 }
 
 fn read(profile: u32) -> Result<Reach> {
-    let exe = std::env::current_exe().map(|path| path.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let exe = std::env::current_exe()
+        .map(|path| path.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let policy: INetFwPolicy2 = CoCreateInstance(&NetFwPolicy2, None, CLSCTX_ALL)?;

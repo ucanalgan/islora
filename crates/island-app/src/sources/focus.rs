@@ -32,9 +32,14 @@ pub const MSG_FOCUS: u32 = WM_APP + 8;
 /// The Clock app could not take a session. `wParam` holds its length in minutes.
 pub const MSG_FOCUS_REFUSED: u32 = WM_APP + 9;
 
-const STORE: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\DefaultAccount\\Current");
-const RECORD_FOLDER: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\DefaultAccount\\Current\\default$windows.data.shell.focusactivesessions");
-const RECORD: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\DefaultAccount\\Current\\default$windows.data.shell.focusactivesessions\\windows.data.shell.focusactivesessions");
+const STORE: PCWSTR =
+    w!("Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\DefaultAccount\\Current");
+const RECORD_FOLDER: PCWSTR = w!(
+    "Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\DefaultAccount\\Current\\default$windows.data.shell.focusactivesessions"
+);
+const RECORD: PCWSTR = w!(
+    "Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\DefaultAccount\\Current\\default$windows.data.shell.focusactivesessions\\windows.data.shell.focusactivesessions"
+);
 const END_LINK: &str = "ms-clock://resetfocustimer";
 const CLOCK_SERVICE: &str = "ms-alarmsService";
 const CLOCK_PACKAGE: &str = "Microsoft.WindowsAlarms_8wekyb3d8bbwe";
@@ -70,7 +75,12 @@ pub fn start_session(hwnd: HWND, minutes: u64) {
         }
         if !open_link(&link) {
             unsafe {
-                let _ = PostMessageW(Some(HWND(window as _)), MSG_FOCUS_REFUSED, WPARAM(minutes as usize), LPARAM(0));
+                let _ = PostMessageW(
+                    Some(HWND(window as _)),
+                    MSG_FOCUS_REFUSED,
+                    WPARAM(minutes as usize),
+                    LPARAM(0),
+                );
             }
             return;
         }
@@ -82,7 +92,9 @@ pub fn start_session(hwnd: HWND, minutes: u64) {
 }
 
 fn focus_is_active() -> bool {
-    FocusSessionManager::GetDefault().and_then(|manager| manager.IsFocusActive()).unwrap_or(false)
+    FocusSessionManager::GetDefault()
+        .and_then(|manager| manager.IsFocusActive())
+        .unwrap_or(false)
 }
 
 /// Returns whether it got there in time.
@@ -124,7 +136,8 @@ fn open_link_later(link: &'static str) {
 
 /// Returns whether Windows found an app for it.
 fn open_link(link: &str) -> bool {
-    let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(link), None, None, SW_HIDE) };
+    let result =
+        unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(link), None, None, SW_HIDE) };
     // Values up to 32 are error codes.
     result.0 as isize > 32
 }
@@ -141,9 +154,11 @@ impl FocusWatch {
         let changed = unsafe { CreateEventW(None, false, false, None) }.ok();
         if let Some(event) = changed {
             let signal = event.0 as isize;
-            let spawned = std::thread::Builder::new().name("focus".into()).spawn(move || {
-                run(window, HANDLE(signal as _), publish);
-            });
+            let spawned = std::thread::Builder::new()
+                .name("focus".into())
+                .spawn(move || {
+                    run(window, HANDLE(signal as _), publish);
+                });
             if let Err(error) = spawned {
                 eprintln!("focus thread failed to start: {error}");
             }
@@ -181,14 +196,14 @@ fn run(window: isize, changed: HANDLE, publish: Sender<FocusStatus>) {
     let manager = FocusSessionManager::GetDefault().ok();
     let signal = changed.0 as isize;
     if let Some(manager) = &manager {
-        let _ = manager.IsFocusActiveChanged(&TypedEventHandler::<FocusSessionManager, IInspectable>::new(
-            move |_, _| {
+        let _ = manager.IsFocusActiveChanged(
+            &TypedEventHandler::<FocusSessionManager, IInspectable>::new(move |_, _| {
                 unsafe {
                     let _ = SetEvent(HANDLE(signal as _));
                 }
                 Ok(())
-            },
-        ));
+            }),
+        );
     }
 
     let mut folder = None;
@@ -247,12 +262,14 @@ fn read_status(at_startup: bool) -> FocusStatus {
 /// Gives up after a while, leaving the waiting call on its own thread.
 fn ask_clock() -> Option<ClockFocus> {
     let (reply, answer) = mpsc::channel();
-    let asking = std::thread::Builder::new().name("focus clock".into()).spawn(move || {
-        unsafe {
-            let _ = RoInitialize(RO_INIT_MULTITHREADED);
-        }
-        let _ = reply.send(clock_state().ok().flatten());
-    });
+    let asking = std::thread::Builder::new()
+        .name("focus clock".into())
+        .spawn(move || {
+            unsafe {
+                let _ = RoInitialize(RO_INIT_MULTITHREADED);
+            }
+            let _ = reply.send(clock_state().ok().flatten());
+        });
     asking.ok()?;
     answer.recv_timeout(CLOCK_TIMEOUT).ok().flatten()
 }
@@ -295,6 +312,9 @@ fn clock_state() -> Result<Option<ClockFocus>> {
     let command = PropertyValue::CreateString(h!("GetFocusSessionState"))?;
     message.Insert(h!("Command"), &command)?;
     let reply = connection.SendMessageAsync(&message)?.join()?.Message()?;
-    let json = reply.Lookup(h!("FocusSessionJson"))?.cast::<IPropertyValue>()?.GetString()?;
+    let json = reply
+        .Lookup(h!("FocusSessionJson"))?
+        .cast::<IPropertyValue>()?
+        .GetString()?;
     Ok(focus::parse_clock_state(&json.to_string()))
 }

@@ -9,7 +9,11 @@ const NAME_LETTERS: usize = 4;
 const PASSPHRASE_LETTERS: usize = 12;
 
 fn letters(random: &[u8], count: usize) -> String {
-    random.iter().take(count).map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char).collect()
+    random
+        .iter()
+        .take(count)
+        .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
+        .collect()
 }
 
 /// Such as `Islora-K4FX`, different each time so that an old network on the
@@ -27,7 +31,11 @@ pub const RANDOM_BYTES: usize = NAME_LETTERS + PASSPHRASE_LETTERS;
 
 /// What a code says for a phone camera to offer joining a network.
 pub fn join_code_text(network: &str, passphrase: &str) -> String {
-    format!("WIFI:T:WPA;S:{};P:{};;", escape(network), escape(passphrase))
+    format!(
+        "WIFI:T:WPA;S:{};P:{};;",
+        escape(network),
+        escape(passphrase)
+    )
 }
 
 /// The format sets these apart with a backslash.
@@ -59,7 +67,13 @@ mod tests {
 
     #[test]
     fn a_join_code_is_what_phone_cameras_read() {
-        assert_eq!(join_code_text("Islora-K4FX", "abcdefgh2345"), "WIFI:T:WPA;S:Islora-K4FX;P:abcdefgh2345;;");
-        assert_eq!(join_code_text("a;b", "c:d\"e"), "WIFI:T:WPA;S:a\\;b;P:c\\:d\\\"e;;");
+        assert_eq!(
+            join_code_text("Islora-K4FX", "abcdefgh2345"),
+            "WIFI:T:WPA;S:Islora-K4FX;P:abcdefgh2345;;"
+        );
+        assert_eq!(
+            join_code_text("a;b", "c:d\"e"),
+            "WIFI:T:WPA;S:a\\;b;P:c\\:d\\\"e;;"
+        );
     }
 }

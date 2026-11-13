@@ -42,9 +42,15 @@ pub fn parse_request(head: &str) -> Option<Request> {
     }
     let range = lines.find_map(|line| {
         let (name, value) = line.split_once(':')?;
-        name.trim().eq_ignore_ascii_case("range").then(|| value.trim().to_owned())
+        name.trim()
+            .eq_ignore_ascii_case("range")
+            .then(|| value.trim().to_owned())
     });
-    Some(Request { method, path, range })
+    Some(Request {
+        method,
+        path,
+        range,
+    })
 }
 
 /// Where a request goes.
@@ -78,7 +84,10 @@ pub fn route(path: &str, token: &str, files: usize) -> Route {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Span {
     Whole,
-    Part { first: u64, last: u64 },
+    Part {
+        first: u64,
+        last: u64,
+    },
     /// Starts past the end, which gets 416.
     Unsatisfiable,
 }
@@ -100,7 +109,9 @@ pub fn parse_range(value: Option<&str>, size: u64) -> Span {
     let span = match (start.parse::<u64>(), end.parse::<u64>()) {
         (Ok(first), Ok(last)) if first <= last => Some((first, last.min(size.saturating_sub(1)))),
         (Ok(first), Err(_)) if end.is_empty() => Some((first, size.saturating_sub(1))),
-        (Err(_), Ok(suffix)) if start.is_empty() && suffix > 0 => Some((size.saturating_sub(suffix), size.saturating_sub(1))),
+        (Err(_), Ok(suffix)) if start.is_empty() && suffix > 0 => {
+            Some((size.saturating_sub(suffix), size.saturating_sub(1)))
+        }
         _ => None,
     };
     match span {
@@ -128,9 +139,20 @@ pub fn percent_encode(text: &str) -> String {
 pub fn content_disposition(name: &str) -> String {
     let fallback: String = name
         .chars()
-        .map(|character| if character.is_ascii_graphic() && character != '"' && character != '\\' || character == ' ' { character } else { '_' })
+        .map(|character| {
+            if character.is_ascii_graphic() && character != '"' && character != '\\'
+                || character == ' '
+            {
+                character
+            } else {
+                '_'
+            }
+        })
         .collect();
-    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{}", percent_encode(name))
+    format!(
+        "attachment; filename=\"{fallback}\"; filename*=UTF-8''{}",
+        percent_encode(name)
+    )
 }
 
 pub fn content_type(name: &str) -> &'static str {
@@ -179,7 +201,11 @@ pub fn page(token: &str, files: &[(String, u64)]) -> String {
             percent_encode(name),
         );
     }
-    let title = if files.len() == 1 { "Dosya hazır" } else { "Dosyalar hazır" };
+    let title = if files.len() == 1 {
+        "Dosya hazır"
+    } else {
+        "Dosyalar hazır"
+    };
     format!(
         "<!doctype html><html lang=\"tr\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
@@ -240,12 +266,16 @@ mod tests {
 
     #[test]
     fn a_request_head_is_read() {
-        let head = "GET /abc/0/a.jpg HTTP/1.1\r\nHost: 192.168.1.5:5000\r\nrange: bytes=0-1\r\n\r\n";
+        let head =
+            "GET /abc/0/a.jpg HTTP/1.1\r\nHost: 192.168.1.5:5000\r\nrange: bytes=0-1\r\n\r\n";
         let request = parse_request(head).expect("valid");
         assert_eq!(request.method, Method::Get);
         assert_eq!(request.path, "/abc/0/a.jpg");
         assert_eq!(request.range.as_deref(), Some("bytes=0-1"));
-        assert_eq!(parse_request("HEAD / HTTP/1.0\r\n\r\n").map(|r| r.method), Some(Method::Head));
+        assert_eq!(
+            parse_request("HEAD / HTTP/1.0\r\n\r\n").map(|r| r.method),
+            Some(Method::Head)
+        );
         assert_eq!(parse_request("garbage"), None);
         assert_eq!(parse_request("GET / SPDY\r\n"), None);
     }
@@ -267,25 +297,55 @@ mod tests {
     #[test]
     fn ranges_are_read_as_phones_send_them() {
         assert_eq!(parse_range(None, 100), Span::Whole);
-        assert_eq!(parse_range(Some("bytes=0-1"), 100), Span::Part { first: 0, last: 1 });
-        assert_eq!(parse_range(Some("bytes=10-"), 100), Span::Part { first: 10, last: 99 });
-        assert_eq!(parse_range(Some("bytes=-30"), 100), Span::Part { first: 70, last: 99 });
-        assert_eq!(parse_range(Some("bytes=90-500"), 100), Span::Part { first: 90, last: 99 });
+        assert_eq!(
+            parse_range(Some("bytes=0-1"), 100),
+            Span::Part { first: 0, last: 1 }
+        );
+        assert_eq!(
+            parse_range(Some("bytes=10-"), 100),
+            Span::Part {
+                first: 10,
+                last: 99
+            }
+        );
+        assert_eq!(
+            parse_range(Some("bytes=-30"), 100),
+            Span::Part {
+                first: 70,
+                last: 99
+            }
+        );
+        assert_eq!(
+            parse_range(Some("bytes=90-500"), 100),
+            Span::Part {
+                first: 90,
+                last: 99
+            }
+        );
         assert_eq!(parse_range(Some("bytes=100-"), 100), Span::Unsatisfiable);
         assert_eq!(parse_range(Some("bytes=0-1,5-9"), 100), Span::Whole);
         assert_eq!(parse_range(Some("items=0-1"), 100), Span::Whole);
         assert_eq!(parse_range(Some("bytes=9-3"), 100), Span::Whole);
-        assert_eq!(parse_range(Some("bytes=-500"), 100), Span::Part { first: 0, last: 99 });
+        assert_eq!(
+            parse_range(Some("bytes=-500"), 100),
+            Span::Part { first: 0, last: 99 }
+        );
     }
 
     #[test]
     fn names_survive_the_trip() {
-        assert_eq!(percent_encode("Tatil fotoğrafı.jpg"), "Tatil%20foto%C4%9Fraf%C4%B1.jpg");
+        assert_eq!(
+            percent_encode("Tatil fotoğrafı.jpg"),
+            "Tatil%20foto%C4%9Fraf%C4%B1.jpg"
+        );
         assert_eq!(
             content_disposition("Rapor \"son\".pdf"),
             "attachment; filename=\"Rapor _son_.pdf\"; filename*=UTF-8''Rapor%20%22son%22.pdf"
         );
-        assert_eq!(content_disposition("ağaç.png"), "attachment; filename=\"a_a_.png\"; filename*=UTF-8''a%C4%9Fa%C3%A7.png");
+        assert_eq!(
+            content_disposition("ağaç.png"),
+            "attachment; filename=\"a_a_.png\"; filename*=UTF-8''a%C4%9Fa%C3%A7.png"
+        );
         assert_eq!(content_type("IMG_1.HEIC"), "image/heic");
         assert_eq!(content_type("x.unknown"), "application/octet-stream");
     }
@@ -312,8 +372,14 @@ mod tests {
     fn tokens_use_every_bit_and_only_safe_letters() {
         assert_eq!(token(&[0; 13]), "aaaaaaaaaaaaaaaaaaaa");
         assert_eq!(token(&[255; 13]), "77777777777777777777");
-        let mixed = token(&[0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 1, 2, 3, 4, 5]);
+        let mixed = token(&[
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 1, 2, 3, 4, 5,
+        ]);
         assert_eq!(mixed.len(), 20);
-        assert!(mixed.chars().all(|c| c.is_ascii_lowercase() || ('2'..='7').contains(&c)));
+        assert!(
+            mixed
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || ('2'..='7').contains(&c))
+        );
     }
 }

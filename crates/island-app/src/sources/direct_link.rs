@@ -64,9 +64,17 @@ impl DirectLink {
         let window = window.0 as isize;
         let thread = std::thread::Builder::new()
             .name("direct link".into())
-            .spawn(move || run(&network, &passphrase, &stopped, &|event| report(&sender, window, event)))
+            .spawn(move || {
+                run(&network, &passphrase, &stopped, &|event| {
+                    report(&sender, window, event)
+                })
+            })
             .ok();
-        Self { stop, events, thread }
+        Self {
+            stop,
+            events,
+            thread,
+        }
     }
 
     pub fn events(&self) -> Vec<DirectEvent> {
@@ -124,16 +132,23 @@ fn run(network: &str, passphrase: &str, stopped: &Receiver<()>, report: &dyn Fn(
 }
 
 /// Starts the network and waits until Windows says it is up.
-fn start(network: &str, passphrase: &str) -> Result<WiFiDirectAdvertisementPublisher, &'static str> {
+fn start(
+    network: &str,
+    passphrase: &str,
+) -> Result<WiFiDirectAdvertisementPublisher, &'static str> {
     let failed = |_| "Windows doğrudan bağlantıyı başlatamadı";
     let publisher = WiFiDirectAdvertisementPublisher::new().map_err(failed)?;
     let advertisement = publisher.Advertisement().map_err(failed)?;
-    advertisement.SetIsAutonomousGroupOwnerEnabled(true).map_err(failed)?;
+    advertisement
+        .SetIsAutonomousGroupOwnerEnabled(true)
+        .map_err(failed)?;
     let legacy = advertisement.LegacySettings().map_err(failed)?;
     legacy.SetIsEnabled(true).map_err(failed)?;
     legacy.SetSsid(&HSTRING::from(network)).map_err(failed)?;
     let credential = PasswordCredential::new().map_err(failed)?;
-    credential.SetPassword(&HSTRING::from(passphrase)).map_err(failed)?;
+    credential
+        .SetPassword(&HSTRING::from(passphrase))
+        .map_err(failed)?;
     legacy.SetPassphrase(&credential).map_err(failed)?;
 
     let (sender, statuses) = channel();
@@ -155,7 +170,9 @@ fn start(network: &str, passphrase: &str) -> Result<WiFiDirectAdvertisementPubli
         let left = deadline.saturating_duration_since(Instant::now());
         match statuses.recv_timeout(left) {
             Ok((WiFiDirectAdvertisementPublisherStatus::Started, _)) => return Ok(publisher),
-            Ok((WiFiDirectAdvertisementPublisherStatus::Aborted, error)) => return Err(reason(error)),
+            Ok((WiFiDirectAdvertisementPublisherStatus::Aborted, error)) => {
+                return Err(reason(error));
+            }
             Ok(_) => {}
             Err(_) => {
                 let _ = publisher.Stop();
@@ -177,7 +194,9 @@ fn reason(error: WiFiDirectError) -> &'static str {
 /// The computer's address on Windows' Mobile Hotspot, which runs on a Wi-Fi
 /// Direct adapter too. Only asked while no network of the island's own is up.
 pub fn hotspot_address() -> Option<Ipv4Addr> {
-    direct_adapters().into_iter().find_map(|(_, address)| address)
+    direct_adapters()
+        .into_iter()
+        .find_map(|(_, address)| address)
 }
 
 /// Adapters Windows uses for Wi-Fi Direct, with their index and IPv4 address
@@ -187,7 +206,8 @@ fn direct_adapters() -> Vec<(u32, Option<Ipv4Addr>)> {
     let mut size = ADAPTER_LIST_BYTES as u32;
     let first = list.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
     let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
-    let status = unsafe { GetAdaptersAddresses(u32::from(AF_INET.0), flags, None, Some(first), &mut size) };
+    let status =
+        unsafe { GetAdaptersAddresses(u32::from(AF_INET.0), flags, None, Some(first), &mut size) };
     if status != ERROR_SUCCESS.0 {
         return Vec::new();
     }
@@ -225,12 +245,21 @@ fn first_ipv4(adapter: &IP_ADAPTER_ADDRESSES_LH) -> Option<Ipv4Addr> {
 
 /// The address of the network just started, preferring an adapter that was
 /// not up before, as an older Wi-Fi Direct link may still be around.
-fn wait_for_address(before: &[(u32, Option<Ipv4Addr>)], stopped: &Receiver<()>) -> Option<(u32, Ipv4Addr)> {
-    let known: HashSet<u32> = before.iter().filter(|(_, address)| address.is_some()).map(|(index, _)| *index).collect();
+fn wait_for_address(
+    before: &[(u32, Option<Ipv4Addr>)],
+    stopped: &Receiver<()>,
+) -> Option<(u32, Ipv4Addr)> {
+    let known: HashSet<u32> = before
+        .iter()
+        .filter(|(_, address)| address.is_some())
+        .map(|(index, _)| *index)
+        .collect();
     let deadline = Instant::now() + ADDRESS_WAIT;
     while Instant::now() < deadline {
         let adapters = direct_adapters();
-        let with_address = adapters.iter().filter_map(|(index, address)| Some((*index, (*address)?)));
+        let with_address = adapters
+            .iter()
+            .filter_map(|(index, address)| Some((*index, (*address)?)));
         let mut candidates: Vec<(u32, Ipv4Addr)> = with_address.collect();
         candidates.sort_by_key(|(index, _)| known.contains(index));
         if let Some(found) = candidates.first() {
@@ -255,7 +284,10 @@ fn has_neighbour(index: u32, own: Ipv4Addr) -> bool {
         std::slice::from_raw_parts((*table).Table.as_ptr(), count)
     };
     let found = rows.iter().any(|row| {
-        if row.InterfaceIndex != index || row.State == NlnsUnreachable || row.State == NlnsIncomplete {
+        if row.InterfaceIndex != index
+            || row.State == NlnsUnreachable
+            || row.State == NlnsIncomplete
+        {
             return false;
         }
         let octets = unsafe { row.Address.Ipv4.sin_addr.S_un.S_addr }.to_ne_bytes();

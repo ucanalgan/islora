@@ -55,10 +55,21 @@ impl Shelf {
     pub fn add(&mut self, paths: &[String]) -> Vec<String> {
         let mut added = Vec::new();
         for path in paths {
-            let known = self.items.iter().any(|item| item.path.eq_ignore_ascii_case(path));
-            if !known && !added.iter().any(|new: &String| new.eq_ignore_ascii_case(path)) {
+            let known = self
+                .items
+                .iter()
+                .any(|item| item.path.eq_ignore_ascii_case(path));
+            if !known
+                && !added
+                    .iter()
+                    .any(|new: &String| new.eq_ignore_ascii_case(path))
+            {
                 added.push(path.clone());
-                self.items.push(ShelfItem { path: path.clone(), name: file_name(path).to_owned(), thumbnail: None });
+                self.items.push(ShelfItem {
+                    path: path.clone(),
+                    name: file_name(path).to_owned(),
+                    thumbnail: None,
+                });
             }
         }
         self.first = self.items.len().saturating_sub(SHELF_TILES);
@@ -108,7 +119,11 @@ impl Shelf {
             first: self.first,
             total,
             title: format!("Raf · {total} dosya"),
-            page: if total > SHELF_TILES { format!("{}–{end} / {total}", self.first + 1) } else { String::new() },
+            page: if total > SHELF_TILES {
+                format!("{}–{end} / {total}", self.first + 1)
+            } else {
+                String::new()
+            },
         }
     }
 }
@@ -125,7 +140,10 @@ mod tests {
     fn a_file_is_kept_once() {
         let mut shelf = Shelf::default();
         assert_eq!(shelf.add(&paths(&["a.txt", "b.jpg"])).len(), 2);
-        assert_eq!(shelf.add(&[r"C:\A\A.TXT".to_owned(), r"C:\a\c.pdf".to_owned()]), vec![r"C:\a\c.pdf".to_owned()]);
+        assert_eq!(
+            shelf.add(&[r"C:\A\A.TXT".to_owned(), r"C:\a\c.pdf".to_owned()]),
+            vec![r"C:\a\c.pdf".to_owned()]
+        );
         assert_eq!(shelf.len(), 3);
         assert_eq!(shelf.items()[2].name, "c.pdf");
     }
@@ -137,7 +155,10 @@ mod tests {
         let view = shelf.view();
         assert_eq!((view.first, view.total, view.items.len()), (2, 7, 5));
         assert_eq!(view.items[4].name, "7");
-        assert_eq!((view.title.as_str(), view.page.as_str()), ("Raf · 7 dosya", "3–7 / 7"));
+        assert_eq!(
+            (view.title.as_str(), view.page.as_str()),
+            ("Raf · 7 dosya", "3–7 / 7")
+        );
     }
 
     #[test]

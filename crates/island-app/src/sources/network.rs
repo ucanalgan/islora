@@ -26,16 +26,21 @@ use super::{IndicatorSink, registry};
 /// A network takes a moment to settle, and asking too soon reports it as lost.
 const SETTLE: Duration = Duration::from_secs(3);
 const ADAPTER_LIST_BYTES: usize = 32 * 1024;
-const RADIO_STATE: PCWSTR = w!("SYSTEM\\CurrentControlSet\\Control\\RadioManagement\\SystemRadioState");
+const RADIO_STATE: PCWSTR =
+    w!("SYSTEM\\CurrentControlSet\\Control\\RadioManagement\\SystemRadioState");
 
 pub fn start(sink: IndicatorSink) {
     let airplane_sink = sink.clone();
-    let network = std::thread::Builder::new().name("network".into()).spawn(move || {
-        follow_network(&sink);
-    });
-    let airplane = std::thread::Builder::new().name("airplane mode".into()).spawn(move || {
-        follow_airplane_mode(&airplane_sink);
-    });
+    let network = std::thread::Builder::new()
+        .name("network".into())
+        .spawn(move || {
+            follow_network(&sink);
+        });
+    let airplane = std::thread::Builder::new()
+        .name("airplane mode".into())
+        .spawn(move || {
+            follow_airplane_mode(&airplane_sink);
+        });
     if network.is_err() || airplane.is_err() {
         eprintln!("network threads failed to start");
     }
@@ -68,18 +73,27 @@ fn follow_network(sink: &IndicatorSink) {
 
 fn read_state() -> NetworkState {
     let profile = NetworkInformation::GetInternetConnectionProfile().ok();
-    let level = profile.as_ref().and_then(|profile| profile.GetNetworkConnectivityLevel().ok());
+    let level = profile
+        .as_ref()
+        .and_then(|profile| profile.GetNetworkConnectivityLevel().ok());
     // Behind a sign-in page counts as connected: there is a network, it just
     // wants something first, and calling that a lost connection would be wrong.
     let online = matches!(
         level,
-        Some(NetworkConnectivityLevel::InternetAccess | NetworkConnectivityLevel::ConstrainedInternetAccess)
+        Some(
+            NetworkConnectivityLevel::InternetAccess
+                | NetworkConnectivityLevel::ConstrainedInternetAccess
+        )
     );
     let wifi = profile
         .filter(|profile| profile.IsWlanConnectionProfile().unwrap_or(false))
         .and_then(|profile| profile.ProfileName().ok())
         .map(|name| name.to_string());
-    NetworkState { online, wifi, vpn: vpn_name() }
+    NetworkState {
+        online,
+        wifi,
+        vpn: vpn_name(),
+    }
 }
 
 fn vpn_name() -> Option<String> {
@@ -87,7 +101,9 @@ fn vpn_name() -> Option<String> {
     let mut size = ADAPTER_LIST_BYTES as u32;
     let first = list.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
     let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
-    let status = unsafe { GetAdaptersAddresses(u32::from(AF_UNSPEC.0), flags, None, Some(first), &mut size) };
+    let status = unsafe {
+        GetAdaptersAddresses(u32::from(AF_UNSPEC.0), flags, None, Some(first), &mut size)
+    };
     if status != ERROR_SUCCESS.0 {
         return None;
     }
@@ -108,7 +124,9 @@ fn vpn_name() -> Option<String> {
 /// Windows offers no event for this, but keeps it in a value that changes with it.
 fn follow_airplane_mode(sink: &IndicatorSink) {
     let mut key = HKEY::default();
-    if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, RADIO_STATE, None, KEY_READ, &mut key) } != ERROR_SUCCESS {
+    if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, RADIO_STATE, None, KEY_READ, &mut key) }
+        != ERROR_SUCCESS
+    {
         return;
     }
     let mut known = airplane_mode(key);

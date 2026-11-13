@@ -1,7 +1,7 @@
 //! The settings file, which the user edits by hand and may hold a secret.
 
-use std::path::{Path, PathBuf};
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use island_core::config::write_value;
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -105,7 +105,9 @@ pub fn read() -> Option<String> {
     }
     if !path.exists() {
         std::fs::create_dir_all(path.parent()?).ok()?;
-        let text = format!("{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}");
+        let text = format!(
+            "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
+        );
         if let Err(error) = replace(&path, &text) {
             eprintln!("settings could not be created: {error}");
             return None;
@@ -117,7 +119,10 @@ pub fn read() -> Option<String> {
         ("timer_presets", START_SETTINGS),
         ("notices_off", NOTICE_SETTINGS),
         ("keyboard_language", LATER_NOTICES),
-        ("# notices_off için ek seçenekler: volume, brightness", LEVEL_NOTICES),
+        (
+            "# notices_off için ek seçenekler: volume, brightness",
+            LEVEL_NOTICES,
+        ),
         ("sound_wave", WAVE_SETTINGS),
         ("wave_style", WAVE_STYLE_SETTINGS),
         ("material", MATERIAL_SETTINGS),
@@ -138,7 +143,8 @@ pub fn read() -> Option<String> {
 /// Stores a choice made in the island. Every other line stays as it was.
 pub fn remember(key: &str, value: &str) {
     if let (Some(path), Some(text)) = (path(), read())
-        && let Err(error) = replace(&path, &write_value(&text, key, value)) {
+        && let Err(error) = replace(&path, &write_value(&text, key, value))
+    {
         eprintln!("settings could not be saved: {error}");
     }
 }
@@ -153,7 +159,10 @@ fn replace(path: &Path, text: &str) -> io::Result<()> {
     if path.exists() {
         let backup_draft = path.with_extension("toml.bak.new");
         std::fs::copy(path, &backup_draft)?;
-        std::fs::OpenOptions::new().write(true).open(&backup_draft)?.sync_all()?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&backup_draft)?
+            .sync_all()?;
         std::fs::rename(backup_draft, path.with_extension("toml.bak"))?;
     }
     std::fs::rename(draft, path)
@@ -165,7 +174,10 @@ fn recover(path: &Path) -> io::Result<()> {
     if !path.exists() && backup.is_file() {
         let recovery = path.with_extension("toml.recover");
         std::fs::copy(backup, &recovery)?;
-        std::fs::OpenOptions::new().write(true).open(&recovery)?.sync_all()?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&recovery)?
+            .sync_all()?;
         std::fs::rename(recovery, path)?;
     }
     Ok(())
@@ -176,7 +188,14 @@ pub fn open_in_editor() {
     // Handing a file to its app can take a while, which the UI must not wait for.
     std::thread::spawn(move || unsafe {
         let file = HSTRING::from(format!("\"{}\"", path.display()));
-        ShellExecuteW(None, w!("open"), w!("notepad.exe"), &file, None, SW_SHOWNORMAL);
+        ShellExecuteW(
+            None,
+            w!("open"),
+            w!("notepad.exe"),
+            &file,
+            None,
+            SW_SHOWNORMAL,
+        );
     });
 }
 
@@ -186,17 +205,24 @@ mod tests {
 
     #[test]
     fn interrupted_update_recovers_last_complete_settings() {
-        let folder = std::env::temp_dir().join(format!("islora-settings-recovery-{}", std::process::id()));
+        let folder =
+            std::env::temp_dir().join(format!("islora-settings-recovery-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let path = folder.join("config.toml");
         std::fs::write(&path, "original = \"safe\"\n").unwrap();
         replace(&path, "updated = \"saved\"\n").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "updated = \"saved\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "updated = \"saved\"\n"
+        );
         std::fs::write(path.with_extension("toml.new"), "partial").unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(!is_new_install(&path));
         recover(&path).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original = \"safe\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "original = \"safe\"\n"
+        );
         std::fs::remove_file(path.with_extension("toml.new")).unwrap();
         std::fs::remove_file(path.with_extension("toml.bak")).unwrap();
         std::fs::remove_file(path).unwrap();

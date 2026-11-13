@@ -31,7 +31,13 @@ pub fn register(window: HWND, handlers: &'static Handlers) -> Result<()> {
     unsafe {
         // The thread is already a single threaded apartment, which this keeps.
         OleInitialize(None)?;
-        let target: IDropTarget = Target { window, handlers, helper: RefCell::new(None), carrying: Cell::new(false) }.into();
+        let target: IDropTarget = Target {
+            window,
+            handlers,
+            helper: RefCell::new(None),
+            carrying: Cell::new(false),
+        }
+        .into();
         RegisterDragDrop(window, &target)
     }
 }
@@ -61,7 +67,8 @@ impl Target {
     fn helper(&self) -> Option<IDropTargetHelper> {
         let mut helper = self.helper.borrow_mut();
         if helper.is_none() {
-            *helper = unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER) }.ok();
+            *helper =
+                unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER) }.ok();
         }
         helper.clone()
     }
@@ -75,7 +82,10 @@ impl IDropTarget_Impl for Target_Impl {
         point: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let point = POINT { x: point.x, y: point.y };
+        let point = POINT {
+            x: point.x,
+            y: point.y,
+        };
         let files = data.as_ref().map(read_files).unwrap_or_default();
         self.carrying.set(!files.is_empty());
         let wanted = !files.is_empty() && (self.handlers.enter)(files, point);
@@ -88,8 +98,16 @@ impl IDropTarget_Impl for Target_Impl {
         Ok(())
     }
 
-    fn DragOver(&self, _keys: MODIFIERKEYS_FLAGS, point: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
-        let point = POINT { x: point.x, y: point.y };
+    fn DragOver(
+        &self,
+        _keys: MODIFIERKEYS_FLAGS,
+        point: &POINTL,
+        effect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        let point = POINT {
+            x: point.x,
+            y: point.y,
+        };
         let wanted = self.carrying.get() && (self.handlers.over)(point);
         unsafe {
             *effect = effect_for(wanted, *effect);
@@ -110,8 +128,17 @@ impl IDropTarget_Impl for Target_Impl {
         Ok(())
     }
 
-    fn Drop(&self, data: Ref<IDataObject>, _keys: MODIFIERKEYS_FLAGS, point: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
-        let point = POINT { x: point.x, y: point.y };
+    fn Drop(
+        &self,
+        data: Ref<IDataObject>,
+        _keys: MODIFIERKEYS_FLAGS,
+        point: &POINTL,
+        effect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        let point = POINT {
+            x: point.x,
+            y: point.y,
+        };
         let wanted = self.carrying.replace(false) && (self.handlers.drop)(point);
         unsafe {
             *effect = effect_for(wanted, *effect);

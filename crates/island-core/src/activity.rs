@@ -29,7 +29,14 @@ pub enum Kind {
 impl Kind {
     /// Transient kinds interrupt whatever is showing and leave on their own.
     pub fn is_transient(self) -> bool {
-        matches!(self, Kind::Alert | Kind::ExternalNotification | Kind::Notification | Kind::TimerFinished | Kind::NowPlaying)
+        matches!(
+            self,
+            Kind::Alert
+                | Kind::ExternalNotification
+                | Kind::Notification
+                | Kind::TimerFinished
+                | Kind::NowPlaying
+        )
     }
 }
 
@@ -74,7 +81,11 @@ pub enum Bubble {
     Artwork(Arc<[u8]>),
     Symbol(Icon),
     /// A short number, with an optional symbol or a ring filled to this percent.
-    Count { value: String, icon: Option<Icon>, ring: Option<u8> },
+    Count {
+        value: String,
+        icon: Option<Icon>,
+        ring: Option<u8>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

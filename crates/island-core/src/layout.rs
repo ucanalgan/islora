@@ -13,11 +13,19 @@ impl UiDensity {
     pub const ALL: [Self; 3] = [Self::Minimal, Self::Balanced, Self::Detailed];
 
     pub fn setting(self) -> &'static str {
-        match self { Self::Minimal => "minimal", Self::Balanced => "balanced", Self::Detailed => "detailed" }
+        match self {
+            Self::Minimal => "minimal",
+            Self::Balanced => "balanced",
+            Self::Detailed => "detailed",
+        }
     }
 
     pub fn label(self) -> &'static str {
-        match self { Self::Minimal => "Minimal", Self::Balanced => "Dengeli", Self::Detailed => "Ayrıntılı" }
+        match self {
+            Self::Minimal => "Minimal",
+            Self::Balanced => "Dengeli",
+            Self::Detailed => "Ayrıntılı",
+        }
     }
 }
 
@@ -25,19 +33,30 @@ impl UiDensity {
 pub fn indicator_chip_bounds(labels: &[String]) -> Vec<crate::geometry::Rect> {
     use crate::geometry::Rect;
     let count = labels.len().min(2);
-    if count == 0 { return Vec::new(); }
+    if count == 0 {
+        return Vec::new();
+    }
     let left = 20.0;
     let available = UiDensity::Detailed.level_layout().pill.width - left * 2.0;
     let gap = 8.0;
     let limit = (available - gap * (count - 1) as f32) / count as f32;
     let mut x = left;
-    labels.iter().take(count).map(|label| {
-        // An estimate keeps short chips compact; DirectWrite bounds long text.
-        let width = (label.chars().count() as f32 * 5.3 + 20.0).clamp(52.0, limit);
-        let rect = Rect { x, y: 79.0, width, height: 14.0 };
-        x += width + gap;
-        rect
-    }).collect()
+    labels
+        .iter()
+        .take(count)
+        .map(|label| {
+            // An estimate keeps short chips compact; DirectWrite bounds long text.
+            let width = (label.chars().count() as f32 * 5.3 + 20.0).clamp(52.0, limit);
+            let rect = Rect {
+                x,
+                y: 79.0,
+                width,
+                height: 14.0,
+            };
+            x += width + gap;
+            rect
+        })
+        .collect()
 }
 
 /// Level indicator geometry in logical pixels, shared by the compositor and painter.
@@ -54,24 +73,47 @@ pub struct LevelLayout {
 impl UiDensity {
     pub fn level_layout(self) -> LevelLayout {
         use crate::geometry::Rect;
-        let rect = |x, y, width, height| Rect { x, y, width, height };
+        let rect = |x, y, width, height| Rect {
+            x,
+            y,
+            width,
+            height,
+        };
         match self {
             Self::Minimal => LevelLayout {
-                pill: Pill { width: 168.0, height: 44.0, radius: 22.0 },
-                icon: rect(14.0, 8.0, 28.0, 28.0), title: rect(0.0, 0.0, 0.0, 0.0),
-                detail: rect(0.0, 0.0, 0.0, 0.0), value: rect(50.0, 8.0, 60.0, 28.0),
+                pill: Pill {
+                    width: 168.0,
+                    height: 44.0,
+                    radius: 22.0,
+                },
+                icon: rect(14.0, 8.0, 28.0, 28.0),
+                title: rect(0.0, 0.0, 0.0, 0.0),
+                detail: rect(0.0, 0.0, 0.0, 0.0),
+                value: rect(50.0, 8.0, 60.0, 28.0),
                 progress: rect(126.0, 11.0, 22.0, 22.0),
             },
             Self::Balanced => LevelLayout {
-                pill: Pill { width: 296.0, height: 70.0, radius: 24.0 },
-                icon: rect(16.0, 12.0, 38.0, 38.0), title: rect(66.0, 9.0, 130.0, 23.0),
-                detail: rect(66.0, 32.0, 130.0, 18.0), value: rect(212.0, 12.0, 64.0, 32.0),
+                pill: Pill {
+                    width: 296.0,
+                    height: 70.0,
+                    radius: 24.0,
+                },
+                icon: rect(16.0, 12.0, 38.0, 38.0),
+                title: rect(66.0, 9.0, 130.0, 23.0),
+                detail: rect(66.0, 32.0, 130.0, 18.0),
+                value: rect(212.0, 12.0, 64.0, 32.0),
                 progress: rect(20.0, 57.0, 256.0, 3.0),
             },
             Self::Detailed => LevelLayout {
-                pill: Pill { width: 320.0, height: 96.0, radius: 26.0 },
-                icon: rect(16.0, 14.0, 42.0, 42.0), title: rect(70.0, 11.0, 160.0, 25.0),
-                detail: rect(70.0, 37.0, 160.0, 19.0), value: rect(242.0, 16.0, 58.0, 30.0),
+                pill: Pill {
+                    width: 320.0,
+                    height: 96.0,
+                    radius: 26.0,
+                },
+                icon: rect(16.0, 14.0, 42.0, 42.0),
+                title: rect(70.0, 11.0, 160.0, 25.0),
+                detail: rect(70.0, 37.0, 160.0, 19.0),
+                value: rect(242.0, 16.0, 58.0, 30.0),
                 progress: rect(20.0, 68.0, 280.0, 7.0),
             },
         }
@@ -221,7 +263,11 @@ impl Material {
     /// Glass asks more of the system, so it gives way when the user wants the
     /// battery to last or has turned transparency off for all of Windows.
     pub fn in_effect(self, transparency: bool, battery_saver: bool) -> Material {
-        if transparency && !battery_saver { self } else { Material::Black }
+        if transparency && !battery_saver {
+            self
+        } else {
+            Material::Black
+        }
     }
 }
 
@@ -239,7 +285,11 @@ pub enum ProgressStyle {
 }
 
 impl ProgressStyle {
-    pub const ALL: [ProgressStyle; 3] = [ProgressStyle::Ring, ProgressStyle::Edge, ProgressStyle::Fill];
+    pub const ALL: [ProgressStyle; 3] = [
+        ProgressStyle::Ring,
+        ProgressStyle::Edge,
+        ProgressStyle::Fill,
+    ];
 
     pub fn setting(self) -> &'static str {
         match self {
@@ -310,7 +360,12 @@ pub fn on_settings_shortcut(x: f32, y: f32) -> bool {
         && (y - SETTINGS_SHORTCUT_Y).abs() <= SETTINGS_SHORTCUT_SIZE / 2.0
 }
 
-pub const QUICK_SHORTCUT: crate::geometry::Rect = crate::geometry::Rect { x: 225.0, y: 84.0, width: 112.0, height: 24.0 };
+pub const QUICK_SHORTCUT: crate::geometry::Rect = crate::geometry::Rect {
+    x: 225.0,
+    y: 84.0,
+    width: 112.0,
+    height: 24.0,
+};
 
 /// What a preset in the home view starts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -414,7 +469,9 @@ impl TimerButton {
         if (y - TIMER_RING_Y).abs() > half {
             return None;
         }
-        TimerButton::ALL.into_iter().find(|button| (x - button.center_x()).abs() <= half)
+        TimerButton::ALL
+            .into_iter()
+            .find(|button| (x - button.center_x()).abs() <= half)
     }
 }
 
@@ -439,7 +496,8 @@ const PROGRESS_HIT_OVERHANG: f32 = 8.0;
 /// Whether a point in DIPs relative to the expanded pill is on the position bar.
 pub fn on_progress_bar(x: f32, y: f32) -> bool {
     let middle = PROGRESS_Y + PROGRESS_HEIGHT / 2.0;
-    let across = PROGRESS_X - PROGRESS_HIT_OVERHANG..=PROGRESS_X + PROGRESS_WIDTH + PROGRESS_HIT_OVERHANG;
+    let across =
+        PROGRESS_X - PROGRESS_HIT_OVERHANG..=PROGRESS_X + PROGRESS_WIDTH + PROGRESS_HIT_OVERHANG;
     (y - middle).abs() < PROGRESS_HIT_HEIGHT / 2.0 && across.contains(&x)
 }
 
@@ -459,7 +517,11 @@ pub enum MediaButton {
 
 impl MediaButton {
     /// The buttons every player has.
-    pub const TRANSPORT: [MediaButton; 3] = [MediaButton::Previous, MediaButton::PlayPause, MediaButton::Next];
+    pub const TRANSPORT: [MediaButton; 3] = [
+        MediaButton::Previous,
+        MediaButton::PlayPause,
+        MediaButton::Next,
+    ];
     pub const ALL: [MediaButton; 5] = [
         MediaButton::Shuffle,
         MediaButton::Previous,
@@ -486,7 +548,9 @@ impl MediaButton {
         if (y - MEDIA_BUTTON_Y).abs() > half {
             return None;
         }
-        MediaButton::ALL.into_iter().find(|button| (x - button.center_x()).abs() <= half)
+        MediaButton::ALL
+            .into_iter()
+            .find(|button| (x - button.center_x()).abs() <= half)
     }
 }
 
@@ -499,14 +563,41 @@ pub struct Pill {
 
 impl Pill {
     /// Small sliver the pill collapses into before the window hides.
-    pub const HIDDEN: Pill = Pill { width: 96.0, height: 8.0, radius: 4.0 };
-    pub const BUBBLE: Pill = Pill { width: 36.0, height: 36.0, radius: 18.0 };
-    pub const COMPACT: Pill = Pill { width: 210.0, height: 36.0, radius: 18.0 };
-    pub const LEVEL: Pill = Pill { width: 280.0, height: 44.0, radius: 22.0 };
-    pub const ALERT: Pill = Pill { width: 320.0, height: 66.0, radius: 33.0 };
-    pub const EXPANDED: Pill = Pill { width: 400.0, height: 170.0, radius: 42.0 };
+    pub const HIDDEN: Pill = Pill {
+        width: 96.0,
+        height: 8.0,
+        radius: 4.0,
+    };
+    pub const BUBBLE: Pill = Pill {
+        width: 36.0,
+        height: 36.0,
+        radius: 18.0,
+    };
+    pub const COMPACT: Pill = Pill {
+        width: 210.0,
+        height: 36.0,
+        radius: 18.0,
+    };
+    pub const LEVEL: Pill = Pill {
+        width: 280.0,
+        height: 44.0,
+        radius: 22.0,
+    };
+    pub const ALERT: Pill = Pill {
+        width: 320.0,
+        height: 66.0,
+        radius: 33.0,
+    };
+    pub const EXPANDED: Pill = Pill {
+        width: 400.0,
+        height: 170.0,
+        radius: 42.0,
+    };
     /// The open view with a strip along its bottom, for music under the code.
-    pub const EXPANDED_WITH_STRIP: Pill = Pill { height: Pill::EXPANDED.height + STRIP_HEIGHT, ..Pill::EXPANDED };
+    pub const EXPANDED_WITH_STRIP: Pill = Pill {
+        height: Pill::EXPANDED.height + STRIP_HEIGHT,
+        ..Pill::EXPANDED
+    };
 
     pub fn for_presentation(presentation: Presentation) -> Pill {
         match presentation {
@@ -531,7 +622,14 @@ impl Pill {
     /// radius, so the upper corners are out of sight and the lower ones stay.
     pub fn as_notch(self, reach: f32) -> (f32, Pill) {
         let radius = self.radius * NOTCH_ROUNDING;
-        (-radius, Pill { height: reach + radius, radius, ..self })
+        (
+            -radius,
+            Pill {
+                height: reach + radius,
+                radius,
+                ..self
+            },
+        )
     }
 }
 
@@ -553,7 +651,9 @@ mod tests {
                     assert!((chip.x + chip.width) * scale <= panel.pill.width * scale);
                     assert!((chip.y + chip.height) * scale <= panel.pill.height * scale);
                 }
-                if chips.len() == 2 { assert!(chips[0].x + chips[0].width < chips[1].x); }
+                if chips.len() == 2 {
+                    assert!(chips[0].x + chips[0].width < chips[1].x);
+                }
             }
         }
     }
@@ -564,7 +664,13 @@ mod tests {
         for density in UiDensity::ALL {
             let layout = density.level_layout();
             for scale in [1.0, 1.25, 1.5, 2.0] {
-                for r in [layout.icon, layout.title, layout.detail, layout.value, layout.progress] {
+                for r in [
+                    layout.icon,
+                    layout.title,
+                    layout.detail,
+                    layout.value,
+                    layout.progress,
+                ] {
                     assert!(r.x >= 0.0 && r.y >= 0.0);
                     assert!((r.x + r.width) * scale <= layout.pill.width * scale);
                     assert!((r.y + r.height) * scale <= layout.pill.height * scale);
@@ -585,8 +691,16 @@ mod tests {
 
     #[test]
     fn wave_styles_keep_the_old_motion_and_change_its_range_and_pace() {
-        assert_eq!((WaveStyle::Normal.low(), WaveStyle::Normal.high()), (0.38, 1.0));
-        assert_eq!((0..4).map(|index| WaveStyle::Normal.period_ms(index)).collect::<Vec<_>>(), vec![640, 810, 980, 1150]);
+        assert_eq!(
+            (WaveStyle::Normal.low(), WaveStyle::Normal.high()),
+            (0.38, 1.0)
+        );
+        assert_eq!(
+            (0..4)
+                .map(|index| WaveStyle::Normal.period_ms(index))
+                .collect::<Vec<_>>(),
+            vec![640, 810, 980, 1150]
+        );
         assert!(WaveStyle::Calm.low() > WaveStyle::Normal.low());
         assert!(WaveStyle::Calm.high() < WaveStyle::Normal.high());
         assert!(WaveStyle::Lively.low() < WaveStyle::Normal.low());
@@ -599,15 +713,31 @@ mod tests {
     #[test]
     fn every_pill_fits_inside_the_window_with_room_to_overshoot() {
         let overshoot = 1.1;
-        for pill in [Pill::HIDDEN, Pill::COMPACT, Pill::LEVEL, Pill::ALERT, Pill::EXPANDED, Pill::EXPANDED_WITH_STRIP] {
+        for pill in [
+            Pill::HIDDEN,
+            Pill::COMPACT,
+            Pill::LEVEL,
+            Pill::ALERT,
+            Pill::EXPANDED,
+            Pill::EXPANDED_WITH_STRIP,
+        ] {
             assert!(pill.width * overshoot <= WINDOW_WIDTH, "{pill:?}");
-            assert!(pill.height * overshoot + TOP_MARGIN <= WINDOW_HEIGHT, "{pill:?}");
+            assert!(
+                pill.height * overshoot + TOP_MARGIN <= WINDOW_HEIGHT,
+                "{pill:?}"
+            );
         }
     }
 
     #[test]
     fn radius_never_exceeds_half_the_height() {
-        for pill in [Pill::HIDDEN, Pill::COMPACT, Pill::LEVEL, Pill::ALERT, Pill::EXPANDED] {
+        for pill in [
+            Pill::HIDDEN,
+            Pill::COMPACT,
+            Pill::LEVEL,
+            Pill::ALERT,
+            Pill::EXPANDED,
+        ] {
             assert!(pill.radius * 2.0 <= pill.height, "{pill:?}");
         }
     }
@@ -615,7 +745,10 @@ mod tests {
     #[test]
     fn every_pill_still_fits_with_a_bubble_beside_it() {
         for pill in [Pill::COMPACT, Pill::LEVEL, Pill::ALERT, Pill::EXPANDED] {
-            assert!(pill.width + BUBBLE_GAP + Pill::BUBBLE.width <= WINDOW_WIDTH, "{pill:?}");
+            assert!(
+                pill.width + BUBBLE_GAP + Pill::BUBBLE.width <= WINDOW_WIDTH,
+                "{pill:?}"
+            );
         }
         const { assert!(COMPACT_MAX_WIDTH + BUBBLE_GAP + Pill::BUBBLE.width <= WINDOW_WIDTH) };
     }
@@ -655,7 +788,10 @@ mod tests {
     #[test]
     fn timer_buttons_are_found_by_position() {
         for button in TimerButton::ALL {
-            assert_eq!(TimerButton::at(button.center_x(), TIMER_RING_Y), Some(button));
+            assert_eq!(
+                TimerButton::at(button.center_x(), TIMER_RING_Y),
+                Some(button)
+            );
         }
         assert_eq!(TimerButton::at(TIMER_RING_X, TIMER_RING_Y), None);
         assert_eq!(TimerButton::at(TimerButton::Cancel.center_x(), 10.0), None);
@@ -675,7 +811,11 @@ mod tests {
 
     #[test]
     fn timer_buttons_stay_clear_of_the_home_shortcut() {
-        const { assert!(TIMER_RING_Y - TIMER_BUTTON_SIZE / 2.0 > HOME_SHORTCUT_Y + HOME_SHORTCUT_SIZE / 2.0) };
+        const {
+            assert!(
+                TIMER_RING_Y - TIMER_BUTTON_SIZE / 2.0 > HOME_SHORTCUT_Y + HOME_SHORTCUT_SIZE / 2.0
+            )
+        };
         for button in TimerButton::ALL {
             assert!(!on_home_shortcut(button.center_x(), TIMER_RING_Y));
         }
@@ -698,7 +838,10 @@ mod tests {
             let (left, width) = mode.tab();
             assert!(left + width < SETTINGS_SHORTCUT_X - half);
         }
-        assert!(on_settings_shortcut(SETTINGS_SHORTCUT_X, SETTINGS_SHORTCUT_Y));
+        assert!(on_settings_shortcut(
+            SETTINGS_SHORTCUT_X,
+            SETTINGS_SHORTCUT_Y
+        ));
         assert!(!on_settings_shortcut(100.0, SETTINGS_SHORTCUT_Y));
     }
 
@@ -742,7 +885,10 @@ mod tests {
     #[test]
     fn media_buttons_are_found_by_position() {
         for button in MediaButton::ALL {
-            assert_eq!(MediaButton::at(button.center_x(), MEDIA_BUTTON_Y), Some(button));
+            assert_eq!(
+                MediaButton::at(button.center_x(), MEDIA_BUTTON_Y),
+                Some(button)
+            );
         }
     }
 
@@ -750,7 +896,10 @@ mod tests {
     fn clicks_between_and_around_media_buttons_hit_nothing() {
         let between = (MediaButton::Previous.center_x() + MediaButton::PlayPause.center_x()) / 2.0;
         assert_eq!(MediaButton::at(between, MEDIA_BUTTON_Y), None);
-        assert_eq!(MediaButton::at(MediaButton::PlayPause.center_x(), 40.0), None);
+        assert_eq!(
+            MediaButton::at(MediaButton::PlayPause.center_x(), 40.0),
+            None
+        );
         assert_eq!(MediaButton::at(10.0, MEDIA_BUTTON_Y), None);
     }
 
@@ -795,6 +944,13 @@ mod tests {
     #[test]
     fn scaling_applies_to_every_dimension() {
         let scaled = Pill::COMPACT.scaled(1.5);
-        assert_eq!(scaled, Pill { width: 315.0, height: 54.0, radius: 27.0 });
+        assert_eq!(
+            scaled,
+            Pill {
+                width: 315.0,
+                height: 54.0,
+                radius: 27.0
+            }
+        );
     }
 }

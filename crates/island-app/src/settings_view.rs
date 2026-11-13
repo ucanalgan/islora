@@ -1,8 +1,10 @@
 //! What the settings window shows and where, in DIPs. Nothing here draws, so the
 //! layout and what each click means can be tested without a window.
 
-use island_core::layout::{IslandStyle, Material, ProgressStyle, StartMode, TaskLayout, UiDensity, WaveStyle};
 pub use island_core::geometry::Rect;
+use island_core::layout::{
+    IslandStyle, Material, ProgressStyle, StartMode, TaskLayout, UiDensity, WaveStyle,
+};
 
 pub const WINDOW_WIDTH: f32 = 760.0;
 pub const WINDOW_HEIGHT: f32 = 540.0;
@@ -22,9 +24,19 @@ const PRESET_STEP: u64 = 5;
 const LONGEST_PRESET: u64 = 720;
 
 /// Where the small picture of the island goes on the appearance and layout pages.
-pub const PREVIEW: Rect = Rect { x: LEFT, y: TOP, width: WIDTH, height: 96.0 };
+pub const PREVIEW: Rect = Rect {
+    x: LEFT,
+    y: TOP,
+    width: WIDTH,
+    height: 96.0,
+};
 /// The box for the calendar address, which Windows draws itself.
-pub const ADDRESS_FIELD: Rect = Rect { x: LEFT, y: TOP + 26.0, width: WIDTH, height: 40.0 };
+pub const ADDRESS_FIELD: Rect = Rect {
+    x: LEFT,
+    y: TOP + 26.0,
+    width: WIDTH,
+    height: 40.0,
+};
 
 /// Every notice that can be turned off: its name in the settings file and its label.
 pub const NOTICES: [(&str, &str); 18] = [
@@ -60,8 +72,14 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 6] =
-        [Page::Appearance, Page::Layout, Page::Notices, Page::Calendar, Page::Durations, Page::General];
+    pub const ALL: [Page; 6] = [
+        Page::Appearance,
+        Page::Layout,
+        Page::Notices,
+        Page::Calendar,
+        Page::Durations,
+        Page::General,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -178,18 +196,30 @@ pub struct View {
 
 impl View {
     pub fn action_at(&self, x: f32, y: f32) -> Option<Action> {
-        self.controls.iter().find(|control| control.bounds.contains(x, y)).map(|control| control.action)
+        self.controls
+            .iter()
+            .find(|control| control.bounds.contains(x, y))
+            .map(|control| control.action)
     }
 
     pub fn bounds_of(&self, action: Action) -> Option<Rect> {
-        self.controls.iter().find(|control| control.action == action).map(|control| control.bounds)
+        self.controls
+            .iter()
+            .find(|control| control.action == action)
+            .map(|control| control.bounds)
     }
 
     /// What Tab walks through, in reading order: the pages, then the page.
     pub fn focus_order(&self, page: Page) -> Vec<Focus> {
-        let mut order: Vec<Focus> = self.controls.iter().map(|control| Focus::Control(control.action)).collect();
+        let mut order: Vec<Focus> = self
+            .controls
+            .iter()
+            .map(|control| Focus::Control(control.action))
+            .collect();
         if page == Page::Calendar {
-            let save = order.iter().position(|focus| *focus == Focus::Control(Action::SaveCalendar));
+            let save = order
+                .iter()
+                .position(|focus| *focus == Focus::Control(Action::SaveCalendar));
             order.insert(save.unwrap_or(order.len()), Focus::Address);
         }
         order
@@ -212,12 +242,29 @@ impl View {
     }
 
     fn control(&mut self, action: Action, look: Look, bounds: Rect, label: impl Into<String>) {
-        self.controls.push(Control { action, look, bounds, label: label.into() });
+        self.controls.push(Control {
+            action,
+            look,
+            bounds,
+            label: label.into(),
+        });
     }
 
     fn caption(&mut self, text: impl Into<String>, y: f32) {
-        let bounds = Rect { x: LEFT, y, width: WIDTH, height: 20.0 };
-        self.labels.push(Label { text: text.into(), bounds, size: 12.5, bold: false, opacity: 0.65, centered: false });
+        let bounds = Rect {
+            x: LEFT,
+            y,
+            width: WIDTH,
+            height: 20.0,
+        };
+        self.labels.push(Label {
+            text: text.into(),
+            bounds,
+            size: 12.5,
+            bold: false,
+            opacity: 0.65,
+            centered: false,
+        });
     }
 
     /// Two equal choices side by side.
@@ -225,7 +272,12 @@ impl View {
         let width = (WIDTH - GAP * (N - 1) as f32) / N as f32;
         for (index, (action, selected, label)) in items.into_iter().enumerate() {
             let x = LEFT + index as f32 * (width + GAP);
-            let bounds = Rect { x, y, width, height: CHOICE_HEIGHT };
+            let bounds = Rect {
+                x,
+                y,
+                width,
+                height: CHOICE_HEIGHT,
+            };
             self.control(action, Look::Choice { selected }, bounds, label);
         }
     }
@@ -235,19 +287,41 @@ pub fn view(state: &SettingsState) -> View {
     let mut view = View::default();
     view.labels.push(Label {
         text: "Islora".to_owned(),
-        bounds: Rect { x: 26.0, y: 22.0, width: SIDEBAR_WIDTH - 40.0, height: 32.0 },
+        bounds: Rect {
+            x: 26.0,
+            y: 22.0,
+            width: SIDEBAR_WIDTH - 40.0,
+            height: 32.0,
+        },
         size: 20.0,
         bold: true,
         opacity: 1.0,
         centered: false,
     });
     for (index, page) in Page::ALL.into_iter().enumerate() {
-        let bounds = Rect { x: 14.0, y: 66.0 + index as f32 * 42.0, width: SIDEBAR_WIDTH - 28.0, height: 38.0 };
-        view.control(Action::Open(page), Look::Tab { selected: page == state.page }, bounds, page.label());
+        let bounds = Rect {
+            x: 14.0,
+            y: 66.0 + index as f32 * 42.0,
+            width: SIDEBAR_WIDTH - 28.0,
+            height: 38.0,
+        };
+        view.control(
+            Action::Open(page),
+            Look::Tab {
+                selected: page == state.page,
+            },
+            bounds,
+            page.label(),
+        );
     }
     view.labels.push(Label {
         text: state.page.label().to_owned(),
-        bounds: Rect { x: LEFT, y: 22.0, width: WIDTH, height: 36.0 },
+        bounds: Rect {
+            x: LEFT,
+            y: 22.0,
+            width: WIDTH,
+            height: 36.0,
+        },
         size: 24.0,
         bold: true,
         opacity: 1.0,
@@ -265,54 +339,157 @@ pub fn view(state: &SettingsState) -> View {
 }
 
 fn appearance(view: &mut View, state: &SettingsState) {
-    view.caption("Seçimlerin gerçek island'a da hemen uygulanır", PREVIEW.y + PREVIEW.height + 6.0);
+    view.caption(
+        "Seçimlerin gerçek island'a da hemen uygulanır",
+        PREVIEW.y + PREVIEW.height + 6.0,
+    );
     view.caption("Tasarım", 200.0);
     view.choices(
         222.0,
         [
-            (Action::Material(Material::Black), state.material == Material::Black, "Siyah"),
-            (Action::Material(Material::Glass), state.material == Material::Glass, "Cam"),
+            (
+                Action::Material(Material::Black),
+                state.material == Material::Black,
+                "Siyah",
+            ),
+            (
+                Action::Material(Material::Glass),
+                state.material == Material::Glass,
+                "Cam",
+            ),
         ],
     );
     view.caption("Biçim", 274.0);
     view.choices(
         296.0,
         [
-            (Action::Style(IslandStyle::Island), state.style == IslandStyle::Island, "Island"),
-            (Action::Style(IslandStyle::Notch), state.style == IslandStyle::Notch, "Notch"),
+            (
+                Action::Style(IslandStyle::Island),
+                state.style == IslandStyle::Island,
+                "Island",
+            ),
+            (
+                Action::Style(IslandStyle::Notch),
+                state.style == IslandStyle::Notch,
+                "Notch",
+            ),
         ],
     );
-    let row = Rect { x: LEFT, y: 352.0, width: WIDTH, height: ROW_HEIGHT };
-    view.control(Action::SoundWave, Look::Switch { on: state.sound_wave }, row, "Ses dalgası");
+    let row = Rect {
+        x: LEFT,
+        y: 352.0,
+        width: WIDTH,
+        height: ROW_HEIGHT,
+    };
+    view.control(
+        Action::SoundWave,
+        Look::Switch {
+            on: state.sound_wave,
+        },
+        row,
+        "Ses dalgası",
+    );
     view.caption("Dalga hareketi", 404.0);
-    view.choices(426.0, WaveStyle::ALL.map(|style| {
-        (Action::WaveStyle(style), state.wave_style == style, style.label())
-    }));
+    view.choices(
+        426.0,
+        WaveStyle::ALL.map(|style| {
+            (
+                Action::WaveStyle(style),
+                state.wave_style == style,
+                style.label(),
+            )
+        }),
+    );
     view.caption("Arayüz yoğunluğu", 470.0);
     let width = (WIDTH - GAP * 2.0) / 3.0;
     for (index, density) in UiDensity::ALL.into_iter().enumerate() {
-        let bounds = Rect { x: LEFT + index as f32 * (width + GAP), y: 492.0, width, height: 40.0 };
-        view.control(Action::Density(density), Look::DensityCard { selected: state.density == density }, bounds, density.label());
+        let bounds = Rect {
+            x: LEFT + index as f32 * (width + GAP),
+            y: 492.0,
+            width,
+            height: 40.0,
+        };
+        view.control(
+            Action::Density(density),
+            Look::DensityCard {
+                selected: state.density == density,
+            },
+            bounds,
+            density.label(),
+        );
     }
 }
 
 /// How a short task shares the island with music, and how a send shows.
 fn layout(view: &mut View, state: &SettingsState) {
-    view.caption("Örnek: müzik çalarken telefona gönderilen bir dosya", PREVIEW.y + PREVIEW.height + 6.0);
-    view.caption("Müzik ile Odak, zamanlayıcı veya gönderim birlikteyken", 200.0);
-    view.choices(222.0, TaskLayout::ALL.map(|layout| (Action::Layout(layout), state.layout == layout, layout.label())));
+    view.caption(
+        "Örnek: müzik çalarken telefona gönderilen bir dosya",
+        PREVIEW.y + PREVIEW.height + 6.0,
+    );
+    view.caption(
+        "Müzik ile Odak, zamanlayıcı veya gönderim birlikteyken",
+        200.0,
+    );
+    view.choices(
+        222.0,
+        TaskLayout::ALL.map(|layout| {
+            (
+                Action::Layout(layout),
+                state.layout == layout,
+                layout.label(),
+            )
+        }),
+    );
     view.caption(layout_note(state.layout), 272.0);
     view.caption("Telefona gönderirken açık görünümde ilerleme", 312.0);
     view.choices(
         334.0,
-        ProgressStyle::ALL.map(|style| (Action::Progress(style), state.progress == style, style.label())),
+        ProgressStyle::ALL.map(|style| {
+            (
+                Action::Progress(style),
+                state.progress == style,
+                style.label(),
+            )
+        }),
     );
     view.caption("Kapalıyken ilerleme her zaman küçük bir halkadır", 384.0);
     view.caption("Island'ın görüneceği ekran", 412.0);
     let y = 438.0;
-    view.control(Action::MonitorStep { next: false }, Look::Step, Rect { x: LEFT, y, width: STEP_SIZE, height: STEP_SIZE }, "‹");
-    view.control(Action::MonitorStep { next: true }, Look::Step, Rect { x: LEFT + WIDTH - STEP_SIZE, y, width: STEP_SIZE, height: STEP_SIZE }, "›");
-    view.labels.push(Label { text: state.monitor_label.clone(), bounds: Rect { x: LEFT + STEP_SIZE, y, width: WIDTH - STEP_SIZE * 2.0, height: STEP_SIZE }, size: 14.0, bold: true, opacity: 1.0, centered: true });
+    view.control(
+        Action::MonitorStep { next: false },
+        Look::Step,
+        Rect {
+            x: LEFT,
+            y,
+            width: STEP_SIZE,
+            height: STEP_SIZE,
+        },
+        "‹",
+    );
+    view.control(
+        Action::MonitorStep { next: true },
+        Look::Step,
+        Rect {
+            x: LEFT + WIDTH - STEP_SIZE,
+            y,
+            width: STEP_SIZE,
+            height: STEP_SIZE,
+        },
+        "›",
+    );
+    view.labels.push(Label {
+        text: state.monitor_label.clone(),
+        bounds: Rect {
+            x: LEFT + STEP_SIZE,
+            y,
+            width: WIDTH - STEP_SIZE * 2.0,
+            height: STEP_SIZE,
+        },
+        size: 14.0,
+        bold: true,
+        opacity: 1.0,
+        centered: true,
+    });
 }
 
 /// One line on what the chosen layout does.
@@ -340,23 +517,76 @@ fn notices(view: &mut View, state: &SettingsState) {
         let on = !state.notices_off.iter().any(|name| name == setting);
         view.control(Action::Notice(index), Look::Switch { on }, bounds, label);
     }
-    let notifications = Rect { x: LEFT, y: 380.0, width: WIDTH, height: 42.0 };
-    view.control(Action::WindowsNotifications, Look::Switch { on: state.windows_notifications }, notifications, "Windows bildirimlerini göster");
-    let focus = Rect { x: LEFT, y: 426.0, width: WIDTH, height: 42.0 };
-    view.control(Action::FocusHidesNotifications, Look::Switch { on: state.focus_hides_notifications }, focus, "Odak oturumunda gizle");
+    let notifications = Rect {
+        x: LEFT,
+        y: 380.0,
+        width: WIDTH,
+        height: 42.0,
+    };
+    view.control(
+        Action::WindowsNotifications,
+        Look::Switch {
+            on: state.windows_notifications,
+        },
+        notifications,
+        "Windows bildirimlerini göster",
+    );
+    let focus = Rect {
+        x: LEFT,
+        y: 426.0,
+        width: WIDTH,
+        height: 42.0,
+    };
+    view.control(
+        Action::FocusHidesNotifications,
+        Look::Switch {
+            on: state.focus_hides_notifications,
+        },
+        focus,
+        "Odak oturumunda gizle",
+    );
     if state.muted_app_count > 0 {
-        let clear = Rect { x: LEFT, y: 478.0, width: 210.0, height: 36.0 };
-        view.control(Action::ClearMutedApps, Look::Button, clear, format!("Sessiz uygulamaları sıfırla ({})", state.muted_app_count));
+        let clear = Rect {
+            x: LEFT,
+            y: 478.0,
+            width: 210.0,
+            height: 36.0,
+        };
+        view.control(
+            Action::ClearMutedApps,
+            Look::Button,
+            clear,
+            format!("Sessiz uygulamaları sıfırla ({})", state.muted_app_count),
+        );
     }
-    view.caption("Bildirimde sağ tık: uygulamayı sessize al · Erişim için Windows izni gerekir", 518.0);
+    view.caption(
+        "Bildirimde sağ tık: uygulamayı sessize al · Erişim için Windows izni gerekir",
+        518.0,
+    );
 }
 
 fn calendar(view: &mut View, state: &SettingsState) {
     view.caption("Takvim adresi", TOP);
-    view.caption("Google Takvim'de: Ayarlar > takviminin adı > Takvimi entegre et >", TOP + 72.0);
-    view.caption("iCal biçiminde gizli adres. Bu adres şifre gibidir, kimseyle paylaşma.", TOP + 92.0);
-    let button = Rect { x: LEFT, y: TOP + 126.0, width: 190.0, height: BUTTON_HEIGHT };
-    view.control(Action::SaveCalendar, Look::Button, button, "Kaydet ve yenile");
+    view.caption(
+        "Google Takvim'de: Ayarlar > takviminin adı > Takvimi entegre et >",
+        TOP + 72.0,
+    );
+    view.caption(
+        "iCal biçiminde gizli adres. Bu adres şifre gibidir, kimseyle paylaşma.",
+        TOP + 92.0,
+    );
+    let button = Rect {
+        x: LEFT,
+        y: TOP + 126.0,
+        width: 190.0,
+        height: BUTTON_HEIGHT,
+    };
+    view.control(
+        Action::SaveCalendar,
+        Look::Button,
+        button,
+        "Kaydet ve yenile",
+    );
     if let Some(note) = state.calendar_note {
         view.caption(note, TOP + 176.0);
     }
@@ -368,13 +598,44 @@ fn durations(view: &mut View, state: &SettingsState) {
     for (index, minutes) in state.presets.into_iter().enumerate() {
         let x = LEFT + index as f32 * (width + GAP);
         let y = TOP + 26.0;
-        let shorter = Rect { x, y, width: STEP_SIZE, height: STEP_SIZE };
-        let longer = Rect { x: x + width - STEP_SIZE, y, width: STEP_SIZE, height: STEP_SIZE };
-        view.control(Action::Preset { index, longer: false }, Look::Step, shorter, "−");
-        view.control(Action::Preset { index, longer: true }, Look::Step, longer, "+");
+        let shorter = Rect {
+            x,
+            y,
+            width: STEP_SIZE,
+            height: STEP_SIZE,
+        };
+        let longer = Rect {
+            x: x + width - STEP_SIZE,
+            y,
+            width: STEP_SIZE,
+            height: STEP_SIZE,
+        };
+        view.control(
+            Action::Preset {
+                index,
+                longer: false,
+            },
+            Look::Step,
+            shorter,
+            "−",
+        );
+        view.control(
+            Action::Preset {
+                index,
+                longer: true,
+            },
+            Look::Step,
+            longer,
+            "+",
+        );
         view.labels.push(Label {
             text: format!("{minutes} dk"),
-            bounds: Rect { x: x + STEP_SIZE, y, width: width - STEP_SIZE * 2.0, height: STEP_SIZE },
+            bounds: Rect {
+                x: x + STEP_SIZE,
+                y,
+                width: width - STEP_SIZE * 2.0,
+                height: STEP_SIZE,
+            },
             size: 14.0,
             bold: true,
             opacity: 1.0,
@@ -385,17 +646,44 @@ fn durations(view: &mut View, state: &SettingsState) {
     view.choices(
         TOP + 108.0,
         [
-            (Action::Mode(StartMode::Focus), state.mode == StartMode::Focus, "Odak"),
-            (Action::Mode(StartMode::Timer), state.mode == StartMode::Timer, "Zamanlayıcı"),
+            (
+                Action::Mode(StartMode::Focus),
+                state.mode == StartMode::Focus,
+                "Odak",
+            ),
+            (
+                Action::Mode(StartMode::Timer),
+                state.mode == StartMode::Timer,
+                "Zamanlayıcı",
+            ),
         ],
     );
-    view.caption("Odak, Windows Odak oturumu başlatır ve bildirimleri susturabilir", TOP + 160.0);
+    view.caption(
+        "Odak, Windows Odak oturumu başlatır ve bildirimleri susturabilir",
+        TOP + 160.0,
+    );
 }
 
 fn general(view: &mut View, state: &SettingsState) {
-    let row = Rect { x: LEFT, y: TOP, width: WIDTH, height: ROW_HEIGHT };
-    view.control(Action::Autostart, Look::Switch { on: state.autostart }, row, "Windows ile başlat");
-    let demo = if state.demo_running { "Demoyu durdur" } else { "Demoyu başlat" };
+    let row = Rect {
+        x: LEFT,
+        y: TOP,
+        width: WIDTH,
+        height: ROW_HEIGHT,
+    };
+    view.control(
+        Action::Autostart,
+        Look::Switch {
+            on: state.autostart,
+        },
+        row,
+        "Windows ile başlat",
+    );
+    let demo = if state.demo_running {
+        "Demoyu durdur"
+    } else {
+        "Demoyu başlat"
+    };
     let buttons = [
         (Action::Demo, demo),
         (Action::Reload, "Takvimi ve ayarları yenile"),
@@ -404,18 +692,74 @@ fn general(view: &mut View, state: &SettingsState) {
     ];
     for (index, (action, label)) in buttons.into_iter().enumerate() {
         let y = TOP + 66.0 + index as f32 * (BUTTON_HEIGHT + GAP);
-        let bounds = Rect { x: LEFT, y, width: 240.0, height: BUTTON_HEIGHT };
+        let bounds = Rect {
+            x: LEFT,
+            y,
+            width: 240.0,
+            height: BUTTON_HEIGHT,
+        };
         view.control(action, Look::Button, bounds, label);
     }
-    let motion = Rect { x: LEFT, y: 348.0, width: WIDTH, height: ROW_HEIGHT };
-    view.control(Action::ReducedMotion, Look::Switch { on: state.reduced_motion }, motion, "Hareketi azalt");
+    let motion = Rect {
+        x: LEFT,
+        y: 348.0,
+        width: WIDTH,
+        height: ROW_HEIGHT,
+    };
+    view.control(
+        Action::ReducedMotion,
+        Look::Switch {
+            on: state.reduced_motion,
+        },
+        motion,
+        "Hareketi azalt",
+    );
     view.caption("Hızlı Kontroller otomatik kapansın", 405.0);
     let y = 432.0;
-    view.control(Action::QuickTimeout { next: false }, Look::Step, Rect { x: LEFT, y, width: STEP_SIZE, height: STEP_SIZE }, "−");
-    view.control(Action::QuickTimeout { next: true }, Look::Step, Rect { x: LEFT + WIDTH - STEP_SIZE, y, width: STEP_SIZE, height: STEP_SIZE }, "+");
-    let timeout = if state.quick_timeout == 0 { "Kapalı".to_owned() } else { format!("{} sn", state.quick_timeout) };
-    view.labels.push(Label { text: timeout, bounds: Rect { x: LEFT + STEP_SIZE, y, width: WIDTH - STEP_SIZE * 2.0, height: STEP_SIZE }, size: 14.0, bold: true, opacity: 1.0, centered: true });
-    view.caption(format!("Islora {}", env!("CARGO_PKG_VERSION")), WINDOW_HEIGHT - 44.0);
+    view.control(
+        Action::QuickTimeout { next: false },
+        Look::Step,
+        Rect {
+            x: LEFT,
+            y,
+            width: STEP_SIZE,
+            height: STEP_SIZE,
+        },
+        "−",
+    );
+    view.control(
+        Action::QuickTimeout { next: true },
+        Look::Step,
+        Rect {
+            x: LEFT + WIDTH - STEP_SIZE,
+            y,
+            width: STEP_SIZE,
+            height: STEP_SIZE,
+        },
+        "+",
+    );
+    let timeout = if state.quick_timeout == 0 {
+        "Kapalı".to_owned()
+    } else {
+        format!("{} sn", state.quick_timeout)
+    };
+    view.labels.push(Label {
+        text: timeout,
+        bounds: Rect {
+            x: LEFT + STEP_SIZE,
+            y,
+            width: WIDTH - STEP_SIZE * 2.0,
+            height: STEP_SIZE,
+        },
+        size: 14.0,
+        bold: true,
+        opacity: 1.0,
+        centered: true,
+    });
+    view.caption(
+        format!("Islora {}", env!("CARGO_PKG_VERSION")),
+        WINDOW_HEIGHT - 44.0,
+    );
 }
 
 /// The next duration in that direction, always on a whole step.
@@ -494,8 +838,14 @@ mod tests {
                 rects.push(ADDRESS_FIELD);
             }
             for (index, rect) in rects.iter().enumerate() {
-                assert!(rect.x >= 0.0 && rect.x + rect.width <= WINDOW_WIDTH, "{page:?} {rect:?}");
-                assert!(rect.y >= 0.0 && rect.y + rect.height <= WINDOW_HEIGHT, "{page:?} {rect:?}");
+                assert!(
+                    rect.x >= 0.0 && rect.x + rect.width <= WINDOW_WIDTH,
+                    "{page:?} {rect:?}"
+                );
+                assert!(
+                    rect.y >= 0.0 && rect.y + rect.height <= WINDOW_HEIGHT,
+                    "{page:?} {rect:?}"
+                );
                 for other in &rects[index + 1..] {
                     assert!(!overlaps(*rect, *other), "{page:?} {rect:?} {other:?}");
                 }
@@ -508,8 +858,17 @@ mod tests {
         for from in Page::ALL {
             let view = view(&state(from));
             for to in Page::ALL {
-                let tab = view.controls.iter().find(|control| control.action == Action::Open(to)).unwrap();
-                assert_eq!(tab.look, Look::Tab { selected: to == from });
+                let tab = view
+                    .controls
+                    .iter()
+                    .find(|control| control.action == Action::Open(to))
+                    .unwrap();
+                assert_eq!(
+                    tab.look,
+                    Look::Tab {
+                        selected: to == from
+                    }
+                );
                 let (x, y) = (tab.bounds.x + 5.0, tab.bounds.y + 5.0);
                 assert_eq!(view.action_at(x, y), Some(Action::Open(to)));
             }
@@ -523,7 +882,10 @@ mod tests {
         let first = view.step_focus(current.page, None, true);
         assert_eq!(first, Some(Focus::Control(Action::Open(Page::Appearance))));
         let order = view.focus_order(current.page);
-        assert_eq!(order[Page::ALL.len()], Focus::Control(Action::Material(Material::Black)));
+        assert_eq!(
+            order[Page::ALL.len()],
+            Focus::Control(Action::Material(Material::Black))
+        );
         let last = *order.last().unwrap();
         assert_eq!(view.step_focus(current.page, Some(last), true), first);
         assert_eq!(view.step_focus(current.page, first, false), Some(last));
@@ -534,9 +896,16 @@ mod tests {
     fn the_address_box_comes_before_its_save_button() {
         let current = state(Page::Calendar);
         let order = view(&current).focus_order(current.page);
-        let address = order.iter().position(|focus| *focus == Focus::Address).unwrap();
+        let address = order
+            .iter()
+            .position(|focus| *focus == Focus::Address)
+            .unwrap();
         assert_eq!(order[address + 1], Focus::Control(Action::SaveCalendar));
-        assert!(!view(&state(Page::General)).focus_order(Page::General).contains(&Focus::Address));
+        assert!(
+            !view(&state(Page::General))
+                .focus_order(Page::General)
+                .contains(&Focus::Address)
+        );
     }
 
     #[test]
@@ -554,13 +923,34 @@ mod tests {
         current.sound_wave = false;
         current.wave_style = WaveStyle::Calm;
         let view = view(&current);
-        let look = |action| view.controls.iter().find(|control| control.action == action).unwrap().look;
-        assert_eq!(look(Action::Material(Material::Glass)), Look::Choice { selected: true });
-        assert_eq!(look(Action::Material(Material::Black)), Look::Choice { selected: false });
-        assert_eq!(look(Action::Style(IslandStyle::Notch)), Look::Choice { selected: true });
-        assert_eq!(look(Action::Style(IslandStyle::Island)), Look::Choice { selected: false });
+        let look = |action| {
+            view.controls
+                .iter()
+                .find(|control| control.action == action)
+                .unwrap()
+                .look
+        };
+        assert_eq!(
+            look(Action::Material(Material::Glass)),
+            Look::Choice { selected: true }
+        );
+        assert_eq!(
+            look(Action::Material(Material::Black)),
+            Look::Choice { selected: false }
+        );
+        assert_eq!(
+            look(Action::Style(IslandStyle::Notch)),
+            Look::Choice { selected: true }
+        );
+        assert_eq!(
+            look(Action::Style(IslandStyle::Island)),
+            Look::Choice { selected: false }
+        );
         assert_eq!(look(Action::SoundWave), Look::Switch { on: false });
-        assert_eq!(look(Action::WaveStyle(WaveStyle::Calm)), Look::Choice { selected: true });
+        assert_eq!(
+            look(Action::WaveStyle(WaveStyle::Calm)),
+            Look::Choice { selected: true }
+        );
     }
 
     #[test]
@@ -571,9 +961,24 @@ mod tests {
         let order = view.focus_order(Page::Appearance);
         for density in UiDensity::ALL {
             let action = Action::Density(density);
-            let control = view.controls.iter().find(|control| control.action == action).unwrap();
-            assert_eq!(control.look, Look::DensityCard { selected: density == UiDensity::Detailed });
-            assert_eq!(view.action_at(control.bounds.x + control.bounds.width / 2.0, control.bounds.y + control.bounds.height / 2.0), Some(action));
+            let control = view
+                .controls
+                .iter()
+                .find(|control| control.action == action)
+                .unwrap();
+            assert_eq!(
+                control.look,
+                Look::DensityCard {
+                    selected: density == UiDensity::Detailed
+                }
+            );
+            assert_eq!(
+                view.action_at(
+                    control.bounds.x + control.bounds.width / 2.0,
+                    control.bounds.y + control.bounds.height / 2.0
+                ),
+                Some(action)
+            );
             assert!(order.contains(&Focus::Control(action)));
         }
     }
@@ -584,31 +989,69 @@ mod tests {
         current.layout = TaskLayout::Shared;
         current.progress = ProgressStyle::Fill;
         let view = view(&current);
-        let choice = |action| view.controls.iter().find(|control| control.action == action).unwrap();
+        let choice = |action| {
+            view.controls
+                .iter()
+                .find(|control| control.action == action)
+                .unwrap()
+        };
         for layout in TaskLayout::ALL {
             let control = choice(Action::Layout(layout));
             assert_eq!(control.label, layout.label());
-            assert_eq!(control.look, Look::Choice { selected: layout == TaskLayout::Shared });
+            assert_eq!(
+                control.look,
+                Look::Choice {
+                    selected: layout == TaskLayout::Shared
+                }
+            );
         }
-        assert_eq!(choice(Action::Progress(ProgressStyle::Fill)).look, Look::Choice { selected: true });
-        assert!(view.labels.iter().any(|label| label.text == layout_note(TaskLayout::Shared)));
+        assert_eq!(
+            choice(Action::Progress(ProgressStyle::Fill)).look,
+            Look::Choice { selected: true }
+        );
+        assert!(
+            view.labels
+                .iter()
+                .any(|label| label.text == layout_note(TaskLayout::Shared))
+        );
         // The appearance page no longer has the progress choice.
         let appearance = super::view(&state(Page::Appearance));
-        assert!(appearance.controls.iter().all(|control| !matches!(control.action, Action::Progress(_))));
+        assert!(
+            appearance
+                .controls
+                .iter()
+                .all(|control| !matches!(control.action, Action::Progress(_)))
+        );
     }
 
     #[test]
     fn a_turned_off_notice_shows_as_off() {
         let mut current = state(Page::Notices);
-        current.notices_off = vec!["wifi".to_owned(), "volume".to_owned(), "brightness".to_owned()];
+        current.notices_off = vec![
+            "wifi".to_owned(),
+            "volume".to_owned(),
+            "brightness".to_owned(),
+        ];
         let view = view(&current);
-        let wifi = NOTICES.iter().position(|(setting, _)| *setting == "wifi").unwrap();
-        let volume = NOTICES.iter().position(|(setting, _)| *setting == "volume").unwrap();
-        let brightness = NOTICES.iter().position(|(setting, _)| *setting == "brightness").unwrap();
-        let switches = view.controls.iter().filter_map(|control| match (control.action, control.look) {
-            (Action::Notice(index), Look::Switch { on }) => Some((index, on)),
-            _ => None,
-        });
+        let wifi = NOTICES
+            .iter()
+            .position(|(setting, _)| *setting == "wifi")
+            .unwrap();
+        let volume = NOTICES
+            .iter()
+            .position(|(setting, _)| *setting == "volume")
+            .unwrap();
+        let brightness = NOTICES
+            .iter()
+            .position(|(setting, _)| *setting == "brightness")
+            .unwrap();
+        let switches =
+            view.controls
+                .iter()
+                .filter_map(|control| match (control.action, control.look) {
+                    (Action::Notice(index), Look::Switch { on }) => Some((index, on)),
+                    _ => None,
+                });
         for (index, on) in switches {
             assert_eq!(on, index != wifi && index != volume && index != brightness);
         }
@@ -637,7 +1080,10 @@ mod tests {
     fn toggling_a_notice_keeps_the_others() {
         let off = vec!["wifi".to_owned(), "usb".to_owned()];
         assert_eq!(toggled_notice(&off, "usb"), vec!["wifi".to_owned()]);
-        assert_eq!(toggled_notice(&off, "vpn"), vec!["wifi".to_owned(), "usb".to_owned(), "vpn".to_owned()]);
+        assert_eq!(
+            toggled_notice(&off, "vpn"),
+            vec!["wifi".to_owned(), "usb".to_owned(), "vpn".to_owned()]
+        );
     }
 
     #[test]

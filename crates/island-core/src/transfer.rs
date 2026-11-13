@@ -30,7 +30,10 @@ pub enum Direct {
     /// Windows is starting the network.
     Preparing,
     /// A code to join the network, shown until the phone is on it.
-    Ready { code: Arc<QrMatrix>, network: String },
+    Ready {
+        code: Arc<QrMatrix>,
+        network: String,
+    },
     /// The phone is on the network, so the download code shows.
     Joined { network: String },
     /// Windows' Mobile Hotspot is on, which the phone may already be on, so
@@ -64,8 +67,13 @@ pub struct Transfer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shown {
     /// The code, with the time it has left, such as `4:12`.
-    Waiting { left: String },
-    Sending { permille: u16, amount: String },
+    Waiting {
+        left: String,
+    },
+    Sending {
+        permille: u16,
+        amount: String,
+    },
     Done,
 }
 
@@ -92,7 +100,9 @@ fn minutes_and_seconds(ms: Millis) -> String {
 impl Transfer {
     pub fn permille(&self) -> u16 {
         match self.stage {
-            Stage::Sending { sent } if self.total > 0 => ((sent.min(self.total) as f64 / self.total as f64) * 1000.0) as u16,
+            Stage::Sending { sent } if self.total > 0 => {
+                ((sent.min(self.total) as f64 / self.total as f64) * 1000.0) as u16
+            }
             Stage::Done { .. } => 1000,
             _ => 0,
         }
@@ -100,14 +110,21 @@ impl Transfer {
 
     pub fn activity(&self, now: Millis, style: ProgressStyle) -> Activity {
         let shown = match self.stage {
-            Stage::Waiting { until } => Shown::Waiting { left: minutes_and_seconds(until.saturating_sub(now)) },
+            Stage::Waiting { until } => Shown::Waiting {
+                left: minutes_and_seconds(until.saturating_sub(now)),
+            },
             Stage::Sending { sent } => Shown::Sending {
                 permille: self.permille(),
-                amount: format!("{} / {}", format_size(sent.min(self.total)), format_size(self.total)),
+                amount: format!(
+                    "{} / {}",
+                    format_size(sent.min(self.total)),
+                    format_size(self.total)
+                ),
             },
             Stage::Done { .. } => Shown::Done,
         };
-        let waiting_here = matches!(self.stage, Stage::Waiting { .. }) && self.direct.is_none() && !self.offline;
+        let waiting_here =
+            matches!(self.stage, Stage::Waiting { .. }) && self.direct.is_none() && !self.offline;
         let view = TransferView {
             code: self.code.clone(),
             summary: self.summary.clone(),
@@ -123,12 +140,22 @@ impl Transfer {
         // The compact pill says how long the code still waits, which a bare
         // "QR" left to be guessed.
         let (leading, trailing, icon, badge, expires_at) = match shown {
-            Shown::Waiting { left } => (self.name.clone(), left, Icon::Phone, Bubble::Symbol(Icon::Phone), None),
+            Shown::Waiting { left } => (
+                self.name.clone(),
+                left,
+                Icon::Phone,
+                Bubble::Symbol(Icon::Phone),
+                None,
+            ),
             Shown::Sending { .. } => (
                 self.name.clone(),
                 format!("%{percent}"),
                 Icon::Phone,
-                Bubble::Count { value: percent.to_string(), icon: None, ring: Some(percent) },
+                Bubble::Count {
+                    value: percent.to_string(),
+                    icon: None,
+                    ring: Some(percent),
+                },
                 None,
             ),
             Shown::Done => {
@@ -136,7 +163,13 @@ impl Transfer {
                     Stage::Done { at } => at,
                     _ => now,
                 };
-                ("Gönderildi".to_owned(), String::new(), Icon::Check, Bubble::Symbol(Icon::Check), Some(done_at + DONE_MS))
+                (
+                    "Gönderildi".to_owned(),
+                    String::new(),
+                    Icon::Check,
+                    Bubble::Symbol(Icon::Check),
+                    Some(done_at + DONE_MS),
+                )
             }
         };
         Activity {
@@ -158,7 +191,8 @@ impl Transfer {
             // The suggestion only changes the open view, which counts down anyway.
             Stage::Waiting { until } if counting_down => {
                 let into_second = until.saturating_sub(now) % 1000;
-                Some(now + if into_second == 0 { 1000 } else { into_second }).map(|next| next.min(until))
+                Some(now + if into_second == 0 { 1000 } else { into_second })
+                    .map(|next| next.min(until))
             }
             Stage::Waiting { until } => Some(until),
             Stage::Done { at } => Some(at + DONE_MS),
@@ -189,34 +223,71 @@ mod tests {
     #[test]
     fn a_code_nobody_came_for_suggests_the_own_network() {
         let waiting = transfer(Stage::Waiting { until: WAIT_MS });
-        let view = |transfer: &Transfer, now| transfer.activity(now, ProgressStyle::Ring).transfer.expect("view");
+        let view = |transfer: &Transfer, now| {
+            transfer
+                .activity(now, ProgressStyle::Ring)
+                .transfer
+                .expect("view")
+        };
         assert!(!view(&waiting, NUDGE_MS - 1).nudge);
         assert!(view(&waiting, NUDGE_MS).nudge);
         // Not once the island's own network is on its way, nor while offline.
-        let direct = Transfer { direct: Some(Direct::Preparing), ..waiting.clone() };
+        let direct = Transfer {
+            direct: Some(Direct::Preparing),
+            ..waiting.clone()
+        };
         assert!(!view(&direct, NUDGE_MS).nudge);
-        let offline = Transfer { offline: true, ..waiting.clone() };
+        let offline = Transfer {
+            offline: true,
+            ..waiting.clone()
+        };
         assert!(!view(&offline, NUDGE_MS).nudge);
-        let visited = Transfer { nudge_at: None, ..waiting };
+        let visited = Transfer {
+            nudge_at: None,
+            ..waiting
+        };
         assert!(!view(&visited, NUDGE_MS).nudge);
     }
 
     #[test]
     fn waiting_shows_the_time_left() {
-        let activity = transfer(Stage::Waiting { until: WAIT_MS }).activity(1_500, ProgressStyle::Ring);
+        let activity =
+            transfer(Stage::Waiting { until: WAIT_MS }).activity(1_500, ProgressStyle::Ring);
         assert_eq!(activity.kind, Kind::Transfer);
-        assert_eq!((activity.leading.as_str(), activity.trailing.as_str()), ("tatil.jpg", "4:59"));
+        assert_eq!(
+            (activity.leading.as_str(), activity.trailing.as_str()),
+            ("tatil.jpg", "4:59")
+        );
         let view = activity.transfer.expect("view");
-        assert_eq!(view.shown, Shown::Waiting { left: "4:59".into() });
+        assert_eq!(
+            view.shown,
+            Shown::Waiting {
+                left: "4:59".into()
+            }
+        );
     }
 
     #[test]
     fn sending_shows_how_far_it_got() {
-        let activity = transfer(Stage::Sending { sent: 1024 * 1024 }).activity(0, ProgressStyle::Edge);
+        let activity =
+            transfer(Stage::Sending { sent: 1024 * 1024 }).activity(0, ProgressStyle::Edge);
         assert_eq!(activity.trailing, "%50");
-        assert_eq!(activity.badge, Some(Bubble::Count { value: "50".into(), icon: None, ring: Some(50) }));
+        assert_eq!(
+            activity.badge,
+            Some(Bubble::Count {
+                value: "50".into(),
+                icon: None,
+                ring: Some(50)
+            })
+        );
         let view = activity.transfer.expect("view");
-        assert_eq!(view.shown, Shown::Sending { permille: 500, amount: "1,0 MB / 2,0 MB".into() });
+        assert_eq!(
+            view.shown,
+            Shown::Sending {
+                permille: 500,
+                amount: "1,0 MB / 2,0 MB".into()
+            }
+        );
         assert_eq!(view.style, ProgressStyle::Edge);
     }
 
@@ -235,12 +306,17 @@ mod tests {
         assert_eq!(waiting.next_moment(2_000, true), Some(3_000));
         assert_eq!(waiting.next_moment(9_800, true), Some(10_000));
         assert_eq!(waiting.next_moment(1_500, false), Some(10_000));
-        assert_eq!(transfer(Stage::Sending { sent: 1 }).next_moment(0, true), None);
+        assert_eq!(
+            transfer(Stage::Sending { sent: 1 }).next_moment(0, true),
+            None
+        );
     }
 
     #[test]
     fn more_bytes_than_expected_still_reads_as_full() {
-        let over = transfer(Stage::Sending { sent: 3 * 1024 * 1024 });
+        let over = transfer(Stage::Sending {
+            sent: 3 * 1024 * 1024,
+        });
         assert_eq!(over.permille(), 1000);
     }
 }

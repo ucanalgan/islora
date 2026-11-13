@@ -23,8 +23,12 @@ const DOTNET_EPOCH_MS: i64 = 62_135_596_800_000;
 pub enum ClockTimerState {
     Stopped,
     /// `ends` is in Unix milliseconds.
-    Running { ends: i64 },
-    Paused { remaining_ms: u64 },
+    Running {
+        ends: i64,
+    },
+    Paused {
+        remaining_ms: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,10 +44,13 @@ impl ClockTimer {
     pub fn countdown(&self, now: Millis, wall_now: i64) -> Option<Timer> {
         match self.state {
             ClockTimerState::Stopped => None,
-            ClockTimerState::Paused { remaining_ms } => Some(Timer::paused(remaining_ms, self.duration_ms)),
-            ClockTimerState::Running { ends } => {
-                Some(Timer::ending_at(now + (ends - wall_now).max(0) as Millis, self.duration_ms))
+            ClockTimerState::Paused { remaining_ms } => {
+                Some(Timer::paused(remaining_ms, self.duration_ms))
             }
+            ClockTimerState::Running { ends } => Some(Timer::ending_at(
+                now + (ends - wall_now).max(0) as Millis,
+                self.duration_ms,
+            )),
         }
     }
 }
@@ -62,7 +69,11 @@ fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
 }
 
 fn utf16(bytes: &[u8]) -> String {
-    let units = bytes.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair));
+    let units = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair));
     let text: Vec<u16> = units.take_while(|&unit| unit != 0).collect();
     String::from_utf16_lossy(&text)
 }
@@ -72,13 +83,21 @@ fn entry(record: &[u8], at: usize) -> Option<(String, u32, &[u8], usize)> {
     let size = u32_at(record, at)? as usize;
     let kind = u32_at(record, at + 4)?;
     let name_units = u32_at(record, at + 8)? as usize;
-    let value_at = name_units.checked_add(1)?.checked_mul(2)?.checked_add(ENTRY_HEADER)?;
+    let value_at = name_units
+        .checked_add(1)?
+        .checked_mul(2)?
+        .checked_add(ENTRY_HEADER)?;
     if size < value_at {
         return None;
     }
     let body = record.get(at..at.checked_add(size)?)?;
     let name = utf16(&body[ENTRY_HEADER..value_at]);
-    Some((name, kind, &body[value_at..], (at + size).next_multiple_of(ENTRY_ALIGNMENT)))
+    Some((
+        name,
+        kind,
+        &body[value_at..],
+        (at + size).next_multiple_of(ENTRY_ALIGNMENT),
+    ))
 }
 
 /// Reads one timer. `None` for anything that is not a complete one.
@@ -96,16 +115,26 @@ pub fn parse_timer(record: &[u8]) -> Option<ClockTimer> {
         at = next;
     }
 
-    let duration_ms = u64::try_from(duration? / TICKS_PER_MS).ok().filter(|&ms| ms > 0)?;
+    let duration_ms = u64::try_from(duration? / TICKS_PER_MS)
+        .ok()
+        .filter(|&ms| ms > 0)?;
     let left_ms = u64::try_from(remaining? / TICKS_PER_MS).ok()?;
     // A timer that was never paused may not have written what is left.
     let from_start = if left_ms > 0 { left_ms } else { duration_ms };
     let state = match unix_ms(start?) {
-        Some(started) => ClockTimerState::Running { ends: started + from_start as i64 },
-        None if left_ms > 0 => ClockTimerState::Paused { remaining_ms: left_ms },
+        Some(started) => ClockTimerState::Running {
+            ends: started + from_start as i64,
+        },
+        None if left_ms > 0 => ClockTimerState::Paused {
+            remaining_ms: left_ms,
+        },
         None => ClockTimerState::Stopped,
     };
-    Some(ClockTimer { name: name?, duration_ms, state })
+    Some(ClockTimer {
+        name: name?,
+        duration_ms,
+        state,
+    })
 }
 
 fn int64(value: &[u8]) -> Option<i64> {
@@ -119,8 +148,15 @@ pub fn current(timers: &[ClockTimer], now: i64) -> Option<&ClockTimer> {
         ClockTimerState::Running { ends } if ends > now => Some((ends, timer)),
         _ => None,
     });
-    let paused = || timers.iter().find(|timer| matches!(timer.state, ClockTimerState::Paused { .. }));
-    running.min_by_key(|(ends, _)| *ends).map(|(_, timer)| timer).or_else(paused)
+    let paused = || {
+        timers
+            .iter()
+            .find(|timer| matches!(timer.state, ClockTimerState::Paused { .. }))
+    };
+    running
+        .min_by_key(|(ends, _)| *ends)
+        .map(|(_, timer)| timer)
+        .or_else(paused)
 }
 
 #[cfg(test)]
@@ -137,8 +173,10 @@ mod tests {
     const NOW: i64 = 1_793_381_600_000;
 
     fn stored(start: i64, remaining_ms: i64) -> Vec<u8> {
-        let mut record: Vec<u8> =
-            STOPPED.split(' ').map(|byte| u8::from_str_radix(byte, 16).unwrap()).collect();
+        let mut record: Vec<u8> = STOPPED
+            .split(' ')
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect();
         record[START_VALUE..START_VALUE + 8].copy_from_slice(&start.to_le_bytes());
         let remaining = remaining_ms * TICKS_PER_MS;
         record[REMAINING_VALUE..REMAINING_VALUE + 8].copy_from_slice(&remaining.to_le_bytes());
@@ -150,7 +188,11 @@ mod tests {
     }
 
     fn timer(state: ClockTimerState) -> ClockTimer {
-        ClockTimer { name: "5 dk".into(), duration_ms: 300_000, state }
+        ClockTimer {
+            name: "5 dk".into(),
+            duration_ms: 300_000,
+            state,
+        }
     }
 
     #[test]
@@ -164,26 +206,40 @@ mod tests {
     #[test]
     fn a_running_timer_ends_after_what_was_left_when_it_started() {
         let parsed = parse_timer(&stored(filetime(NOW), 30_000)).unwrap();
-        assert_eq!(parsed.state, ClockTimerState::Running { ends: NOW + 30_000 });
+        assert_eq!(
+            parsed.state,
+            ClockTimerState::Running { ends: NOW + 30_000 }
+        );
     }
 
     #[test]
     fn a_timer_started_fresh_runs_for_its_whole_length() {
         let parsed = parse_timer(&stored(filetime(NOW), 0)).unwrap();
-        assert_eq!(parsed.state, ClockTimerState::Running { ends: NOW + 60_000 });
+        assert_eq!(
+            parsed.state,
+            ClockTimerState::Running { ends: NOW + 60_000 }
+        );
     }
 
     #[test]
     fn the_start_may_be_stored_in_dotnet_time_too() {
         let dotnet = (NOW + DOTNET_EPOCH_MS) * TICKS_PER_MS;
         let parsed = parse_timer(&stored(dotnet, 30_000)).unwrap();
-        assert_eq!(parsed.state, ClockTimerState::Running { ends: NOW + 30_000 });
+        assert_eq!(
+            parsed.state,
+            ClockTimerState::Running { ends: NOW + 30_000 }
+        );
     }
 
     #[test]
     fn time_left_without_a_start_is_a_paused_timer() {
         let parsed = parse_timer(&stored(0, 42_000)).unwrap();
-        assert_eq!(parsed.state, ClockTimerState::Paused { remaining_ms: 42_000 });
+        assert_eq!(
+            parsed.state,
+            ClockTimerState::Paused {
+                remaining_ms: 42_000
+            }
+        );
     }
 
     #[test]
@@ -197,7 +253,9 @@ mod tests {
     #[test]
     fn the_running_timer_that_ends_first_is_shown() {
         let timers = [
-            timer(ClockTimerState::Paused { remaining_ms: 1_000 }),
+            timer(ClockTimerState::Paused {
+                remaining_ms: 1_000,
+            }),
             timer(ClockTimerState::Running { ends: NOW + 90_000 }),
             timer(ClockTimerState::Running { ends: NOW + 30_000 }),
         ];
@@ -209,7 +267,9 @@ mod tests {
         let timers = [
             timer(ClockTimerState::Stopped),
             timer(ClockTimerState::Running { ends: NOW - 1 }),
-            timer(ClockTimerState::Paused { remaining_ms: 1_000 }),
+            timer(ClockTimerState::Paused {
+                remaining_ms: 1_000,
+            }),
         ];
         assert_eq!(current(&timers, NOW), Some(&timers[2]));
     }
@@ -217,9 +277,17 @@ mod tests {
     #[test]
     fn a_countdown_moves_to_the_islands_clock() {
         let running = timer(ClockTimerState::Running { ends: NOW + 30_000 });
-        assert_eq!(running.countdown(5_000, NOW).unwrap().ends_at(), Some(35_000));
-        let paused = timer(ClockTimerState::Paused { remaining_ms: 7_000 });
-        assert_eq!(paused.countdown(5_000, NOW).unwrap().remaining(9_000), 7_000);
+        assert_eq!(
+            running.countdown(5_000, NOW).unwrap().ends_at(),
+            Some(35_000)
+        );
+        let paused = timer(ClockTimerState::Paused {
+            remaining_ms: 7_000,
+        });
+        assert_eq!(
+            paused.countdown(5_000, NOW).unwrap().remaining(9_000),
+            7_000
+        );
         assert_eq!(timer(ClockTimerState::Stopped).countdown(5_000, NOW), None);
     }
 

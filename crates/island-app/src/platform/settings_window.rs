@@ -6,12 +6,15 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
-use island_core::{IslandStyle, Material, ProgressStyle, TaskLayout};
 use crate::settings_view::{
     ADDRESS_FIELD, Action, Control, Focus, Look, PREVIEW, Page, Rect, SIDEBAR_WIDTH, SettingsState,
     View, WINDOW_HEIGHT, WINDOW_WIDTH, view,
 };
-use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use island_core::{IslandStyle, Material, ProgressStyle, TaskLayout};
+use windows::Win32::Foundation::POINT;
+use windows::Win32::Foundation::{
+    COLORREF, D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
@@ -22,18 +25,17 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, GetMonitorInfoW, HBRUSH,
     HDC, HFONT, InvalidateRect, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
     PAINTSTRUCT, SetBkColor, SetTextColor,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::Foundation::POINT;
-use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT,
-    VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE,
+    VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Error, HSTRING, Interface, PCWSTR, Result, w};
@@ -50,7 +52,8 @@ pub const MSG_SETTINGS_CLOSED: u32 = WM_APP + 18;
 
 /// Resource number from app.rc.
 const APP_ICON: usize = 1;
-const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
+const STYLE: WINDOW_STYLE =
+    WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
 const FIELD_INSET: f32 = 12.0;
 const FIELD_TEXT_HEIGHT: f32 = 20.0;
 const FIELD_FONT_SIZE: f32 = 14.0;
@@ -109,7 +112,10 @@ impl SettingsWindow {
                 hInstance: instance.into(),
                 lpszClassName: CLASS,
                 hCursor: LoadCursorW(None, IDC_ARROW)?,
-                hIcon: LoadIconW(Some(instance.into()), PCWSTR(std::ptr::without_provenance(APP_ICON)))?,
+                hIcon: LoadIconW(
+                    Some(instance.into()),
+                    PCWSTR(std::ptr::without_provenance(APP_ICON)),
+                )?,
                 ..Default::default()
             };
             // Fails only when the window was opened before, which leaves the class.
@@ -138,11 +144,28 @@ impl SettingsWindow {
             let dpi = GetDpiForWindow(hwnd);
             let scale = dpi as f32 / 96.0;
             let (width, height) = client_size(scale);
-            let mut frame = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+            let mut frame = RECT {
+                left: 0,
+                top: 0,
+                right: width as i32,
+                bottom: height as i32,
+            };
             AdjustWindowRectExForDpi(&mut frame, STYLE, false, WINDOW_EX_STYLE::default(), dpi)?;
             let (frame_width, frame_height) = (frame.right - frame.left, frame.bottom - frame.top);
-            let (x, y) = if hidden_away { (-8000, 100) } else { centered(frame_width, frame_height)? };
-            SetWindowPos(hwnd, None, x, y, frame_width, frame_height, SWP_NOZORDER | SWP_NOACTIVATE)?;
+            let (x, y) = if hidden_away {
+                (-8000, 100)
+            } else {
+                centered(frame_width, frame_height)?
+            };
+            SetWindowPos(
+                hwnd,
+                None,
+                x,
+                y,
+                frame_width,
+                frame_height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )?;
 
             let target = create_target(hwnd, width, height)?;
             let context = target.cast()?;
@@ -168,7 +191,11 @@ impl SettingsWindow {
             };
             window.fit_address_field();
             window.show_address_on_its_page();
-            let show = if hidden_away { SW_SHOWNOACTIVATE } else { SW_SHOW };
+            let show = if hidden_away {
+                SW_SHOWNOACTIVATE
+            } else {
+                SW_SHOW
+            };
             let _ = ShowWindow(hwnd, show);
             if !hidden_away {
                 // STARTUPINFO may override the first ShowWindow call (for
@@ -200,7 +227,10 @@ impl SettingsWindow {
 
     /// One step of the preview's move to a new choice. The timer stops with it.
     pub fn on_timer(&mut self) {
-        let done = self.transition.as_ref().is_none_or(|(_, started)| started.elapsed() >= TRANSITION);
+        let done = self
+            .transition
+            .as_ref()
+            .is_none_or(|(_, started)| started.elapsed() >= TRANSITION);
         if done {
             self.transition = None;
             unsafe {
@@ -215,18 +245,27 @@ impl SettingsWindow {
         let shapes = preview_shapes(&state);
         // A new choice on the same page moves the preview there. Another page
         // simply shows its own.
-        if !state.reduced_motion && state.page == self.state.page && shapes != self.shapes && !self.shapes.is_empty() {
+        if !state.reduced_motion
+            && state.page == self.state.page
+            && shapes != self.shapes
+            && !self.shapes.is_empty()
+        {
             let from = std::mem::replace(&mut self.shapes, shapes);
             self.transition = Some((from, Instant::now()));
             unsafe { SetTimer(Some(self.hwnd), PREVIEW_TIMER, TRANSITION_TICK_MS, None) };
         } else {
             self.shapes = shapes;
             self.transition = None;
-            unsafe { let _ = KillTimer(Some(self.hwnd), PREVIEW_TIMER); }
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), PREVIEW_TIMER);
+            }
         }
         self.state = state;
         // A page change can take away what the keyboard was on.
-        if self.focus.is_some_and(|focus| !self.view.focus_order(self.state.page).contains(&focus)) {
+        if self
+            .focus
+            .is_some_and(|focus| !self.view.focus_order(self.state.page).contains(&focus))
+        {
             self.focus = None;
         }
         self.show_address_on_its_page();
@@ -255,7 +294,11 @@ impl SettingsWindow {
     fn move_focus(&mut self, forward: bool) {
         self.focus = self.view.step_focus(self.state.page, self.focus, forward);
         self.ring = true;
-        let target = if self.focus == Some(Focus::Address) { self.address } else { self.hwnd };
+        let target = if self.focus == Some(Focus::Address) {
+            self.address
+        } else {
+            self.hwnd
+        };
         unsafe {
             let _ = SetFocus(Some(target));
         }
@@ -271,7 +314,9 @@ impl SettingsWindow {
     pub fn pointer_on_control(&self) -> bool {
         let mut pointer = POINT::default();
         unsafe {
-            if GetCursorPos(&mut pointer).is_err() || !ScreenToClient(self.hwnd, &mut pointer).as_bool() {
+            if GetCursorPos(&mut pointer).is_err()
+                || !ScreenToClient(self.hwnd, &mut pointer).as_bool()
+            {
                 return false;
             }
         }
@@ -279,7 +324,11 @@ impl SettingsWindow {
     }
 
     fn show_address_on_its_page(&self) {
-        let shown = if self.state.page == Page::Calendar { SW_SHOWNA } else { SW_HIDE };
+        let shown = if self.state.page == Page::Calendar {
+            SW_SHOWNA
+        } else {
+            SW_HIDE
+        };
         unsafe {
             let _ = ShowWindow(self.address, shown);
         }
@@ -295,7 +344,8 @@ impl SettingsWindow {
     }
 
     pub fn action_at(&self, x: i32, y: i32) -> Option<Action> {
-        self.view.action_at(x as f32 / self.scale, y as f32 / self.scale)
+        self.view
+            .action_at(x as f32 / self.scale, y as f32 / self.scale)
     }
 
     pub fn on_pointer(&mut self, x: i32, y: i32) {
@@ -378,7 +428,12 @@ impl SettingsWindow {
                 0,
                 w!("Segoe UI Variable Text"),
             );
-            SendMessageW(self.address, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+            SendMessageW(
+                self.address,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(1)),
+            );
             if !self.address_font.is_invalid() {
                 let _ = DeleteObject(self.address_font.into());
             }
@@ -422,7 +477,9 @@ impl SettingsWindow {
 
     fn recreate_target(&mut self) {
         let (width, height) = client_size(self.scale);
-        let Ok(target) = create_target(self.hwnd, width, height) else { return };
+        let Ok(target) = create_target(self.hwnd, width, height) else {
+            return;
+        };
         let Ok(context) = target.cast() else { return };
         self.target = target;
         self.context = context;
@@ -432,7 +489,12 @@ impl SettingsWindow {
     fn painting(&self) -> Painting<'_> {
         let mut painting = Painting::default();
         painting.shapes.push(ShapeRun {
-            bounds: self.bounds(Rect { x: 0.0, y: 0.0, width: SIDEBAR_WIDTH, height: WINDOW_HEIGHT }),
+            bounds: self.bounds(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: SIDEBAR_WIDTH,
+                height: WINDOW_HEIGHT,
+            }),
             radius: 0.0,
             fill: SIDEBAR,
             border: None,
@@ -457,7 +519,12 @@ impl SettingsWindow {
         };
         if let Some(rect) = focused.filter(|_| self.ring) {
             const GAP: f32 = 3.0;
-            let around = Rect { x: rect.x - GAP, y: rect.y - GAP, width: rect.width + GAP * 2.0, height: rect.height + GAP * 2.0 };
+            let around = Rect {
+                x: rect.x - GAP,
+                y: rect.y - GAP,
+                width: rect.width + GAP * 2.0,
+                height: rect.height + GAP * 2.0,
+            };
             painting.shapes.push(ShapeRun {
                 bounds: self.bounds(around),
                 radius: 12.0 * self.scale,
@@ -472,7 +539,11 @@ impl SettingsWindow {
                 size: label.size * self.scale,
                 bold: label.bold,
                 opacity: label.opacity,
-                align: if label.centered { Align::Center } else { Align::Leading },
+                align: if label.centered {
+                    Align::Center
+                } else {
+                    Align::Leading
+                },
                 font: Font::Text,
                 even_digits: false,
             });
@@ -482,7 +553,12 @@ impl SettingsWindow {
 
     fn bounds(&self, rect: Rect) -> Bounds {
         let scale = self.scale;
-        Bounds { x: rect.x * scale, y: rect.y * scale, width: rect.width * scale, height: rect.height * scale }
+        Bounds {
+            x: rect.x * scale,
+            y: rect.y * scale,
+            width: rect.width * scale,
+            height: rect.height * scale,
+        }
     }
 
     fn control<'a>(&self, painting: &mut Painting<'a>, control: &'a Control) {
@@ -501,51 +577,151 @@ impl SettingsWindow {
         };
         match control.look {
             Look::Tab { selected } => {
-                let wash = if selected { 0.11 } else if hovered { 0.05 } else { 0.0 };
-                painting.shapes.push(ShapeRun { bounds, radius, fill: [1.0, 1.0, 1.0, wash], border: None });
-                let inset = Bounds { x: bounds.x + 12.0 * self.scale, width: bounds.width - 12.0 * self.scale, ..bounds };
-                painting.texts.push(text(inset, 14.0, selected, if selected { 1.0 } else { 0.75 }, Align::Leading));
+                let wash = if selected {
+                    0.11
+                } else if hovered {
+                    0.05
+                } else {
+                    0.0
+                };
+                painting.shapes.push(ShapeRun {
+                    bounds,
+                    radius,
+                    fill: [1.0, 1.0, 1.0, wash],
+                    border: None,
+                });
+                let inset = Bounds {
+                    x: bounds.x + 12.0 * self.scale,
+                    width: bounds.width - 12.0 * self.scale,
+                    ..bounds
+                };
+                painting.texts.push(text(
+                    inset,
+                    14.0,
+                    selected,
+                    if selected { 1.0 } else { 0.75 },
+                    Align::Leading,
+                ));
             }
             Look::Choice { selected } => {
-                let border = if selected { (ACCENT, 2.0 * self.scale) } else { (HAIRLINE, self.scale) };
-                painting.shapes.push(ShapeRun { bounds, radius, fill: self.surface(hovered), border: Some(border) });
-                painting.texts.push(text(bounds, 14.0, true, 1.0, Align::Center));
+                let border = if selected {
+                    (ACCENT, 2.0 * self.scale)
+                } else {
+                    (HAIRLINE, self.scale)
+                };
+                painting.shapes.push(ShapeRun {
+                    bounds,
+                    radius,
+                    fill: self.surface(hovered),
+                    border: Some(border),
+                });
+                painting
+                    .texts
+                    .push(text(bounds, 14.0, true, 1.0, Align::Center));
             }
             Look::DensityCard { selected } => {
-                let border = if selected { (WHITE, 2.0 * self.scale) } else { (HAIRLINE, self.scale) };
-                painting.shapes.push(ShapeRun { bounds, radius, fill: self.surface(hovered), border: Some(border) });
-                let miniature = Bounds { x: bounds.x + 8.0 * self.scale, y: bounds.y + 10.0 * self.scale, width: 35.0 * self.scale, height: 20.0 * self.scale };
-                painting.shapes.push(ShapeRun { bounds: miniature, radius: 8.0 * self.scale, fill: [0.02, 0.02, 0.02, 1.0], border: None });
-                let count = match control.action { Action::Density(island_core::layout::UiDensity::Minimal) => 1, Action::Density(island_core::layout::UiDensity::Detailed) => 3, _ => 2 };
+                let border = if selected {
+                    (WHITE, 2.0 * self.scale)
+                } else {
+                    (HAIRLINE, self.scale)
+                };
+                painting.shapes.push(ShapeRun {
+                    bounds,
+                    radius,
+                    fill: self.surface(hovered),
+                    border: Some(border),
+                });
+                let miniature = Bounds {
+                    x: bounds.x + 8.0 * self.scale,
+                    y: bounds.y + 10.0 * self.scale,
+                    width: 35.0 * self.scale,
+                    height: 20.0 * self.scale,
+                };
+                painting.shapes.push(ShapeRun {
+                    bounds: miniature,
+                    radius: 8.0 * self.scale,
+                    fill: [0.02, 0.02, 0.02, 1.0],
+                    border: None,
+                });
+                let count = match control.action {
+                    Action::Density(island_core::layout::UiDensity::Minimal) => 1,
+                    Action::Density(island_core::layout::UiDensity::Detailed) => 3,
+                    _ => 2,
+                };
                 for index in 0..count {
-                    let mark = Bounds { x: miniature.x + 7.0 * self.scale, y: miniature.y + (5.0 + index as f32 * 4.0) * self.scale, width: (20.0 - index as f32 * 4.0) * self.scale, height: 1.5 * self.scale };
-                    painting.shapes.push(ShapeRun { bounds: mark, radius: self.scale, fill: WHITE, border: None });
+                    let mark = Bounds {
+                        x: miniature.x + 7.0 * self.scale,
+                        y: miniature.y + (5.0 + index as f32 * 4.0) * self.scale,
+                        width: (20.0 - index as f32 * 4.0) * self.scale,
+                        height: 1.5 * self.scale,
+                    };
+                    painting.shapes.push(ShapeRun {
+                        bounds: mark,
+                        radius: self.scale,
+                        fill: WHITE,
+                        border: None,
+                    });
                 }
-                let label = Bounds { x: bounds.x + 45.0 * self.scale, width: bounds.width - 49.0 * self.scale, ..bounds };
-                painting.texts.push(text(label, 12.0, true, 1.0, Align::Center));
+                let label = Bounds {
+                    x: bounds.x + 45.0 * self.scale,
+                    width: bounds.width - 49.0 * self.scale,
+                    ..bounds
+                };
+                painting
+                    .texts
+                    .push(text(label, 12.0, true, 1.0, Align::Center));
             }
             Look::Switch { on } => {
-                painting.shapes.push(ShapeRun { bounds, radius, fill: self.surface(hovered), border: None });
+                painting.shapes.push(ShapeRun {
+                    bounds,
+                    radius,
+                    fill: self.surface(hovered),
+                    border: None,
+                });
                 let inset = 14.0 * self.scale;
-                let label = Bounds { x: bounds.x + inset, width: bounds.width - inset * 2.0 - 40.0 * self.scale, ..bounds };
-                painting.texts.push(text(label, 14.0, false, 1.0, Align::Leading));
+                let label = Bounds {
+                    x: bounds.x + inset,
+                    width: bounds.width - inset * 2.0 - 40.0 * self.scale,
+                    ..bounds
+                };
+                painting
+                    .texts
+                    .push(text(label, 14.0, false, 1.0, Align::Leading));
                 self.switch(painting, bounds, on);
             }
             Look::Button => {
                 let wash = if hovered { 0.17 } else { 0.11 };
-                painting.shapes.push(ShapeRun { bounds, radius, fill: [1.0, 1.0, 1.0, wash], border: None });
-                painting.texts.push(text(bounds, 14.0, false, 1.0, Align::Center));
+                painting.shapes.push(ShapeRun {
+                    bounds,
+                    radius,
+                    fill: [1.0, 1.0, 1.0, wash],
+                    border: None,
+                });
+                painting
+                    .texts
+                    .push(text(bounds, 14.0, false, 1.0, Align::Center));
             }
             Look::Step => {
                 let wash = if hovered { 0.17 } else { 0.11 };
-                painting.shapes.push(ShapeRun { bounds, radius: 8.0 * self.scale, fill: [1.0, 1.0, 1.0, wash], border: None });
-                painting.texts.push(text(bounds, 17.0, false, 1.0, Align::Center));
+                painting.shapes.push(ShapeRun {
+                    bounds,
+                    radius: 8.0 * self.scale,
+                    fill: [1.0, 1.0, 1.0, wash],
+                    border: None,
+                });
+                painting
+                    .texts
+                    .push(text(bounds, 17.0, false, 1.0, Align::Center));
             }
         }
     }
 
     fn surface(&self, hovered: bool) -> [f32; 4] {
-        if hovered { [0.157, 0.157, 0.192, 1.0] } else { SURFACE }
+        if hovered {
+            [0.157, 0.157, 0.192, 1.0]
+        } else {
+            SURFACE
+        }
     }
 
     fn switch(&self, painting: &mut Painting<'_>, row: Bounds, on: bool) {
@@ -564,9 +740,18 @@ impl SettingsWindow {
             border: None,
         });
         let gap = (height - knob) / 2.0;
-        let x = if on { track.x + width - knob - gap } else { track.x + gap };
+        let x = if on {
+            track.x + width - knob - gap
+        } else {
+            track.x + gap
+        };
         painting.shapes.push(ShapeRun {
-            bounds: Bounds { x, y: track.y + gap, width: knob, height: knob },
+            bounds: Bounds {
+                x,
+                y: track.y + gap,
+                width: knob,
+                height: knob,
+            },
             radius: knob / 2.0,
             fill: WHITE,
             border: None,
@@ -579,13 +764,42 @@ impl SettingsWindow {
     fn preview(&self, painting: &mut Painting<'_>) {
         let scene = PREVIEW;
         let scale = self.scale;
-        let place = |x: f32, y: f32, width: f32, height: f32| self.bounds(Rect { x: scene.x + x, y: scene.y + y, width, height });
-        let plain = |bounds: Bounds, radius: f32, fill: [f32; 4]| ShapeRun { bounds, radius: radius * scale, fill, border: None };
-        painting.shapes.push(plain(place(0.0, 0.0, scene.width, scene.height), 12.0, [0.204, 0.314, 0.486, 1.0]));
-        painting.shapes.push(plain(place(40.0, 26.0, 60.0, 60.0), 30.0, [0.91, 0.725, 0.227, 1.0]));
-        painting.shapes.push(plain(place(scene.width - 120.0, 10.0, 76.0, 76.0), 38.0, [0.184, 0.659, 0.604, 1.0]));
+        let place = |x: f32, y: f32, width: f32, height: f32| {
+            self.bounds(Rect {
+                x: scene.x + x,
+                y: scene.y + y,
+                width,
+                height,
+            })
+        };
+        let plain = |bounds: Bounds, radius: f32, fill: [f32; 4]| ShapeRun {
+            bounds,
+            radius: radius * scale,
+            fill,
+            border: None,
+        };
+        painting.shapes.push(plain(
+            place(0.0, 0.0, scene.width, scene.height),
+            12.0,
+            [0.204, 0.314, 0.486, 1.0],
+        ));
+        painting.shapes.push(plain(
+            place(40.0, 26.0, 60.0, 60.0),
+            30.0,
+            [0.91, 0.725, 0.227, 1.0],
+        ));
+        painting.shapes.push(plain(
+            place(scene.width - 120.0, 10.0, 76.0, 76.0),
+            38.0,
+            [0.184, 0.659, 0.604, 1.0],
+        ));
 
-        let progress = self.transition.as_ref().map(|(from, started)| (from, ease(started.elapsed().as_secs_f32() / TRANSITION.as_secs_f32())));
+        let progress = self.transition.as_ref().map(|(from, started)| {
+            (
+                from,
+                ease(started.elapsed().as_secs_f32() / TRANSITION.as_secs_f32()),
+            )
+        });
         for part in Part::ALL {
             let to = self.shapes.iter().find(|shape| shape.part == part);
             match progress {
@@ -597,12 +811,36 @@ impl SettingsWindow {
                             if a.marks == b.marks {
                                 self.draw_part(painting, &outline, &b.marks, 1.0, 1.0);
                             } else {
-                                self.draw_part(painting, &outline, &a.marks, 1.0, (1.0 - t * 1.6).max(0.0));
-                                self.draw_part(painting, &outline, &b.marks, 0.0, ((t - 0.3) / 0.7).clamp(0.0, 1.0));
+                                self.draw_part(
+                                    painting,
+                                    &outline,
+                                    &a.marks,
+                                    1.0,
+                                    (1.0 - t * 1.6).max(0.0),
+                                );
+                                self.draw_part(
+                                    painting,
+                                    &outline,
+                                    &b.marks,
+                                    0.0,
+                                    ((t - 0.3) / 0.7).clamp(0.0, 1.0),
+                                );
                             }
                         }
-                        (Some(a), None) => self.draw_part(painting, &a.outline().scaled(1.0 - 0.4 * t), &a.marks, 1.0 - t, 1.0 - t),
-                        (None, Some(b)) => self.draw_part(painting, &b.outline().scaled(0.6 + 0.4 * t), &b.marks, t, t),
+                        (Some(a), None) => self.draw_part(
+                            painting,
+                            &a.outline().scaled(1.0 - 0.4 * t),
+                            &a.marks,
+                            1.0 - t,
+                            1.0 - t,
+                        ),
+                        (None, Some(b)) => self.draw_part(
+                            painting,
+                            &b.outline().scaled(0.6 + 0.4 * t),
+                            &b.marks,
+                            t,
+                            t,
+                        ),
                         (None, None) => {}
                     }
                 }
@@ -615,22 +853,45 @@ impl SettingsWindow {
         }
         // A notch starts above the scene, which is then painted over, so that
         // its top corners stay square against the edge.
-        painting.shapes.push(plain(place(0.0, -NOTCH_REACH - 2.0, scene.width, NOTCH_REACH + 2.0), 0.0, BACKGROUND));
+        painting.shapes.push(plain(
+            place(0.0, -NOTCH_REACH - 2.0, scene.width, NOTCH_REACH + 2.0),
+            0.0,
+            BACKGROUND,
+        ));
     }
 
     /// One shape at `body` opacity, and what it holds at `marks` opacity. Only
     /// the first drawing of a shape paints its body.
-    fn draw_part(&self, painting: &mut Painting<'_>, outline: &Outline, marks: &[Mark], body: f32, opacity: f32) {
+    fn draw_part(
+        &self,
+        painting: &mut Painting<'_>,
+        outline: &Outline,
+        marks: &[Mark],
+        body: f32,
+        opacity: f32,
+    ) {
         let scale = self.scale;
         let scene = PREVIEW;
         let at = outline.at;
-        let place = |x: f32, y: f32, width: f32, height: f32| self.bounds(Rect { x: scene.x + at.x + x, y: scene.y + at.y + y, width, height });
+        let place = |x: f32, y: f32, width: f32, height: f32| {
+            self.bounds(Rect {
+                x: scene.x + at.x + x,
+                y: scene.y + at.y + y,
+                width,
+                height,
+            })
+        };
         let shape_bounds = place(0.0, -outline.above, at.width, at.height + outline.above);
         let radius = outline.radius * scale;
         if body > 0.0 {
             let fade = |color: [f32; 4]| [color[0], color[1], color[2], color[3] * body];
             let border = (outline.border[3] > 0.0).then(|| (fade(outline.border), scale));
-            painting.shapes.push(ShapeRun { bounds: shape_bounds, radius, fill: fade(outline.fill), border });
+            painting.shapes.push(ShapeRun {
+                bounds: shape_bounds,
+                radius,
+                fill: fade(outline.fill),
+                border,
+            });
         }
         if opacity <= 0.0 {
             return;
@@ -638,14 +899,27 @@ impl SettingsWindow {
         let green = |alpha: f32| [GREEN[0], GREEN[1], GREEN[2], alpha * opacity];
         for mark in marks {
             match mark {
-                Mark::Text { text, at: spot, size, bold, opacity: own, centered, icon, tinted } => {
+                Mark::Text {
+                    text,
+                    at: spot,
+                    size,
+                    bold,
+                    opacity: own,
+                    centered,
+                    icon,
+                    tinted,
+                } => {
                     let run = TextRun {
                         text,
                         bounds: place(spot.x, spot.y, spot.width, spot.height),
                         size: size * scale,
                         bold: *bold,
                         opacity: own * opacity,
-                        align: if *centered { Align::Center } else { Align::Leading },
+                        align: if *centered {
+                            Align::Center
+                        } else {
+                            Align::Leading
+                        },
                         font: if *icon { Font::Icons } else { Font::Text },
                         even_digits: false,
                     };
@@ -655,10 +929,22 @@ impl SettingsWindow {
                         painting.texts.push(run);
                     }
                 }
-                Mark::Bar { at: spot, opacity: own } => {
-                    painting.bars.push(BarRun { bounds: place(spot.x, spot.y, spot.width, spot.height), opacity: own * opacity });
+                Mark::Bar {
+                    at: spot,
+                    opacity: own,
+                } => {
+                    painting.bars.push(BarRun {
+                        bounds: place(spot.x, spot.y, spot.width, spot.height),
+                        opacity: own * opacity,
+                    });
                 }
-                Mark::Ring { x, y, radius: ring, width, fraction } => {
+                Mark::Ring {
+                    x,
+                    y,
+                    radius: ring,
+                    width,
+                    fraction,
+                } => {
                     let point = place(*x, *y, 0.0, 0.0);
                     painting.rings.push(RingRun {
                         center_x: point.x,
@@ -673,13 +959,39 @@ impl SettingsWindow {
                 Mark::Edge { fraction } => {
                     let whole = place(0.0, 0.0, at.width, at.height);
                     let open_top = outline.above > 0.0;
-                    painting.outlines.push(OutlineRun { bounds: whole, radius, width: 5.0 * scale, color: green(0.25), fraction: *fraction, dash: None, open_top });
-                    painting.outlines.push(OutlineRun { bounds: whole, radius, width: 2.0 * scale, color: green(1.0), fraction: *fraction, dash: None, open_top });
+                    painting.outlines.push(OutlineRun {
+                        bounds: whole,
+                        radius,
+                        width: 5.0 * scale,
+                        color: green(0.25),
+                        fraction: *fraction,
+                        dash: None,
+                        open_top,
+                    });
+                    painting.outlines.push(OutlineRun {
+                        bounds: whole,
+                        radius,
+                        width: 2.0 * scale,
+                        color: green(1.0),
+                        fraction: *fraction,
+                        dash: None,
+                        open_top,
+                    });
                 }
                 Mark::Fill { fraction } => {
                     let reach = at.width * fraction;
-                    let filled = ShapeRun { bounds: place(0.0, 0.0, reach, at.height), radius: 0.0, fill: green(0.26), border: None };
-                    let front = ShapeRun { bounds: place(reach - 2.0, 0.0, 2.0, at.height), radius: 0.0, fill: green(0.8), border: None };
+                    let filled = ShapeRun {
+                        bounds: place(0.0, 0.0, reach, at.height),
+                        radius: 0.0,
+                        fill: green(0.26),
+                        border: None,
+                    };
+                    let front = ShapeRun {
+                        bounds: place(reach - 2.0, 0.0, 2.0, at.height),
+                        radius: 0.0,
+                        fill: green(0.8),
+                        border: None,
+                    };
                     painting.clipped.push((filled, shape_bounds, radius));
                     painting.clipped.push((front, shape_bounds, radius));
                 }
@@ -706,7 +1018,9 @@ pub fn is_dialog_key(message: &MSG) -> bool {
     field != 0
         && message.hwnd.0 as isize == field
         && message.message == WM_KEYDOWN
-        && [VK_TAB, VK_RETURN, VK_ESCAPE].iter().any(|key| key.0 as usize == message.wParam.0)
+        && [VK_TAB, VK_RETURN, VK_ESCAPE]
+            .iter()
+            .any(|key| key.0 as usize == message.wParam.0)
 }
 
 /// Tells the app the window is gone. Called while it is being destroyed.
@@ -719,17 +1033,26 @@ pub fn notify_closed() {
 }
 
 fn client_size(scale: f32) -> (u32, u32) {
-    ((WINDOW_WIDTH * scale).round() as u32, (WINDOW_HEIGHT * scale).round() as u32)
+    (
+        (WINDOW_WIDTH * scale).round() as u32,
+        (WINDOW_HEIGHT * scale).round() as u32,
+    )
 }
 
 fn centered(width: i32, height: i32) -> Result<(i32, i32)> {
-    let mut monitor = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let mut monitor = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
     unsafe {
         let primary = MonitorFromPoint(Default::default(), MONITOR_DEFAULTTOPRIMARY);
         GetMonitorInfoW(primary, &mut monitor).ok()?;
     }
     let area = monitor.rcWork;
-    Ok((area.left + (area.right - area.left - width) / 2, area.top + (area.bottom - area.top - height) / 2))
+    Ok((
+        area.left + (area.right - area.left - width) / 2,
+        area.top + (area.bottom - area.top - height) / 2,
+    ))
 }
 
 fn create_target(hwnd: HWND, width: u32, height: u32) -> Result<ID2D1HwndRenderTarget> {
@@ -756,7 +1079,11 @@ fn create_target(hwnd: HWND, width: u32, height: u32) -> Result<ID2D1HwndRenderT
 }
 
 /// The address is a secret, so the box shows dots, which also stops it being copied.
-fn create_address_field(parent: HWND, instance: windows::Win32::Foundation::HINSTANCE, address: &str) -> Result<HWND> {
+fn create_address_field(
+    parent: HWND,
+    instance: windows::Win32::Foundation::HINSTANCE,
+    address: &str,
+) -> Result<HWND> {
     let style = WS_CHILD.0 | ES_AUTOHSCROLL as u32 | ES_PASSWORD as u32;
     unsafe {
         CreateWindowExW(
@@ -805,7 +1132,12 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-    [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t)]
+    [
+        lerp(a[0], b[0], t),
+        lerp(a[1], b[1], t),
+        lerp(a[2], b[2], t),
+        lerp(a[3], b[3], t),
+    ]
 }
 
 /// The shapes of the preview, which keep who they are across a change.
@@ -823,22 +1155,62 @@ impl Part {
 /// Something drawn inside a shape, placed from its top left, in DIPs.
 #[derive(Clone, Debug, PartialEq)]
 enum Mark {
-    Text { text: &'static str, at: Rect, size: f32, bold: bool, opacity: f32, centered: bool, icon: bool, tinted: bool },
-    Bar { at: Rect, opacity: f32 },
-    Ring { x: f32, y: f32, radius: f32, width: f32, fraction: f32 },
+    Text {
+        text: &'static str,
+        at: Rect,
+        size: f32,
+        bold: bool,
+        opacity: f32,
+        centered: bool,
+        icon: bool,
+        tinted: bool,
+    },
+    Bar {
+        at: Rect,
+        opacity: f32,
+    },
+    Ring {
+        x: f32,
+        y: f32,
+        radius: f32,
+        width: f32,
+        fraction: f32,
+    },
     /// Light along the edge of the shape, as far as the send got.
-    Edge { fraction: f32 },
+    Edge {
+        fraction: f32,
+    },
     /// The shape filled from the left, as far as the send got.
-    Fill { fraction: f32 },
+    Fill {
+        fraction: f32,
+    },
 }
 
 impl Mark {
     fn text(text: &'static str, at: Rect, size: f32, bold: bool) -> Mark {
-        Mark::Text { text, at, size, bold, opacity: 1.0, centered: false, icon: false, tinted: false }
+        Mark::Text {
+            text,
+            at,
+            size,
+            bold,
+            opacity: 1.0,
+            centered: false,
+            icon: false,
+            tinted: false,
+        }
     }
 
     fn icon(glyph: &'static str, at: Rect, size: f32) -> Mark {
-        Mark::Text { text: glyph, at, size, bold: false, opacity: 1.0, centered: true, icon: true, tinted: false }
+        Mark::Text {
+            text: glyph,
+            at,
+            size,
+            bold: false,
+            opacity: 1.0,
+            centered: true,
+            icon: true,
+            tinted: false,
+        }
     }
 }
 
@@ -916,23 +1288,47 @@ impl Dress {
             top: if notch { 0.0 } else { 12.0 },
             above: if notch { NOTCH_REACH } else { 0.0 },
             notch,
-            fill: if glass { [0.05, 0.05, 0.09, 0.62] } else { [0.0, 0.0, 0.0, 1.0] },
-            border: if glass { [1.0, 1.0, 1.0, 0.3] } else { [1.0, 1.0, 1.0, 0.0] },
+            fill: if glass {
+                [0.05, 0.05, 0.09, 0.62]
+            } else {
+                [0.0, 0.0, 0.0, 1.0]
+            },
+            border: if glass {
+                [1.0, 1.0, 1.0, 0.3]
+            } else {
+                [1.0, 1.0, 1.0, 0.0]
+            },
         }
     }
 
     /// `round` is its corner as a floating island, then as a notch.
-    fn shape(&self, part: Part, x: f32, (width, height): (f32, f32), round: (f32, f32), marks: Vec<Mark>) -> Shape {
+    fn shape(
+        &self,
+        part: Part,
+        x: f32,
+        (width, height): (f32, f32),
+        round: (f32, f32),
+        marks: Vec<Mark>,
+    ) -> Shape {
         let (round, notch_round) = round;
         let radius = if self.notch { notch_round } else { round };
         let outline = Outline {
-            at: Rect { x, y: self.top, width, height },
+            at: Rect {
+                x,
+                y: self.top,
+                width,
+                height,
+            },
             above: self.above,
             radius,
             fill: self.fill,
             border: self.border,
         };
-        Shape { part, outline, marks }
+        Shape {
+            part,
+            outline,
+            marks,
+        }
     }
 }
 
@@ -940,11 +1336,36 @@ impl Dress {
 fn music_marks(state: &SettingsState, task_beside: bool) -> Vec<Mark> {
     let middle = PILL_HEIGHT / 2.0;
     let mut marks = vec![
-        Mark::icon(ICON_MUSIC, Rect { x: 16.0, y: middle - 12.0, width: 22.0, height: 24.0 }, 15.0),
-        Mark::text("Kısa Şarkı", Rect { x: 46.0, y: middle - 12.0, width: 84.0, height: 24.0 }, 13.0, true),
+        Mark::icon(
+            ICON_MUSIC,
+            Rect {
+                x: 16.0,
+                y: middle - 12.0,
+                width: 22.0,
+                height: 24.0,
+            },
+            15.0,
+        ),
+        Mark::text(
+            "Kısa Şarkı",
+            Rect {
+                x: 46.0,
+                y: middle - 12.0,
+                width: 84.0,
+                height: 24.0,
+            },
+            13.0,
+            true,
+        ),
     ];
     if task_beside {
-        marks.push(Mark::Ring { x: PILL_WIDTH - 24.0, y: middle, radius: 8.0, width: 2.2, fraction: SENT });
+        marks.push(Mark::Ring {
+            x: PILL_WIDTH - 24.0,
+            y: middle,
+            radius: 8.0,
+            width: 2.2,
+            fraction: SENT,
+        });
         return marks;
     }
     if !state.sound_wave || state.battery_saver {
@@ -956,7 +1377,12 @@ fn music_marks(state: &SettingsState, task_beside: bool) -> Vec<Mark> {
         island_core::layout::WaveStyle::Lively => [4.0, 15.0, 17.0, 6.0],
     };
     for (index, bar) in heights.into_iter().enumerate() {
-        let at = Rect { x: 136.0 + index as f32 * 6.0, y: middle - bar / 2.0, width: 3.0, height: bar };
+        let at = Rect {
+            x: 136.0 + index as f32 * 6.0,
+            y: middle - bar / 2.0,
+            width: 3.0,
+            height: bar,
+        };
         marks.push(Mark::Bar { at, opacity: 1.0 });
     }
     marks
@@ -966,11 +1392,32 @@ fn music_marks(state: &SettingsState, task_beside: bool) -> Vec<Mark> {
 fn send_marks() -> Vec<Mark> {
     let middle = PILL_HEIGHT / 2.0;
     vec![
-        Mark::Ring { x: 24.0, y: middle, radius: 7.0, width: 2.2, fraction: SENT },
-        Mark::text("Kapadokya.jpg", Rect { x: 42.0, y: middle - 12.0, width: 88.0, height: 24.0 }, 12.0, true),
+        Mark::Ring {
+            x: 24.0,
+            y: middle,
+            radius: 7.0,
+            width: 2.2,
+            fraction: SENT,
+        },
+        Mark::text(
+            "Kapadokya.jpg",
+            Rect {
+                x: 42.0,
+                y: middle - 12.0,
+                width: 88.0,
+                height: 24.0,
+            },
+            12.0,
+            true,
+        ),
         Mark::Text {
             text: "%64",
-            at: Rect { x: PILL_WIDTH - 44.0, y: middle - 12.0, width: 32.0, height: 24.0 },
+            at: Rect {
+                x: PILL_WIDTH - 44.0,
+                y: middle - 12.0,
+                width: 32.0,
+                height: 24.0,
+            },
             size: 12.0,
             bold: false,
             opacity: 0.75,
@@ -987,9 +1434,19 @@ fn card_marks(state: &SettingsState) -> Vec<Mark> {
     let percent = |large: bool| Mark::Text {
         text: "%64",
         at: if large {
-            Rect { x: 4.0, y: center - 13.0, width: 60.0, height: 26.0 }
+            Rect {
+                x: 4.0,
+                y: center - 13.0,
+                width: 60.0,
+                height: 26.0,
+            }
         } else {
-            Rect { x: 10.0, y: center - 10.0, width: 48.0, height: 20.0 }
+            Rect {
+                x: 10.0,
+                y: center - 10.0,
+                width: 48.0,
+                height: 20.0,
+            }
         },
         size: if large { 15.0 } else { 10.5 },
         bold: true,
@@ -999,15 +1456,39 @@ fn card_marks(state: &SettingsState) -> Vec<Mark> {
         tinted: false,
     };
     let mut marks = match state.progress {
-        ProgressStyle::Ring => vec![Mark::Ring { x: 34.0, y: center, radius: 19.0, width: 3.5, fraction: SENT }, percent(false)],
+        ProgressStyle::Ring => vec![
+            Mark::Ring {
+                x: 34.0,
+                y: center,
+                radius: 19.0,
+                width: 3.5,
+                fraction: SENT,
+            },
+            percent(false),
+        ],
         ProgressStyle::Edge => vec![Mark::Edge { fraction: SENT }, percent(true)],
         ProgressStyle::Fill => vec![Mark::Fill { fraction: SENT }, percent(true)],
     };
     let words = CARD_WIDTH - 76.0;
-    marks.push(Mark::text("Gönderiliyor", Rect { x: 66.0, y: center - 17.0, width: words, height: 17.0 }, 11.5, true));
+    marks.push(Mark::text(
+        "Gönderiliyor",
+        Rect {
+            x: 66.0,
+            y: center - 17.0,
+            width: words,
+            height: 17.0,
+        },
+        11.5,
+        true,
+    ));
     marks.push(Mark::Text {
         text: "Kapadokya.jpg",
-        at: Rect { x: 66.0, y: center + 1.0, width: words, height: 16.0 },
+        at: Rect {
+            x: 66.0,
+            y: center + 1.0,
+            width: words,
+            height: 16.0,
+        },
         size: 10.5,
         bold: false,
         opacity: 0.6,
@@ -1021,21 +1502,51 @@ fn card_marks(state: &SettingsState) -> Vec<Mark> {
 /// The shapes of the preview on a page, for the choices in `state`.
 fn preview_shapes(state: &SettingsState) -> Vec<Shape> {
     let dress = Dress::new(state);
-    let pill = |x: f32, marks| dress.shape(Part::Pill, x, (PILL_WIDTH, PILL_HEIGHT), (PILL_HEIGHT / 2.0, 14.0), marks);
+    let pill = |x: f32, marks| {
+        dress.shape(
+            Part::Pill,
+            x,
+            (PILL_WIDTH, PILL_HEIGHT),
+            (PILL_HEIGHT / 2.0, 14.0),
+            marks,
+        )
+    };
     match state.page {
         // The look on its own: music playing in the pill.
-        Page::Appearance => vec![pill((PREVIEW.width - PILL_WIDTH) / 2.0, music_marks(state, false))],
+        Page::Appearance => vec![pill(
+            (PREVIEW.width - PILL_WIDTH) / 2.0,
+            music_marks(state, false),
+        )],
         // Music and a send: the closed island in the chosen layout, and beside it
         // the open view in the chosen progress style.
         Page::Layout => {
             let group = PILL_WIDTH + BUBBLE_GAP + BUBBLE_SIZE;
             let left = (PREVIEW.width - group - GROUP_GAP - CARD_WIDTH) / 2.0;
-            let bubble = |marks| dress.shape(Part::Bubble, left + PILL_WIDTH + BUBBLE_GAP, (BUBBLE_SIZE, BUBBLE_SIZE), (BUBBLE_SIZE / 2.0, 12.0), marks);
+            let bubble = |marks| {
+                dress.shape(
+                    Part::Bubble,
+                    left + PILL_WIDTH + BUBBLE_GAP,
+                    (BUBBLE_SIZE, BUBBLE_SIZE),
+                    (BUBBLE_SIZE / 2.0, 12.0),
+                    marks,
+                )
+            };
             let ring = vec![
-                Mark::Ring { x: BUBBLE_SIZE / 2.0, y: BUBBLE_SIZE / 2.0, radius: 15.0, width: 2.0, fraction: SENT },
+                Mark::Ring {
+                    x: BUBBLE_SIZE / 2.0,
+                    y: BUBBLE_SIZE / 2.0,
+                    radius: 15.0,
+                    width: 2.0,
+                    fraction: SENT,
+                },
                 Mark::Text {
                     text: "64",
-                    at: Rect { x: 0.0, y: 0.0, width: BUBBLE_SIZE, height: BUBBLE_SIZE },
+                    at: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: BUBBLE_SIZE,
+                        height: BUBBLE_SIZE,
+                    },
                     size: 11.0,
                     bold: true,
                     opacity: 1.0,
@@ -1044,12 +1555,32 @@ fn preview_shapes(state: &SettingsState) -> Vec<Shape> {
                     tinted: false,
                 },
             ];
-            let note = vec![Mark::icon(ICON_MUSIC, Rect { x: 0.0, y: 0.0, width: BUBBLE_SIZE, height: BUBBLE_SIZE }, 14.0)];
-            let card = dress.shape(Part::Card, left + group + GROUP_GAP, (CARD_WIDTH, CARD_HEIGHT), (22.0, 16.0), card_marks(state));
+            let note = vec![Mark::icon(
+                ICON_MUSIC,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: BUBBLE_SIZE,
+                    height: BUBBLE_SIZE,
+                },
+                14.0,
+            )];
+            let card = dress.shape(
+                Part::Card,
+                left + group + GROUP_GAP,
+                (CARD_WIDTH, CARD_HEIGHT),
+                (22.0, 16.0),
+                card_marks(state),
+            );
             match state.layout {
-                TaskLayout::Bubble => vec![pill(left, music_marks(state, false)), bubble(ring), card],
+                TaskLayout::Bubble => {
+                    vec![pill(left, music_marks(state, false)), bubble(ring), card]
+                }
                 // Without a bubble the pill sits in the middle of where the two were.
-                TaskLayout::Shared => vec![pill(left + (group - PILL_WIDTH) / 2.0, music_marks(state, true)), card],
+                TaskLayout::Shared => vec![
+                    pill(left + (group - PILL_WIDTH) / 2.0, music_marks(state, true)),
+                    card,
+                ],
                 TaskLayout::Front => vec![pill(left, send_marks()), bubble(note), card],
             }
         }

@@ -4,8 +4,9 @@ use island_core::layout::{EDGE_TRIGGER_WIDTH, NOTCH_SHOULDER, WINDOW_HEIGHT, WIN
 use island_core::{IslandStyle, Pill};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, HRGN,
-    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, RGN_OR, SetWindowRgn,
+    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EnumDisplayMonitors,
+    GetMonitorInfoW, HDC, HMONITOR, HRGN, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
+    MonitorFromPoint, RGN_OR, SetWindowRgn,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -127,12 +128,21 @@ pub struct Monitor {
 }
 
 pub fn monitors() -> Vec<Monitor> {
-    unsafe extern "system" fn collect(handle: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
+    unsafe extern "system" fn collect(
+        handle: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
         let monitors = unsafe { &mut *(data.0 as *mut Vec<Monitor>) };
         let mut info = MONITORINFOEXW::default();
         info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
         if unsafe { GetMonitorInfoW(handle, &mut info.monitorInfo) }.as_bool() {
-            let end = info.szDevice.iter().position(|c| *c == 0).unwrap_or(info.szDevice.len());
+            let end = info
+                .szDevice
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(info.szDevice.len());
             monitors.push(Monitor {
                 device: String::from_utf16_lossy(&info.szDevice[..end]),
                 rect: info.monitorInfo.rcMonitor,
@@ -142,26 +152,58 @@ pub fn monitors() -> Vec<Monitor> {
         BOOL(1)
     }
     let mut found = Vec::new();
-    unsafe { let _ = EnumDisplayMonitors(None, None, Some(collect), LPARAM(&mut found as *mut _ as isize)); }
-    found.sort_by(|a: &Monitor, b| b.primary.cmp(&a.primary).then(a.rect.left.cmp(&b.rect.left)).then(a.rect.top.cmp(&b.rect.top)));
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(collect),
+            LPARAM(&mut found as *mut _ as isize),
+        );
+    }
+    found.sort_by(|a: &Monitor, b| {
+        b.primary
+            .cmp(&a.primary)
+            .then(a.rect.left.cmp(&b.rect.left))
+            .then(a.rect.top.cmp(&b.rect.top))
+    });
     found
 }
 
-pub fn selected_monitor<'a>(available: &'a [Monitor], selected: Option<&str>) -> Option<&'a Monitor> {
-    available.iter().find(|monitor| Some(monitor.device.as_str()) == selected)
+pub fn selected_monitor<'a>(
+    available: &'a [Monitor],
+    selected: Option<&str>,
+) -> Option<&'a Monitor> {
+    available
+        .iter()
+        .find(|monitor| Some(monitor.device.as_str()) == selected)
         .or_else(|| available.iter().find(|monitor| monitor.primary))
         .or_else(|| available.first())
 }
 
-pub fn step_monitor<'a>(available: &'a [Monitor], selected: Option<&str>, next: bool) -> Option<&'a Monitor> {
+pub fn step_monitor<'a>(
+    available: &'a [Monitor],
+    selected: Option<&str>,
+    next: bool,
+) -> Option<&'a Monitor> {
     let current = selected_monitor(available, selected)?;
-    let index = available.iter().position(|monitor| monitor.device == current.device)?;
-    let index = if next { (index + 1) % available.len() } else { (index + available.len() - 1) % available.len() };
+    let index = available
+        .iter()
+        .position(|monitor| monitor.device == current.device)?;
+    let index = if next {
+        (index + 1) % available.len()
+    } else {
+        (index + available.len() - 1) % available.len()
+    };
     available.get(index)
 }
 
 /// Centers both windows on the chosen monitor, falling back to the primary.
-pub fn place(island: HWND, edge: HWND, style: IslandStyle, selected: Option<&str>) -> Result<Placement> {
+pub fn place(
+    island: HWND,
+    edge: HWND,
+    style: IslandStyle,
+    selected: Option<&str>,
+) -> Result<Placement> {
     let available = monitors();
     let monitor = match selected_monitor(&available, selected) {
         Some(monitor) => monitor.rect,
@@ -169,7 +211,17 @@ pub fn place(island: HWND, edge: HWND, style: IslandStyle, selected: Option<&str
     };
     let monitor_width = monitor.right - monitor.left;
     // Move first so GetDpiForWindow reports the target monitor's DPI.
-    unsafe { SetWindowPos(island, None, monitor.left, monitor.top, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER)?; }
+    unsafe {
+        SetWindowPos(
+            island,
+            None,
+            monitor.left,
+            monitor.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+        )?;
+    }
     let scale = unsafe { GetDpiForWindow(island) } as f32 / 96.0;
 
     let width = (WINDOW_WIDTH * scale).round() as i32;
@@ -186,14 +238,38 @@ pub fn place(island: HWND, edge: HWND, style: IslandStyle, selected: Option<&str
     };
 
     unsafe {
-        SetWindowPos(island, None, x, monitor.top, width, height, SWP_NOACTIVATE | SWP_NOZORDER)?;
-        SetWindowPos(edge, None, edge_x, monitor.top, edge_width, 1, SWP_NOACTIVATE | SWP_NOZORDER)?;
+        SetWindowPos(
+            island,
+            None,
+            x,
+            monitor.top,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        )?;
+        SetWindowPos(
+            edge,
+            None,
+            edge_x,
+            monitor.top,
+            edge_width,
+            1,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        )?;
     }
-    Ok(Placement { scale, width: width as f32, edge: edge_rect, style })
+    Ok(Placement {
+        scale,
+        width: width as f32,
+        edge: edge_rect,
+        style,
+    })
 }
 
 fn primary_monitor() -> Result<RECT> {
-    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
     unsafe {
         let monitor = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
         GetMonitorInfoW(monitor, &mut info).ok()?;
@@ -250,7 +326,14 @@ pub fn set_pill_region(hwnd: HWND, pill: Pill, placement: &Placement) {
 }
 
 /// The same, for a pill shifted left with a bubble beside it.
-pub fn set_group_region(hwnd: HWND, pill: Pill, pill_left: f32, bubble: Pill, bubble_left: f32, placement: &Placement) {
+pub fn set_group_region(
+    hwnd: HWND,
+    pill: Pill,
+    pill_left: f32,
+    bubble: Pill,
+    bubble_left: f32,
+    placement: &Placement,
+) {
     let bubble_top = placement.style.bubble_top(placement.scale, pill, bubble);
     unsafe {
         let group = pill_region(pill_left, pill, placement);
@@ -273,12 +356,17 @@ pub fn set_group_region(hwnd: HWND, pill: Pill, pill_left: f32, bubble: Pill, bu
 /// it has to take in the curves on both sides of the notch.
 fn pill_region(left: f32, pill: Pill, placement: &Placement) -> HRGN {
     match placement.style {
-        IslandStyle::Island => rounded_region(left, placement.style.margin() * placement.scale, pill),
+        IslandStyle::Island => {
+            rounded_region(left, placement.style.margin() * placement.scale, pill)
+        }
         IslandStyle::Notch => unsafe {
             let (top, notch) = pill.as_notch(pill.height);
             let region = rounded_region(left, top, notch);
             let shoulder = (NOTCH_SHOULDER * placement.scale).ceil() as i32;
-            let (from, to) = (left.floor() as i32 - shoulder, (left + pill.width).ceil() as i32 + shoulder);
+            let (from, to) = (
+                left.floor() as i32 - shoulder,
+                (left + pill.width).ceil() as i32 + shoulder,
+            );
             let curves = CreateRectRgn(from, 0, to, shoulder);
             CombineRgn(Some(region), Some(region), Some(curves), RGN_OR);
             let _ = DeleteObject(curves.into());
@@ -300,19 +388,50 @@ mod tests {
     use super::*;
 
     fn monitor(device: &str, primary: bool, left: i32) -> Monitor {
-        Monitor { device: device.into(), primary, rect: RECT { left, top: 0, right: left + 1920, bottom: 1080 } }
+        Monitor {
+            device: device.into(),
+            primary,
+            rect: RECT {
+                left,
+                top: 0,
+                right: left + 1920,
+                bottom: 1080,
+            },
+        }
     }
 
     #[test]
     fn selection_survives_reordering_and_falls_back_while_disconnected() {
-        let both = vec![monitor("primary", true, 0), monitor("external", false, -1920)];
-        assert_eq!(selected_monitor(&both, Some("external")).unwrap().rect.left, -1920);
+        let both = vec![
+            monitor("primary", true, 0),
+            monitor("external", false, -1920),
+        ];
+        assert_eq!(
+            selected_monitor(&both, Some("external")).unwrap().rect.left,
+            -1920
+        );
         let disconnected = vec![both[0].clone()];
-        assert_eq!(selected_monitor(&disconnected, Some("external")).unwrap().device, "primary");
+        assert_eq!(
+            selected_monitor(&disconnected, Some("external"))
+                .unwrap()
+                .device,
+            "primary"
+        );
         let reconnected = vec![both[1].clone(), both[0].clone()];
-        assert_eq!(selected_monitor(&reconnected, Some("external")).unwrap().device, "external");
-        assert_eq!(step_monitor(&both, Some("primary"), true).unwrap().device, "external");
-        assert_eq!(step_monitor(&both, Some("primary"), false).unwrap().device, "external");
+        assert_eq!(
+            selected_monitor(&reconnected, Some("external"))
+                .unwrap()
+                .device,
+            "external"
+        );
+        assert_eq!(
+            step_monitor(&both, Some("primary"), true).unwrap().device,
+            "external"
+        );
+        assert_eq!(
+            step_monitor(&both, Some("primary"), false).unwrap().device,
+            "external"
+        );
         assert!(step_monitor(&[], None, true).is_none());
     }
 }

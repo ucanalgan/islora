@@ -29,7 +29,10 @@ const LOOK_BEHIND_MS: i64 = 86_400_000;
 const LOOK_AHEAD_MS: i64 = 14 * 86_400_000;
 
 pub fn unix_now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 pub enum CalendarUpdate {
@@ -55,9 +58,11 @@ impl CalendarSource {
         let (requests, inbox) = mpsc::channel();
         let (publish, updates) = mpsc::channel();
         let window = hwnd.0 as isize;
-        let spawned = std::thread::Builder::new().name("calendar".into()).spawn(move || {
-            run(window, test_file, inbox, publish);
-        });
+        let spawned = std::thread::Builder::new()
+            .name("calendar".into())
+            .spawn(move || {
+                run(window, test_file, inbox, publish);
+            });
         if let Err(error) = spawned {
             eprintln!("calendar thread failed to start: {error}");
         }
@@ -77,7 +82,12 @@ impl CalendarSource {
     }
 }
 
-fn run(window: isize, test_file: Option<String>, inbox: Receiver<Request>, publish: Sender<CalendarUpdate>) {
+fn run(
+    window: isize,
+    test_file: Option<String>,
+    inbox: Receiver<Request>,
+    publish: Sender<CalendarUpdate>,
+) {
     unsafe {
         let _ = RoInitialize(RO_INIT_MULTITHREADED);
     }
@@ -86,7 +96,9 @@ fn run(window: isize, test_file: Option<String>, inbox: Receiver<Request>, publi
     let mut failures = 0;
     loop {
         match inbox.recv_timeout(next.saturating_duration_since(Instant::now())) {
-            Ok(Request::IfStale) if fresh_since.is_some_and(|at| at.elapsed() < STALE_AFTER) => continue,
+            Ok(Request::IfStale) if fresh_since.is_some_and(|at| at.elapsed() < STALE_AFTER) => {
+                continue;
+            }
             Ok(_) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -115,12 +127,18 @@ fn load(test_file: Option<&str>) -> CalendarUpdate {
         Some(path) => std::fs::read_to_string(path).ok(),
         None => {
             let address = settings::read().and_then(|text| read_value(&text, "calendar_ics_url"));
-            let Some(address) = address else { return CalendarUpdate::NoAddress };
+            let Some(address) = address else {
+                return CalendarUpdate::NoAddress;
+            };
             // Offline is normal. The error text could contain the secret address.
-            download(&address).inspect_err(|_| eprintln!("calendar download failed")).ok()
+            download(&address)
+                .inspect_err(|_| eprintln!("calendar download failed"))
+                .ok()
         }
     };
-    let Some(text) = text else { return CalendarUpdate::Failed };
+    let Some(text) = text else {
+        return CalendarUpdate::Failed;
+    };
     let now = unix_now();
     CalendarUpdate::Events(ics::parse(&text, now - LOOK_BEHIND_MS, now + LOOK_AHEAD_MS))
 }

@@ -3,15 +3,20 @@
 
 use crate::convert::Target;
 use crate::files::{DroppedFile, summary};
-use crate::layout::Pill;
 pub use crate::geometry::Rect;
+use crate::layout::Pill;
 
 const MARGIN: f32 = 18.0;
 const GAP: f32 = 10.0;
 const COLUMN: f32 = (Pill::EXPANDED.width - MARGIN * 2.0 - GAP * 2.0) / 3.0;
 
 /// The line on top that says what is being carried.
-pub const HEADER: Rect = Rect { x: 24.0, y: 12.0, width: Pill::EXPANDED.width - 48.0, height: 22.0 };
+pub const HEADER: Rect = Rect {
+    x: 24.0,
+    y: 12.0,
+    width: Pill::EXPANDED.width - 48.0,
+    height: 22.0,
+};
 
 const ZONE_TOP: f32 = 40.0;
 const ZONE_HEIGHT: f32 = 114.0;
@@ -48,11 +53,18 @@ impl Zone {
 
     pub fn bounds(self) -> Rect {
         let x = MARGIN + self.column() as f32 * (COLUMN + GAP);
-        Rect { x, y: ZONE_TOP, width: COLUMN, height: ZONE_HEIGHT }
+        Rect {
+            x,
+            y: ZONE_TOP,
+            width: COLUMN,
+            height: ZONE_HEIGHT,
+        }
     }
 
     pub fn at(x: f32, y: f32) -> Option<Zone> {
-        Zone::ALL.into_iter().find(|zone| zone.bounds().contains(x, y))
+        Zone::ALL
+            .into_iter()
+            .find(|zone| zone.bounds().contains(x, y))
     }
 }
 
@@ -98,36 +110,73 @@ impl DropView {
 pub const SHELF_TILES: usize = 5;
 const TILE_WIDTH: f32 = 68.0;
 const TILE_GAP: f32 = 6.0;
-const TILE_LEFT: f32 = (Pill::EXPANDED.width - TILE_WIDTH * SHELF_TILES as f32 - TILE_GAP * (SHELF_TILES - 1) as f32) / 2.0;
+const TILE_LEFT: f32 =
+    (Pill::EXPANDED.width - TILE_WIDTH * SHELF_TILES as f32 - TILE_GAP * (SHELF_TILES - 1) as f32)
+        / 2.0;
 pub const THUMBNAIL: f32 = 56.0;
 const THUMBNAIL_TOP: f32 = 44.0;
 const REMOVE_SIZE: f32 = 20.0;
 
-pub const SHELF_CLEAR: Rect = Rect { x: 296.0, y: 10.0, width: 80.0, height: 26.0 };
-pub const SHELF_BACK: Rect = Rect { x: 18.0, y: 128.0, width: 32.0, height: 28.0 };
-pub const SHELF_FORWARD: Rect = Rect { x: Pill::EXPANDED.width - 50.0, y: 128.0, width: 32.0, height: 28.0 };
+pub const SHELF_CLEAR: Rect = Rect {
+    x: 296.0,
+    y: 10.0,
+    width: 80.0,
+    height: 26.0,
+};
+pub const SHELF_BACK: Rect = Rect {
+    x: 18.0,
+    y: 128.0,
+    width: 32.0,
+    height: 28.0,
+};
+pub const SHELF_FORWARD: Rect = Rect {
+    x: Pill::EXPANDED.width - 50.0,
+    y: 128.0,
+    width: 32.0,
+    height: 28.0,
+};
 
 /// The place of a file on the shelf, counted from the first one in view.
 pub fn tile(slot: usize) -> Rect {
     let x = TILE_LEFT + slot as f32 * (TILE_WIDTH + TILE_GAP);
-    Rect { x, y: THUMBNAIL_TOP, width: TILE_WIDTH, height: 82.0 }
+    Rect {
+        x,
+        y: THUMBNAIL_TOP,
+        width: TILE_WIDTH,
+        height: 82.0,
+    }
 }
 
 pub fn thumbnail(slot: usize) -> Rect {
     let tile = tile(slot);
-    Rect { x: tile.x + (TILE_WIDTH - THUMBNAIL) / 2.0, y: THUMBNAIL_TOP, width: THUMBNAIL, height: THUMBNAIL }
+    Rect {
+        x: tile.x + (TILE_WIDTH - THUMBNAIL) / 2.0,
+        y: THUMBNAIL_TOP,
+        width: THUMBNAIL,
+        height: THUMBNAIL,
+    }
 }
 
 /// The small cross on a file's corner that takes it off the shelf.
 pub fn remove_button(slot: usize) -> Rect {
     let picture = thumbnail(slot);
     let x = picture.x + picture.width - REMOVE_SIZE + 6.0;
-    Rect { x, y: picture.y - 6.0, width: REMOVE_SIZE, height: REMOVE_SIZE }
+    Rect {
+        x,
+        y: picture.y - 6.0,
+        width: REMOVE_SIZE,
+        height: REMOVE_SIZE,
+    }
 }
 
 pub fn tile_name(slot: usize) -> Rect {
     let tile = tile(slot);
-    Rect { x: tile.x, y: THUMBNAIL_TOP + THUMBNAIL + 4.0, width: TILE_WIDTH, height: 18.0 }
+    Rect {
+        x: tile.x,
+        y: THUMBNAIL_TOP + THUMBNAIL + 4.0,
+        width: TILE_WIDTH,
+        height: 18.0,
+    }
 }
 
 /// What a click on the shelf view lands on. Files are counted from the first
@@ -158,7 +207,9 @@ pub fn shelf_hit(x: f32, y: f32, first: usize, count: usize) -> Option<ShelfHit>
     if let Some(slot) = (0..shown).find(|&slot| remove_button(slot).contains(x, y)) {
         return Some(ShelfHit::Remove(first + slot));
     }
-    (0..shown).find(|&slot| tile(slot).contains(x, y)).map(|slot| ShelfHit::File(first + slot))
+    (0..shown)
+        .find(|&slot| tile(slot).contains(x, y))
+        .map(|slot| ShelfHit::File(first + slot))
 }
 
 const TARGET_TOP: f32 = 42.0;
@@ -166,30 +217,60 @@ const TARGET_HEIGHT: f32 = 84.0;
 
 impl Target {
     pub fn bounds(self) -> Rect {
-        let column = Target::ALL.iter().position(|target| *target == self).unwrap_or(0);
+        let column = Target::ALL
+            .iter()
+            .position(|target| *target == self)
+            .unwrap_or(0);
         let x = MARGIN + column as f32 * (COLUMN + GAP);
-        Rect { x, y: TARGET_TOP, width: COLUMN, height: TARGET_HEIGHT }
+        Rect {
+            x,
+            y: TARGET_TOP,
+            width: COLUMN,
+            height: TARGET_HEIGHT,
+        }
     }
 
     pub fn at(x: f32, y: f32) -> Option<Target> {
-        Target::ALL.into_iter().find(|target| target.bounds().contains(x, y))
+        Target::ALL
+            .into_iter()
+            .find(|target| target.bounds().contains(x, y))
     }
 }
 
 /// The note under the choices, or what is happening once one was made.
-pub const CONVERT_NOTE: Rect = Rect { x: 24.0, y: 134.0, width: Pill::EXPANDED.width - 48.0, height: 20.0 };
+pub const CONVERT_NOTE: Rect = Rect {
+    x: 24.0,
+    y: 134.0,
+    width: Pill::EXPANDED.width - 48.0,
+    height: 20.0,
+};
 
 /// The code for the phone, or what replaces it once the phone is on its way.
-pub const TRANSFER_CODE: Rect = Rect { x: 20.0, y: 17.0, width: 136.0, height: 136.0 };
+pub const TRANSFER_CODE: Rect = Rect {
+    x: 20.0,
+    y: 17.0,
+    width: 136.0,
+    height: 136.0,
+};
 pub const TRANSFER_TEXT_LEFT: f32 = 174.0;
-pub const TRANSFER_STOP: Rect = Rect { x: TRANSFER_TEXT_LEFT, y: 120.0, width: 78.0, height: 32.0 };
+pub const TRANSFER_STOP: Rect = Rect {
+    x: TRANSFER_TEXT_LEFT,
+    y: 120.0,
+    width: 78.0,
+    height: 32.0,
+};
 
 pub fn on_transfer_stop(x: f32, y: f32) -> bool {
     TRANSFER_STOP.contains(x, y)
 }
 
 /// Asks for the island's own network, for a phone on another network.
-pub const TRANSFER_DIRECT: Rect = Rect { x: TRANSFER_STOP.x + TRANSFER_STOP.width + 8.0, y: TRANSFER_STOP.y, width: 108.0, height: TRANSFER_STOP.height };
+pub const TRANSFER_DIRECT: Rect = Rect {
+    x: TRANSFER_STOP.x + TRANSFER_STOP.width + 8.0,
+    y: TRANSFER_STOP.y,
+    width: 108.0,
+    height: TRANSFER_STOP.height,
+};
 
 pub fn on_transfer_direct(x: f32, y: f32) -> bool {
     TRANSFER_DIRECT.contains(x, y)
@@ -211,10 +292,16 @@ mod tests {
         for zone in Zone::ALL {
             let bounds = zone.bounds();
             assert!(inside_pill(bounds), "{zone:?}");
-            let middle = (bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0);
+            let middle = (
+                bounds.x + bounds.width / 2.0,
+                bounds.y + bounds.height / 2.0,
+            );
             assert_eq!(Zone::at(middle.0, middle.1), Some(zone));
         }
-        assert_eq!(Zone::at(Zone::Shelf.bounds().x + COLUMN + GAP / 2.0, 80.0), None);
+        assert_eq!(
+            Zone::at(Zone::Shelf.bounds().x + COLUMN + GAP / 2.0, 80.0),
+            None
+        );
         assert_eq!(Zone::at(200.0, HEADER.y + 4.0), None);
     }
 
@@ -229,14 +316,24 @@ mod tests {
         let convert = Zone::Convert.bounds();
         assert_eq!(view.accepting(convert.x + 10.0, convert.y + 10.0), None);
         let phone = Zone::Phone.bounds();
-        assert_eq!(view.accepting(phone.x + 10.0, phone.y + 10.0), Some(Zone::Phone));
+        assert_eq!(
+            view.accepting(phone.x + 10.0, phone.y + 10.0),
+            Some(Zone::Phone)
+        );
     }
 
     #[test]
     fn zones_refuse_what_they_cannot_use() {
-        let file = |path: &str, is_folder| DroppedFile { path: path.into(), size: 10, is_folder };
+        let file = |path: &str, is_folder| DroppedFile {
+            path: path.into(),
+            size: 10,
+            is_folder,
+        };
         let pictures = DropView::for_files(&[file("a.jpg", false), file("b.pdf", false)]);
-        assert_eq!((pictures.phone_refusal, pictures.convert_refusal), (None, None));
+        assert_eq!(
+            (pictures.phone_refusal, pictures.convert_refusal),
+            (None, None)
+        );
         let papers = DropView::for_files(&[file("b.pdf", false)]);
         assert_eq!(papers.convert_refusal, Some("Yalnızca görseller"));
         let folders = DropView::for_files(&[file(r"C:\a\Klasör", true)]);
@@ -247,15 +344,24 @@ mod tests {
     #[test]
     fn the_shelf_counts_clicks_from_its_first_file() {
         let picture = thumbnail(1);
-        let middle = (picture.x + picture.width / 2.0, picture.y + picture.height / 2.0);
+        let middle = (
+            picture.x + picture.width / 2.0,
+            picture.y + picture.height / 2.0,
+        );
         assert_eq!(shelf_hit(middle.0, middle.1, 0, 3), Some(ShelfHit::File(1)));
         assert_eq!(shelf_hit(middle.0, middle.1, 4, 7), Some(ShelfHit::File(5)));
         let cross = remove_button(1);
-        assert_eq!(shelf_hit(cross.x + 10.0, cross.y + 10.0, 0, 3), Some(ShelfHit::Remove(1)));
+        assert_eq!(
+            shelf_hit(cross.x + 10.0, cross.y + 10.0, 0, 3),
+            Some(ShelfHit::Remove(1))
+        );
         // Nothing is there past the last file.
         let empty = thumbnail(4);
         assert_eq!(shelf_hit(empty.x + 5.0, empty.y + 5.0, 0, 3), None);
-        assert_eq!(shelf_hit(SHELF_CLEAR.x + 5.0, SHELF_CLEAR.y + 5.0, 0, 3), Some(ShelfHit::Clear));
+        assert_eq!(
+            shelf_hit(SHELF_CLEAR.x + 5.0, SHELF_CLEAR.y + 5.0, 0, 3),
+            Some(ShelfHit::Clear)
+        );
     }
 
     #[test]
@@ -263,7 +369,10 @@ mod tests {
         let back = (SHELF_BACK.x + 5.0, SHELF_BACK.y + 5.0);
         let forward = (SHELF_FORWARD.x + 5.0, SHELF_FORWARD.y + 5.0);
         assert_eq!(shelf_hit(forward.0, forward.1, 0, 4), None);
-        assert_eq!(shelf_hit(forward.0, forward.1, 0, 7), Some(ShelfHit::Forward));
+        assert_eq!(
+            shelf_hit(forward.0, forward.1, 0, 7),
+            Some(ShelfHit::Forward)
+        );
         assert_eq!(shelf_hit(back.0, back.1, 0, 7), None);
         assert_eq!(shelf_hit(back.0, back.1, 2, 7), Some(ShelfHit::Back));
         assert_eq!(shelf_hit(forward.0, forward.1, 2, 7), None);
@@ -278,7 +387,16 @@ mod tests {
         for target in Target::ALL {
             assert!(inside_pill(target.bounds()), "{target:?}");
         }
-        for rect in [SHELF_CLEAR, SHELF_BACK, SHELF_FORWARD, CONVERT_NOTE, TRANSFER_CODE, TRANSFER_STOP, TRANSFER_DIRECT, HEADER] {
+        for rect in [
+            SHELF_CLEAR,
+            SHELF_BACK,
+            SHELF_FORWARD,
+            CONVERT_NOTE,
+            TRANSFER_CODE,
+            TRANSFER_STOP,
+            TRANSFER_DIRECT,
+            HEADER,
+        ] {
             assert!(inside_pill(rect), "{rect:?}");
         }
     }

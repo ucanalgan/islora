@@ -45,7 +45,14 @@ pub fn set(on: bool) {
             let Some(command) = this_copy() else { return };
             let text: Vec<u16> = command.encode_utf16().chain(once(0)).collect();
             let size = size_of_val(text.as_slice()) as u32;
-            RegSetKeyValueW(HKEY_CURRENT_USER, RUN, NAME, REG_SZ.0, Some(text.as_ptr().cast()), size)
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                RUN,
+                NAME,
+                REG_SZ.0,
+                Some(text.as_ptr().cast()),
+                size,
+            )
         } else {
             RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, NAME)
         }

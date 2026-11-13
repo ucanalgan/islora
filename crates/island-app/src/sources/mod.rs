@@ -15,8 +15,8 @@ pub mod network;
 pub mod notifications;
 pub mod power;
 pub mod privacy;
-pub mod quick_radios;
 pub mod quick_brightness;
+pub mod quick_radios;
 mod registry;
 pub mod screenshots;
 pub mod sharing;
@@ -42,7 +42,13 @@ pub struct IndicatorSink {
 impl IndicatorSink {
     pub fn channel(hwnd: HWND) -> (Self, Receiver<Indicator>) {
         let (sender, receiver) = mpsc::channel();
-        (Self { sender, window: hwnd.0 as isize }, receiver)
+        (
+            Self {
+                sender,
+                window: hwnd.0 as isize,
+            },
+            receiver,
+        )
     }
 
     /// Tells the island the network changed, for a send waiting on Wi-Fi.

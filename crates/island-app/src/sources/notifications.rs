@@ -12,7 +12,9 @@ use windows::Storage::Streams::DataReader;
 use windows::UI::Notifications::Management::{
     UserNotificationListener, UserNotificationListenerAccessStatus,
 };
-use windows::UI::Notifications::{KnownNotificationBindings, NotificationBinding, NotificationKinds, UserNotification};
+use windows::UI::Notifications::{
+    KnownNotificationBindings, NotificationBinding, NotificationKinds, UserNotification,
+};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
@@ -112,7 +114,8 @@ fn run(
                 let mut current = HashMap::new();
                 for item in list {
                     if let Ok(id) = item.Id()
-                        && let Some(notice) = known.get(&id).cloned().or_else(|| read_notice(&item)) {
+                        && let Some(notice) = known.get(&id).cloned().or_else(|| read_notice(&item))
+                    {
                         current.insert(id, notice);
                     }
                 }
@@ -169,31 +172,53 @@ fn read_notice(item: &UserNotification) -> Option<Notice> {
     let app_info = item.AppInfo().ok()?;
     let display = app_info.DisplayInfo().ok();
     let visual = item.Notification().ok()?.Visual().ok()?;
-    let generic = KnownNotificationBindings::ToastGeneric().ok()
+    let generic = KnownNotificationBindings::ToastGeneric()
+        .ok()
         .and_then(|name| visual.GetBinding(&name).ok())
         .and_then(|binding| binding_texts(&binding));
-    let texts = generic.filter(|texts| !texts.is_empty()).or_else(|| {
-        visual.Bindings().ok()?.into_iter()
-            .filter_map(|binding| binding_texts(&binding))
-            .find(|texts| !texts.is_empty())
-    }).unwrap_or_default();
-    let app = display.as_ref().and_then(|display| display.DisplayName().ok())
+    let texts = generic
+        .filter(|texts| !texts.is_empty())
+        .or_else(|| {
+            visual
+                .Bindings()
+                .ok()?
+                .into_iter()
+                .filter_map(|binding| binding_texts(&binding))
+                .find(|texts| !texts.is_empty())
+        })
+        .unwrap_or_default();
+    let app = display
+        .as_ref()
+        .and_then(|display| display.DisplayName().ok())
         .map_or_else(|| "Windows".to_owned(), |name| name.to_string());
     Some(Notice {
         id: item.Id().ok()?,
-        app_id: app_info.AppUserModelId().or_else(|_| app_info.Id()).ok()?.to_string(),
+        app_id: app_info
+            .AppUserModelId()
+            .or_else(|_| app_info.Id())
+            .ok()?
+            .to_string(),
         app,
         title: texts.first().cloned().unwrap_or_default(),
-        body: if texts.len() > 1 { texts[1..].join(" · ") } else { "Yeni bildirim".into() },
+        body: if texts.len() > 1 {
+            texts[1..].join(" · ")
+        } else {
+            "Yeni bildirim".into()
+        },
         logo: display.as_ref().and_then(read_logo),
     })
 }
 
 fn binding_texts(binding: &NotificationBinding) -> Option<Vec<String>> {
-    Some(binding.GetTextElements().ok()?.into_iter()
-        .filter_map(|text| text.Text().ok().map(|value| value.to_string()))
-        .filter(|text| !text.trim().is_empty())
-        .collect())
+    Some(
+        binding
+            .GetTextElements()
+            .ok()?
+            .into_iter()
+            .filter_map(|text| text.Text().ok().map(|value| value.to_string()))
+            .filter(|text| !text.trim().is_empty())
+            .collect(),
+    )
 }
 
 fn read_logo(display: &windows::ApplicationModel::AppDisplayInfo) -> Option<Arc<[u8]>> {

@@ -51,8 +51,12 @@ pub fn parse(ics: &str, from: i64, to: i64) -> Vec<Event> {
         if event.cancelled {
             continue;
         }
-        let Some(start_line) = &event.start else { continue };
-        let Some(start) = moment_of(start_line) else { continue };
+        let Some(start_line) = &event.start else {
+            continue;
+        };
+        let Some(start) = moment_of(start_line) else {
+            continue;
+        };
         let end = event.end.as_deref().and_then(moment_of).unwrap_or(start);
         let length = (end - start).max(0);
 
@@ -84,7 +88,10 @@ pub fn parse(ics: &str, from: i64, to: i64) -> Vec<Event> {
 
 fn read_events(ics: &str) -> Vec<RawEvent> {
     // Long lines continue on the next one after a leading space or tab.
-    let unfolded = ics.replace("\r\n", "\n").replace("\n ", "").replace("\n\t", "");
+    let unfolded = ics
+        .replace("\r\n", "\n")
+        .replace("\n ", "")
+        .replace("\n\t", "");
 
     let mut events = Vec::new();
     let mut current: Option<RawEvent> = None;
@@ -103,7 +110,9 @@ fn read_events(ics: &str) -> Vec<RawEvent> {
 }
 
 fn read_property(event: &mut RawEvent, line: &str) {
-    let Some((head, value)) = line.split_once(':') else { return };
+    let Some((head, value)) = line.split_once(':') else {
+        return;
+    };
     let name = head.split(';').next().unwrap_or(head);
     match name {
         "UID" => event.uid = value.to_owned(),
@@ -136,10 +145,19 @@ fn moment_of(line: &str) -> Option<i64> {
         .find_map(|part| part.strip_prefix("TZID="))
         .and_then(|name| name.trim_matches('"').parse::<chrono_tz::Tz>().ok());
     match zone {
-        Some(zone) => Some(zone.from_local_datetime(&moment).earliest()?.timestamp_millis()),
+        Some(zone) => Some(
+            zone.from_local_datetime(&moment)
+                .earliest()?
+                .timestamp_millis(),
+        ),
         // No zone, or a name outside the IANA list: the user's own time is the
         // best remaining guess.
-        None => Some(Local.from_local_datetime(&moment).earliest()?.timestamp_millis()),
+        None => Some(
+            Local
+                .from_local_datetime(&moment)
+                .earliest()?
+                .timestamp_millis(),
+        ),
     }
 }
 
@@ -149,8 +167,12 @@ fn expand(start_line: &str, rule: &str, exceptions: &[String], from: i64, to: i6
         text.push('\n');
         text.push_str(exception);
     }
-    let Ok(set) = text.parse::<RRuleSet>() else { return Vec::new() };
-    let (Some(after), Some(before)) = (utc_moment(from), utc_moment(to)) else { return Vec::new() };
+    let Ok(set) = text.parse::<RRuleSet>() else {
+        return Vec::new();
+    };
+    let (Some(after), Some(before)) = (utc_moment(from), utc_moment(to)) else {
+        return Vec::new();
+    };
     set.after(after)
         .before(before)
         .all(MAX_OCCURRENCES)
@@ -184,7 +206,11 @@ fn unescape(text: &str) -> String {
 /// An event may have no name, and an empty pill would explain nothing.
 fn title_of(summary: &str) -> String {
     let title = unescape(summary);
-    if title.trim().is_empty() { UNTITLED.to_owned() } else { title }
+    if title.trim().is_empty() {
+        UNTITLED.to_owned()
+    } else {
+        title
+    }
 }
 
 /// Addresses are long and the part that matters comes first, such as a room.
@@ -200,33 +226,50 @@ where
     T::Offset: std::fmt::Display,
 {
     const DAYS: [&str; 7] = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
-    const MONTHS: [&str; 12] =
-        ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"];
+    const MONTHS: [&str; 12] = [
+        "Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara",
+    ];
 
     let time = start.format("%H:%M");
     let days_ahead = (start.date_naive() - now.date_naive()).num_days();
     match days_ahead {
         0 => format!("Bugün {time}"),
         1 => format!("Yarın {time}"),
-        2..=6 => format!("{} {time}", DAYS[start.weekday().num_days_from_monday() as usize]),
+        2..=6 => format!(
+            "{} {time}",
+            DAYS[start.weekday().num_days_from_monday() as usize]
+        ),
         _ => format!("{} {} {time}", start.day(), MONTHS[start.month0() as usize]),
     }
 }
 
 fn local_time(milliseconds: i64) -> Option<DateTime<Local>> {
-    Utc.timestamp_millis_opt(milliseconds).single().map(|moment| moment.with_timezone(&Local))
+    Utc.timestamp_millis_opt(milliseconds)
+        .single()
+        .map(|moment| moment.with_timezone(&Local))
 }
 
 /// Text for an event in the user's time zone: `19:30` and `Yarın 19:30`.
 pub fn local_labels(start: i64, now: i64) -> Option<(String, String)> {
     let start = local_time(start)?;
     let now = local_time(now)?;
-    Some((start.format("%H:%M").to_string(), describe_start(&start, &now)))
+    Some((
+        start.format("%H:%M").to_string(),
+        describe_start(&start, &now),
+    ))
 }
 
 /// A day in words, such as `Cumartesi, 31 Ekim`.
 pub fn describe_day<T: TimeZone>(day: &DateTime<T>) -> String {
-    const DAYS: [&str; 7] = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"];
+    const DAYS: [&str; 7] = [
+        "Pazartesi",
+        "Salı",
+        "Çarşamba",
+        "Perşembe",
+        "Cuma",
+        "Cumartesi",
+        "Pazar",
+    ];
     const MONTHS: [&str; 12] = [
         "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim",
         "Kasım", "Aralık",
@@ -247,7 +290,10 @@ mod tests {
     const DAY: i64 = 86_400_000;
 
     fn utc(text: &str) -> i64 {
-        NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap().and_utc().timestamp_millis()
+        NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M")
+            .unwrap()
+            .and_utc()
+            .timestamp_millis()
     }
 
     fn calendar(events: &str) -> String {
@@ -289,20 +335,35 @@ mod tests {
 
     #[test]
     fn weekly_events_repeat_inside_the_window_only() {
-        let events = parse(&calendar(WEEKLY), utc("2026-11-03 00:00"), utc("2026-11-20 00:00"));
+        let events = parse(
+            &calendar(WEEKLY),
+            utc("2026-11-03 00:00"),
+            utc("2026-11-20 00:00"),
+        );
         let starts: Vec<i64> = events.iter().map(|event| event.start).collect();
-        assert_eq!(starts, vec![utc("2026-11-09 06:00"), utc("2026-11-16 06:00")]);
+        assert_eq!(
+            starts,
+            vec![utc("2026-11-09 06:00"), utc("2026-11-16 06:00")]
+        );
     }
 
     #[test]
     fn repeats_keep_the_length_of_the_first() {
-        let events = parse(&calendar(WEEKLY), utc("2026-11-03 00:00"), utc("2026-11-10 00:00"));
+        let events = parse(
+            &calendar(WEEKLY),
+            utc("2026-11-03 00:00"),
+            utc("2026-11-10 00:00"),
+        );
         assert_eq!(events[0].end - events[0].start, 3 * 3_600_000);
     }
 
     #[test]
     fn an_occurrence_already_under_way_is_included() {
-        let events = parse(&calendar(WEEKLY), utc("2026-11-09 07:00"), utc("2026-11-09 08:00"));
+        let events = parse(
+            &calendar(WEEKLY),
+            utc("2026-11-09 07:00"),
+            utc("2026-11-09 08:00"),
+        );
         assert_eq!(events.len(), 1);
     }
 
@@ -334,7 +395,10 @@ mod tests {
             END:VEVENT\r\n";
         let ics = calendar(&format!("{WEEKLY}{cancelled}"));
         let events = parse(&ics, utc("2026-11-08 00:00"), utc("2026-11-17 00:00"));
-        assert_eq!(events.iter().map(|event| event.start).collect::<Vec<_>>(), vec![utc("2026-11-16 06:00")]);
+        assert_eq!(
+            events.iter().map(|event| event.start).collect::<Vec<_>>(),
+            vec![utc("2026-11-16 06:00")]
+        );
     }
 
     #[test]
@@ -343,7 +407,11 @@ mod tests {
             "SUMMARY:Ders",
             "EXDATE;TZID=Europe/Istanbul:20261109T090000\r\nSUMMARY:Ders",
         );
-        let events = parse(&calendar(&event), utc("2026-11-08 00:00"), utc("2026-11-17 00:00"));
+        let events = parse(
+            &calendar(&event),
+            utc("2026-11-08 00:00"),
+            utc("2026-11-17 00:00"),
+        );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].start, utc("2026-11-16 06:00"));
     }
@@ -393,7 +461,9 @@ mod tests {
 
     #[test]
     fn days_read_in_full() {
-        let day = Utc.from_utc_datetime(&NaiveDateTime::parse_from_str("2026-10-31 12:00", "%Y-%m-%d %H:%M").unwrap());
+        let day = Utc.from_utc_datetime(
+            &NaiveDateTime::parse_from_str("2026-10-31 12:00", "%Y-%m-%d %H:%M").unwrap(),
+        );
         assert_eq!(describe_day(&day), "Cumartesi, 31 Ekim");
     }
 
@@ -429,11 +499,16 @@ mod tests {
 
     #[test]
     fn start_times_read_naturally() {
-        let at = |text: &str| Utc.from_utc_datetime(&NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap());
+        let at = |text: &str| {
+            Utc.from_utc_datetime(&NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap())
+        };
         let now = at("2026-11-02 10:00");
         assert_eq!(describe_start(&at("2026-11-02 19:30"), &now), "Bugün 19:30");
         assert_eq!(describe_start(&at("2026-11-03 09:00"), &now), "Yarın 09:00");
         assert_eq!(describe_start(&at("2026-11-06 12:00"), &now), "Cum 12:00");
-        assert_eq!(describe_start(&at("2026-11-20 08:45"), &now), "20 Kas 08:45");
+        assert_eq!(
+            describe_start(&at("2026-11-20 08:45"), &now),
+            "20 Kas 08:45"
+        );
     }
 }

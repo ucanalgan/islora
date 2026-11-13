@@ -32,35 +32,90 @@ pub enum SaverSource {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Indicator {
-    Volume { percent: u8, muted: bool },
-    Brightness { percent: u8 },
-    CapsLock { on: bool },
-    NumLock { on: bool },
-    PluggedIn { percent: u8 },
-    Unplugged { percent: u8 },
+    Volume {
+        percent: u8,
+        muted: bool,
+    },
+    Brightness {
+        percent: u8,
+    },
+    CapsLock {
+        on: bool,
+    },
+    NumLock {
+        on: bool,
+    },
+    PluggedIn {
+        percent: u8,
+    },
+    Unplugged {
+        percent: u8,
+    },
     /// Power changed before Windows supplied a battery percentage.
-    PowerSource { on_battery: bool },
-    LowBattery { percent: u8 },
-    BluetoothConnected { name: String },
-    BluetoothDisconnected { name: String },
-    BluetoothBattery { name: String, percent: u8 },
-    AudioOutput { name: String },
-    Microphone { muted: bool },
-    MicrophoneInUse { app: String },
-    Internet { online: bool, network: Option<String> },
-    Wifi { name: String },
-    Vpn { connected: bool, name: String },
-    AirplaneMode { on: bool },
-    Usb { added: bool, name: String },
-    Display { added: bool, count: u32 },
+    PowerSource {
+        on_battery: bool,
+    },
+    LowBattery {
+        percent: u8,
+    },
+    BluetoothConnected {
+        name: String,
+    },
+    BluetoothDisconnected {
+        name: String,
+    },
+    BluetoothBattery {
+        name: String,
+        percent: u8,
+    },
+    AudioOutput {
+        name: String,
+    },
+    Microphone {
+        muted: bool,
+    },
+    MicrophoneInUse {
+        app: String,
+    },
+    Internet {
+        online: bool,
+        network: Option<String>,
+    },
+    Wifi {
+        name: String,
+    },
+    Vpn {
+        connected: bool,
+        name: String,
+    },
+    AirplaneMode {
+        on: bool,
+    },
+    Usb {
+        added: bool,
+        name: String,
+    },
+    Display {
+        added: bool,
+        count: u32,
+    },
     /// `image` is the encoded file, when it could be read in time.
-    Screenshot { path: String, image: Option<Arc<[u8]>> },
+    Screenshot {
+        path: String,
+        image: Option<Arc<[u8]>>,
+    },
     /// A screen clip that went only to the clipboard, without a file.
     ScreenClip,
     /// `what` says the kind of content, never the content itself.
-    Copied { what: &'static str },
-    BatterySaver { on: bool },
-    KeyboardLanguage { code: String },
+    Copied {
+        what: &'static str,
+    },
+    BatterySaver {
+        on: bool,
+    },
+    KeyboardLanguage {
+        code: String,
+    },
 }
 
 impl Indicator {
@@ -89,12 +144,18 @@ impl Indicator {
 
     /// Whether it confirms something small, which an open view can do without.
     pub fn is_brief(&self) -> bool {
-        matches!(self, Indicator::Copied { .. } | Indicator::KeyboardLanguage { .. })
+        matches!(
+            self,
+            Indicator::Copied { .. } | Indicator::KeyboardLanguage { .. }
+        )
     }
 
     /// Networks come and go while a laptop wakes up, which is not news.
     pub fn is_about_network(&self) -> bool {
-        matches!(self, Indicator::Internet { .. } | Indicator::Wifi { .. } | Indicator::Vpn { .. })
+        matches!(
+            self,
+            Indicator::Internet { .. } | Indicator::Wifi { .. } | Indicator::Vpn { .. }
+        )
     }
 
     pub fn into_activity(self, now: Millis) -> Activity {
@@ -103,9 +164,18 @@ impl Indicator {
                 subtitle: None,
                 chips: vec![if *muted { "Sessiz" } else { "Ses açık" }.into()],
             }),
-            Indicator::PluggedIn { .. } => Some(IndicatorContext { subtitle: Some("Harici güç".into()), chips: vec!["Güç bağlı".into()] }),
-            Indicator::Unplugged { .. } => Some(IndicatorContext { subtitle: Some("Pil gücü".into()), chips: vec!["Pilde".into()] }),
-            Indicator::LowBattery { .. } => Some(IndicatorContext { subtitle: Some("Pil seviyesi düşük".into()), chips: Vec::new() }),
+            Indicator::PluggedIn { .. } => Some(IndicatorContext {
+                subtitle: Some("Harici güç".into()),
+                chips: vec!["Güç bağlı".into()],
+            }),
+            Indicator::Unplugged { .. } => Some(IndicatorContext {
+                subtitle: Some("Pil gücü".into()),
+                chips: vec!["Pilde".into()],
+            }),
+            Indicator::LowBattery { .. } => Some(IndicatorContext {
+                subtitle: Some("Pil seviyesi düşük".into()),
+                chips: Vec::new(),
+            }),
             _ => None,
         };
         let mut activity = match self {
@@ -124,9 +194,12 @@ impl Indicator {
                 notice(Icon::Battery, "Enerji tasarrufu", switch_text(on), now)
             }
             Indicator::KeyboardLanguage { code } => brief(Icon::Keyboard, "Klavye", code, now),
-            Indicator::BluetoothBattery { name, percent } => {
-                notice(Icon::Bluetooth, "Bağlandı", format!("{name} · %{percent}"), now)
-            }
+            Indicator::BluetoothBattery { name, percent } => notice(
+                Icon::Bluetooth,
+                "Bağlandı",
+                format!("{name} · %{percent}"),
+                now,
+            ),
             Indicator::AudioOutput { name } => notice(Icon::Speaker, "Ses çıkışı", name, now),
             Indicator::Microphone { muted: true } => {
                 notice(Icon::MicrophoneOff, "Mikrofon", "Sessize alındı", now)
@@ -140,18 +213,33 @@ impl Indicator {
             Indicator::Internet { online: false, .. } => {
                 notice(Icon::InternetOff, "İnternet kesildi", "Bağlantı yok", now)
             }
-            Indicator::Internet { online: true, network } => {
+            Indicator::Internet {
+                online: true,
+                network,
+            } => {
                 let detail = network.unwrap_or_else(|| "Bağlantı kuruldu".to_owned());
                 notice(Icon::Internet, "İnternet geldi", detail, now)
             }
             Indicator::Wifi { name } => notice(Icon::Wifi, "Wi-Fi", name, now),
-            Indicator::Vpn { connected: true, name } => notice(Icon::Vpn, "VPN bağlandı", name, now),
-            Indicator::Vpn { connected: false, name } => notice(Icon::Vpn, "VPN kesildi", name, now),
-            Indicator::AirplaneMode { on } => notice(Icon::Airplane, "Uçak modu", switch_text(on), now),
+            Indicator::Vpn {
+                connected: true,
+                name,
+            } => notice(Icon::Vpn, "VPN bağlandı", name, now),
+            Indicator::Vpn {
+                connected: false,
+                name,
+            } => notice(Icon::Vpn, "VPN kesildi", name, now),
+            Indicator::AirplaneMode { on } => {
+                notice(Icon::Airplane, "Uçak modu", switch_text(on), now)
+            }
             Indicator::Usb { added: true, name } => notice(Icon::Usb, "USB takıldı", name, now),
             Indicator::Usb { added: false, name } => notice(Icon::Usb, "USB çıkarıldı", name, now),
             Indicator::Display { added, count } => {
-                let title = if added { "Ekran bağlandı" } else { "Ekran çıkarıldı" };
+                let title = if added {
+                    "Ekran bağlandı"
+                } else {
+                    "Ekran çıkarıldı"
+                };
                 notice(Icon::Monitor, title, format!("{count} ekran"), now)
             }
             Indicator::Volume { percent, muted } => {
@@ -160,23 +248,42 @@ impl Indicator {
                 level(icon, "Ses", shown, now)
             }
             Indicator::Brightness { percent } => level(Icon::Brightness, "Parlaklık", percent, now),
-            Indicator::CapsLock { on } => {
-                notice(Icon::Keyboard, "Caps Lock", switch_text(on), now)
-            }
+            Indicator::CapsLock { on } => notice(Icon::Keyboard, "Caps Lock", switch_text(on), now),
             Indicator::NumLock { on } => notice(Icon::Keyboard, "Num Lock", switch_text(on), now),
-            Indicator::PluggedIn { percent } => {
-                Activity { indicator_percent: Some(percent.min(100)), ..notice(Icon::Charging, "Güç bağlı", format!("%{}", percent.min(100)), now) }
-            }
-            Indicator::Unplugged { percent } => {
-                Activity { indicator_percent: Some(percent.min(100)), ..notice(Icon::Battery, "Pille çalışıyor", format!("%{}", percent.min(100)), now) }
-            }
+            Indicator::PluggedIn { percent } => Activity {
+                indicator_percent: Some(percent.min(100)),
+                ..notice(
+                    Icon::Charging,
+                    "Güç bağlı",
+                    format!("%{}", percent.min(100)),
+                    now,
+                )
+            },
+            Indicator::Unplugged { percent } => Activity {
+                indicator_percent: Some(percent.min(100)),
+                ..notice(
+                    Icon::Battery,
+                    "Pille çalışıyor",
+                    format!("%{}", percent.min(100)),
+                    now,
+                )
+            },
             Indicator::PowerSource { on_battery } => {
-                if on_battery { notice(Icon::Battery, "Pille çalışıyor", "", now) }
-                else { notice(Icon::Charging, "Güç bağlı", "", now) }
+                if on_battery {
+                    notice(Icon::Battery, "Pille çalışıyor", "", now)
+                } else {
+                    notice(Icon::Charging, "Güç bağlı", "", now)
+                }
             }
-            Indicator::LowBattery { percent } => {
-                Activity { indicator_percent: Some(percent.min(100)), ..notice(Icon::BatteryLow, "Pil azaldı", format!("%{} kaldı", percent.min(100)), now) }
-            }
+            Indicator::LowBattery { percent } => Activity {
+                indicator_percent: Some(percent.min(100)),
+                ..notice(
+                    Icon::BatteryLow,
+                    "Pil azaldı",
+                    format!("%{} kaldı", percent.min(100)),
+                    now,
+                )
+            },
             Indicator::BluetoothConnected { name } => {
                 notice(Icon::Bluetooth, "Bağlandı", name, now)
             }
@@ -255,7 +362,12 @@ impl SystemTracker {
     /// Saving counts as on while either source says so. The first report of
     /// each is where it stands, not a change, and one change told by both
     /// sources is told once.
-    pub fn saver_changed(&mut self, source: SaverSource, on: bool, now: Millis) -> Option<Indicator> {
+    pub fn saver_changed(
+        &mut self,
+        source: SaverSource,
+        on: bool,
+        now: Millis,
+    ) -> Option<Indicator> {
         let before = self.saver_on();
         let first = self.savers[source as usize].replace(on).is_none();
         let after = self.saver_on();
@@ -299,7 +411,10 @@ impl SystemTracker {
     /// A new resolution reports the same way, with the same number of screens.
     pub fn monitors_changed(&mut self, count: u32) -> Option<Indicator> {
         let previous = self.monitors.replace(count)?;
-        (previous != count).then_some(Indicator::Display { added: count > previous, count })
+        (previous != count).then_some(Indicator::Display {
+            added: count > previous,
+            count,
+        })
     }
 
     pub fn power_source_changed(&mut self, on_battery: bool) -> Option<Indicator> {
@@ -307,8 +422,14 @@ impl SystemTracker {
         if previous == on_battery {
             return None;
         }
-        let Some(percent) = self.battery else { return Some(Indicator::PowerSource { on_battery }); };
-        Some(if on_battery { Indicator::Unplugged { percent } } else { Indicator::PluggedIn { percent } })
+        let Some(percent) = self.battery else {
+            return Some(Indicator::PowerSource { on_battery });
+        };
+        Some(if on_battery {
+            Indicator::Unplugged { percent }
+        } else {
+            Indicator::PluggedIn { percent }
+        })
     }
 
     pub fn battery_changed(&mut self, percent: u8) -> Option<Indicator> {
@@ -329,7 +450,9 @@ impl SystemTracker {
         }
         if now < self.brightness_quiet_until {
             let longest = self.saver_changed_at + SAVER_LONGEST_MS;
-            self.brightness_quiet_until = (now + SAVER_STEP_MS).max(self.brightness_quiet_until).min(longest);
+            self.brightness_quiet_until = (now + SAVER_STEP_MS)
+                .max(self.brightness_quiet_until)
+                .min(longest);
             return None;
         }
         Some(Indicator::Brightness { percent })
@@ -366,11 +489,19 @@ impl NetworkTracker {
     }
 
     pub fn update(&mut self, state: NetworkState) -> Vec<Indicator> {
-        let Some(known) = self.known.replace(state.clone()) else { return Vec::new() };
+        let Some(known) = self.known.replace(state.clone()) else {
+            return Vec::new();
+        };
         let mut shown = Vec::new();
         match (known.online, state.online, state.wifi) {
-            (true, false, _) => shown.push(Indicator::Internet { online: false, network: None }),
-            (false, true, network) => shown.push(Indicator::Internet { online: true, network }),
+            (true, false, _) => shown.push(Indicator::Internet {
+                online: false,
+                network: None,
+            }),
+            (false, true, network) => shown.push(Indicator::Internet {
+                online: true,
+                network,
+            }),
             (true, true, Some(name)) if known.wifi.as_ref() != Some(&name) => {
                 shown.push(Indicator::Wifi { name });
             }
@@ -378,9 +509,15 @@ impl NetworkTracker {
         }
         match (known.vpn, state.vpn) {
             (before, Some(name)) if before.as_ref() != Some(&name) => {
-                shown.push(Indicator::Vpn { connected: true, name });
+                shown.push(Indicator::Vpn {
+                    connected: true,
+                    name,
+                });
             }
-            (Some(name), None) => shown.push(Indicator::Vpn { connected: false, name }),
+            (Some(name), None) => shown.push(Indicator::Vpn {
+                connected: false,
+                name,
+            }),
             _ => {}
         }
         shown
@@ -394,10 +531,25 @@ pub fn is_vpn_adapter(kind: u32, name: &str) -> bool {
     const PPP: u32 = 23;
     const VIRTUAL: u32 = 53;
     const TUNNEL: u32 = 131;
-    const SYSTEM_WORDS: [&str; 7] =
-        ["teredo", "6to4", "isatap", "ip-https", "loopback", "bluetooth", "miniport"];
-    const VPN_WORDS: [&str; 8] =
-        ["vpn", "tap-", "wireguard", "tailscale", "wintun", "zerotier", "nord", "warp"];
+    const SYSTEM_WORDS: [&str; 7] = [
+        "teredo",
+        "6to4",
+        "isatap",
+        "ip-https",
+        "loopback",
+        "bluetooth",
+        "miniport",
+    ];
+    const VPN_WORDS: [&str; 8] = [
+        "vpn",
+        "tap-",
+        "wireguard",
+        "tailscale",
+        "wintun",
+        "zerotier",
+        "nord",
+        "warp",
+    ];
     let name = name.to_lowercase();
     let says = |words: &[&str]| words.iter().any(|word| name.contains(word));
     !says(&SYSTEM_WORDS) && (matches!(kind, PPP | VIRTUAL | TUNNEL) || says(&VPN_WORDS))
@@ -412,19 +564,25 @@ pub fn language_code(locale: &str) -> Option<String> {
 /// Whether a file name is one of the images Windows saves screenshots as.
 pub fn is_image_file(name: &str) -> bool {
     let name = name.to_lowercase();
-    [".png", ".jpg", ".jpeg"].iter().any(|extension| name.ends_with(extension))
+    [".png", ".jpg", ".jpeg"]
+        .iter()
+        .any(|extension| name.ends_with(extension))
 }
 
 /// The drive letters in the mask Windows reports a new or removed volume with.
 pub fn drive_letters(mask: u32) -> Vec<char> {
-    (0..26).filter(|bit| mask >> bit & 1 != 0).map(|bit| char::from(b'A' + bit as u8)).collect()
+    (0..26)
+        .filter(|bit| mask >> bit & 1 != 0)
+        .map(|bit| char::from(b'A' + bit as u8))
+        .collect()
 }
 
 /// The address in a Bluetooth device id, as it appears in the system's own
 /// device names. The id ends in `-aa:bb:cc:dd:ee:ff`.
 pub fn bluetooth_address(id: &str) -> Option<String> {
     let address = id.rsplit('-').next()?.replace(':', "").to_uppercase();
-    (address.len() == 12 && address.chars().all(|digit| digit.is_ascii_hexdigit())).then_some(address)
+    (address.len() == 12 && address.chars().all(|digit| digit.is_ascii_hexdigit()))
+        .then_some(address)
 }
 
 /// The readable name of an app from its entry in Windows' privacy records:
@@ -438,7 +596,9 @@ pub fn capability_app_name(key: &str) -> String {
         package.rsplit('.').next().unwrap_or(package)
     };
     let mut letters = name.chars();
-    letters.next().map_or_else(String::new, |first| first.to_uppercase().chain(letters).collect())
+    letters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(letters).collect()
+    })
 }
 
 #[cfg(test)]
@@ -488,12 +648,19 @@ mod tests {
     }
 
     fn network(online: bool, wifi: Option<&str>) -> NetworkState {
-        NetworkState { online, wifi: wifi.map(str::to_owned), vpn: None }
+        NetworkState {
+            online,
+            wifi: wifi.map(str::to_owned),
+            vpn: None,
+        }
     }
 
     #[test]
     fn the_first_network_state_is_silent() {
-        assert_eq!(NetworkTracker::new().update(network(false, None)), Vec::new());
+        assert_eq!(
+            NetworkTracker::new().update(network(false, None)),
+            Vec::new()
+        );
     }
 
     #[test]
@@ -502,11 +669,17 @@ mod tests {
         tracker.update(network(true, Some("Ev")));
         assert_eq!(
             tracker.update(network(false, None)),
-            vec![Indicator::Internet { online: false, network: None }]
+            vec![Indicator::Internet {
+                online: false,
+                network: None
+            }]
         );
         assert_eq!(
             tracker.update(network(true, Some("Ev"))),
-            vec![Indicator::Internet { online: true, network: Some("Ev".into()) }]
+            vec![Indicator::Internet {
+                online: true,
+                network: Some("Ev".into())
+            }]
         );
     }
 
@@ -514,7 +687,12 @@ mod tests {
     fn moving_to_another_wifi_names_it() {
         let mut tracker = NetworkTracker::new();
         tracker.update(network(true, Some("Ev")));
-        assert_eq!(tracker.update(network(true, Some("Okul"))), vec![Indicator::Wifi { name: "Okul".into() }]);
+        assert_eq!(
+            tracker.update(network(true, Some("Okul"))),
+            vec![Indicator::Wifi {
+                name: "Okul".into()
+            }]
+        );
         assert_eq!(tracker.update(network(true, Some("Okul"))), Vec::new());
     }
 
@@ -529,18 +707,33 @@ mod tests {
     fn a_vpn_is_reported_coming_and_going() {
         let mut tracker = NetworkTracker::new();
         tracker.update(network(true, None));
-        let on = NetworkState { vpn: Some("WireGuard".into()), ..network(true, None) };
-        assert_eq!(tracker.update(on), vec![Indicator::Vpn { connected: true, name: "WireGuard".into() }]);
+        let on = NetworkState {
+            vpn: Some("WireGuard".into()),
+            ..network(true, None)
+        };
+        assert_eq!(
+            tracker.update(on),
+            vec![Indicator::Vpn {
+                connected: true,
+                name: "WireGuard".into()
+            }]
+        );
         assert_eq!(
             tracker.update(network(true, None)),
-            vec![Indicator::Vpn { connected: false, name: "WireGuard".into() }]
+            vec![Indicator::Vpn {
+                connected: false,
+                name: "WireGuard".into()
+            }]
         );
     }
 
     #[test]
     fn a_screenshot_carries_its_image_on_a_normal_alert() {
         let image = Arc::<[u8]>::from(&b"png"[..]);
-        let shot = Indicator::Screenshot { path: "a.png".into(), image: Some(image.clone()) };
+        let shot = Indicator::Screenshot {
+            path: "a.png".into(),
+            image: Some(image.clone()),
+        };
         let activity = shot.into_activity(1_000);
         assert_eq!(activity.preview, Some(image));
         assert_eq!(activity.file.as_deref(), Some("a.png"));
@@ -551,7 +744,10 @@ mod tests {
     #[test]
     fn a_screen_clip_is_a_screenshot_notice_without_a_file() {
         let activity = Indicator::ScreenClip.into_activity(1_000);
-        assert_eq!((activity.title.as_str(), activity.detail.as_str()), ("Ekran alıntısı", "Panoya kopyalandı"));
+        assert_eq!(
+            (activity.title.as_str(), activity.detail.as_str()),
+            ("Ekran alıntısı", "Panoya kopyalandı")
+        );
         assert_eq!(activity.file, None);
         assert!(!activity.brief);
         assert_eq!(Indicator::ScreenClip.setting(), Some("screenshot"));
@@ -571,7 +767,10 @@ mod tests {
         let mut tracker = SystemTracker::new();
         assert_eq!(tracker.battery_saver_changed(false, 0), None);
         assert_eq!(tracker.battery_saver_changed(false, 0), None);
-        assert_eq!(tracker.battery_saver_changed(true, 0), Some(Indicator::BatterySaver { on: true }));
+        assert_eq!(
+            tracker.battery_saver_changed(true, 0),
+            Some(Indicator::BatterySaver { on: true })
+        );
     }
 
     #[test]
@@ -583,7 +782,10 @@ mod tests {
         assert_eq!(tracker.brightness_changed(60, 10_200), None);
         assert_eq!(tracker.brightness_changed(50, 13_900), None);
         // Your own change, once the dimming is over, shows again.
-        assert_eq!(tracker.brightness_changed(70, 15_500), Some(Indicator::Brightness { percent: 70 }));
+        assert_eq!(
+            tracker.brightness_changed(70, 15_500),
+            Some(Indicator::Brightness { percent: 70 })
+        );
     }
 
     #[test]
@@ -594,9 +796,15 @@ mod tests {
         tracker.brightness_changed(90, 0);
         assert_eq!(tracker.saver_changed(SaverSource::Energy, false, 0), None);
         assert_eq!(tracker.saver_changed(SaverSource::Battery, false, 0), None);
-        assert_eq!(tracker.saver_changed(SaverSource::Energy, true, 39_933), Some(Indicator::BatterySaver { on: true }));
+        assert_eq!(
+            tracker.saver_changed(SaverSource::Energy, true, 39_933),
+            Some(Indicator::BatterySaver { on: true })
+        );
         assert_eq!(tracker.brightness_changed(63, 39_942), None);
-        assert_eq!(tracker.saver_changed(SaverSource::Energy, false, 57_793), Some(Indicator::BatterySaver { on: false }));
+        assert_eq!(
+            tracker.saver_changed(SaverSource::Energy, false, 57_793),
+            Some(Indicator::BatterySaver { on: false })
+        );
         assert_eq!(tracker.brightness_changed(90, 57_808), None);
     }
 
@@ -605,8 +813,15 @@ mod tests {
         let mut tracker = SystemTracker::new();
         tracker.saver_changed(SaverSource::Battery, false, 0);
         tracker.saver_changed(SaverSource::Energy, false, 0);
-        assert!(tracker.saver_changed(SaverSource::Energy, true, 1_000).is_some());
-        assert_eq!(tracker.saver_changed(SaverSource::Battery, true, 1_010), None);
+        assert!(
+            tracker
+                .saver_changed(SaverSource::Energy, true, 1_000)
+                .is_some()
+        );
+        assert_eq!(
+            tracker.saver_changed(SaverSource::Battery, true, 1_010),
+            None
+        );
         assert!(tracker.saver_on());
     }
 
@@ -630,7 +845,10 @@ mod tests {
         }
         // The quiet never lasts past its limit.
         assert_eq!(tracker.brightness_changed(55, 17_700), None);
-        assert_eq!(tracker.brightness_changed(50, 20_000), Some(Indicator::Brightness { percent: 50 }));
+        assert_eq!(
+            tracker.brightness_changed(50, 20_000),
+            Some(Indicator::Brightness { percent: 50 })
+        );
     }
 
     #[test]
@@ -678,7 +896,10 @@ mod tests {
         assert!(!is_vpn_adapter(71, "Intel(R) Wi-Fi 6 AX201 160MHz"));
         assert!(!is_vpn_adapter(6, "WAN Miniport (IP)"));
         assert!(!is_vpn_adapter(131, "Teredo Tunneling Pseudo-Interface"));
-        assert!(!is_vpn_adapter(131, "Microsoft IP-HTTPS Platform Interface"));
+        assert!(!is_vpn_adapter(
+            131,
+            "Microsoft IP-HTTPS Platform Interface"
+        ));
     }
 
     #[test]
@@ -696,10 +917,19 @@ mod tests {
 
     #[test]
     fn app_names_are_read_from_paths_and_packages() {
-        assert_eq!(capability_app_name("C:#Program Files#Discord#Discord.exe"), "Discord");
+        assert_eq!(
+            capability_app_name("C:#Program Files#Discord#Discord.exe"),
+            "Discord"
+        );
         assert_eq!(capability_app_name("C:#Users#someone#zoom.exe"), "Zoom");
-        assert_eq!(capability_app_name("5319275A.WhatsApp_cv1g1gvanyjgm"), "WhatsApp");
-        assert_eq!(capability_app_name("Microsoft.WindowsCamera_8wekyb3d8bbwe"), "WindowsCamera");
+        assert_eq!(
+            capability_app_name("5319275A.WhatsApp_cv1g1gvanyjgm"),
+            "WhatsApp"
+        );
+        assert_eq!(
+            capability_app_name("Microsoft.WindowsCamera_8wekyb3d8bbwe"),
+            "WindowsCamera"
+        );
         assert_eq!(capability_app_name(""), "");
     }
 
@@ -708,7 +938,10 @@ mod tests {
         let mut tracker = SystemTracker::new();
         assert_eq!(tracker.microphone_changed(false), None);
         assert_eq!(tracker.microphone_changed(false), None);
-        assert_eq!(tracker.microphone_changed(true), Some(Indicator::Microphone { muted: true }));
+        assert_eq!(
+            tracker.microphone_changed(true),
+            Some(Indicator::Microphone { muted: true })
+        );
     }
 
     #[test]
@@ -718,7 +951,9 @@ mod tests {
         assert_eq!(tracker.audio_output_changed("Hoparlör".into()), None);
         assert_eq!(
             tracker.audio_output_changed("Kulaklık".into()),
-            Some(Indicator::AudioOutput { name: "Kulaklık".into() })
+            Some(Indicator::AudioOutput {
+                name: "Kulaklık".into()
+            })
         );
     }
 
@@ -727,15 +962,40 @@ mod tests {
         let mut tracker = SystemTracker::new();
         assert_eq!(tracker.monitors_changed(1), None);
         assert_eq!(tracker.monitors_changed(1), None);
-        assert_eq!(tracker.monitors_changed(2), Some(Indicator::Display { added: true, count: 2 }));
-        assert_eq!(tracker.monitors_changed(1), Some(Indicator::Display { added: false, count: 1 }));
+        assert_eq!(
+            tracker.monitors_changed(2),
+            Some(Indicator::Display {
+                added: true,
+                count: 2
+            })
+        );
+        assert_eq!(
+            tracker.monitors_changed(1),
+            Some(Indicator::Display {
+                added: false,
+                count: 1
+            })
+        );
     }
 
     #[test]
     fn notices_that_can_be_turned_off_have_a_name() {
-        assert_eq!(Indicator::Volume { percent: 40, muted: false }.setting(), Some("volume"));
-        assert_eq!(Indicator::Brightness { percent: 70 }.setting(), Some("brightness"));
-        assert_eq!(Indicator::AirplaneMode { on: true }.setting(), Some("airplane"));
+        assert_eq!(
+            Indicator::Volume {
+                percent: 40,
+                muted: false
+            }
+            .setting(),
+            Some("volume")
+        );
+        assert_eq!(
+            Indicator::Brightness { percent: 70 }.setting(),
+            Some("brightness")
+        );
+        assert_eq!(
+            Indicator::AirplaneMode { on: true }.setting(),
+            Some("airplane")
+        );
         assert_eq!(Indicator::CapsLock { on: true }.setting(), None);
     }
 
@@ -761,8 +1021,14 @@ mod tests {
         let mut tracker = SystemTracker::new();
         tracker.power_source_changed(false);
         tracker.battery_changed(64);
-        assert_eq!(tracker.power_source_changed(true), Some(Indicator::Unplugged { percent: 64 }));
-        assert_eq!(tracker.power_source_changed(false), Some(Indicator::PluggedIn { percent: 64 }));
+        assert_eq!(
+            tracker.power_source_changed(true),
+            Some(Indicator::Unplugged { percent: 64 })
+        );
+        assert_eq!(
+            tracker.power_source_changed(false),
+            Some(Indicator::PluggedIn { percent: 64 })
+        );
     }
 
     #[test]
@@ -771,10 +1037,16 @@ mod tests {
         tracker.power_source_changed(true);
         tracker.battery_changed(22);
         assert_eq!(tracker.battery_changed(21), None);
-        assert_eq!(tracker.battery_changed(20), Some(Indicator::LowBattery { percent: 20 }));
+        assert_eq!(
+            tracker.battery_changed(20),
+            Some(Indicator::LowBattery { percent: 20 })
+        );
         assert_eq!(tracker.battery_changed(19), None);
         assert_eq!(tracker.battery_changed(11), None);
-        assert_eq!(tracker.battery_changed(10), Some(Indicator::LowBattery { percent: 10 }));
+        assert_eq!(
+            tracker.battery_changed(10),
+            Some(Indicator::LowBattery { percent: 10 })
+        );
         assert_eq!(tracker.battery_changed(9), None);
     }
 
@@ -783,7 +1055,10 @@ mod tests {
         let mut tracker = SystemTracker::new();
         tracker.power_source_changed(true);
         tracker.battery_changed(30);
-        assert_eq!(tracker.battery_changed(15), Some(Indicator::LowBattery { percent: 15 }));
+        assert_eq!(
+            tracker.battery_changed(15),
+            Some(Indicator::LowBattery { percent: 15 })
+        );
     }
 
     #[test]
@@ -806,7 +1081,13 @@ mod tests {
     fn the_first_volume_change_is_shown() {
         let mut tracker = SystemTracker::new();
         let shown = tracker.volume_changed(40, false);
-        assert_eq!(shown, Some(Indicator::Volume { percent: 40, muted: false }));
+        assert_eq!(
+            shown,
+            Some(Indicator::Volume {
+                percent: 40,
+                muted: false
+            })
+        );
     }
 
     #[test]
@@ -814,12 +1095,22 @@ mod tests {
         let mut tracker = SystemTracker::new();
         tracker.volume_changed(40, false);
         let shown = tracker.volume_changed(40, true);
-        assert_eq!(shown, Some(Indicator::Volume { percent: 40, muted: true }));
+        assert_eq!(
+            shown,
+            Some(Indicator::Volume {
+                percent: 40,
+                muted: true
+            })
+        );
     }
 
     #[test]
     fn muted_volume_shows_as_empty() {
-        let activity = Indicator::Volume { percent: 40, muted: true }.into_activity(0);
+        let activity = Indicator::Volume {
+            percent: 40,
+            muted: true,
+        }
+        .into_activity(0);
         assert_eq!(activity.level, Some(0));
         assert_eq!(activity.icon, Some(Icon::Muted));
     }
@@ -835,6 +1126,9 @@ mod tests {
 
     #[test]
     fn indicators_interrupt_as_alerts() {
-        assert_eq!(Indicator::NumLock { on: false }.into_activity(0).kind, Kind::Alert);
+        assert_eq!(
+            Indicator::NumLock { on: false }.into_activity(0).kind,
+            Kind::Alert
+        );
     }
 }

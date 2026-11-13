@@ -189,12 +189,22 @@ mod tests {
     #[test]
     fn the_buttons_follow_what_the_player_offers() {
         assert_eq!(snapshot(true).sides(), Sides::Tracks);
-        let video = MediaSnapshot { can_previous: false, can_next: false, ..snapshot(true) };
+        let video = MediaSnapshot {
+            can_previous: false,
+            can_next: false,
+            ..snapshot(true)
+        };
         assert_eq!(video.sides(), Sides::Jumps);
-        let live = MediaSnapshot { can_seek: false, ..video.clone() };
+        let live = MediaSnapshot {
+            can_seek: false,
+            ..video.clone()
+        };
         assert_eq!(live.sides(), Sides::Unavailable);
         // Only next, as at the start of a playlist, still means tracks.
-        let first = MediaSnapshot { can_previous: false, ..snapshot(true) };
+        let first = MediaSnapshot {
+            can_previous: false,
+            ..snapshot(true)
+        };
         assert_eq!(first.sides(), Sides::Tracks);
     }
 
@@ -203,7 +213,10 @@ mod tests {
         let paused = snapshot(false);
         assert_eq!(paused.jump_target(false, 5_000), 0);
         assert_eq!(paused.jump_target(true, 5_000), 40_000);
-        let near_end = MediaSnapshot { position_ms: 90_000, ..paused };
+        let near_end = MediaSnapshot {
+            position_ms: 90_000,
+            ..paused
+        };
         assert_eq!(near_end.jump_target(true, 5_000), 100_000);
         assert_eq!(near_end.jump_target(false, 5_000), 80_000);
     }
@@ -211,7 +224,12 @@ mod tests {
     #[test]
     fn a_report_without_position_news_keeps_the_count() {
         let earlier = snapshot(true);
-        let mut report = MediaSnapshot { position_ms: 2_000, sampled_at: 9_000, new_position: false, ..snapshot(true) };
+        let mut report = MediaSnapshot {
+            position_ms: 2_000,
+            sampled_at: 9_000,
+            new_position: false,
+            ..snapshot(true)
+        };
         report.continue_from(&earlier, 9_000);
         assert_eq!(report.position_at(9_000), 18_000);
     }
@@ -219,7 +237,11 @@ mod tests {
     #[test]
     fn a_small_difference_in_a_position_report_is_noise() {
         let earlier = snapshot(true);
-        let mut report = MediaSnapshot { position_ms: 16_500, sampled_at: 9_000, ..snapshot(true) };
+        let mut report = MediaSnapshot {
+            position_ms: 16_500,
+            sampled_at: 9_000,
+            ..snapshot(true)
+        };
         report.continue_from(&earlier, 9_000);
         assert_eq!(report.position_at(9_000), 18_000);
     }
@@ -227,7 +249,11 @@ mod tests {
     #[test]
     fn a_real_jump_is_followed() {
         let earlier = snapshot(true);
-        let mut report = MediaSnapshot { position_ms: 60_000, sampled_at: 9_000, ..snapshot(true) };
+        let mut report = MediaSnapshot {
+            position_ms: 60_000,
+            sampled_at: 9_000,
+            ..snapshot(true)
+        };
         report.continue_from(&earlier, 9_000);
         assert_eq!(report.position_at(9_000), 60_000);
     }
@@ -235,7 +261,11 @@ mod tests {
     #[test]
     fn pausing_takes_the_position_the_player_gives() {
         let earlier = snapshot(true);
-        let mut report = MediaSnapshot { position_ms: 17_000, sampled_at: 9_000, ..snapshot(false) };
+        let mut report = MediaSnapshot {
+            position_ms: 17_000,
+            sampled_at: 9_000,
+            ..snapshot(false)
+        };
         report.continue_from(&earlier, 9_000);
         assert_eq!(report.position_at(9_000), 17_000);
     }
@@ -269,7 +299,10 @@ mod tests {
 
     #[test]
     fn position_follows_the_playback_rate() {
-        let fast = MediaSnapshot { rate: 2.0, ..snapshot(true) };
+        let fast = MediaSnapshot {
+            rate: 2.0,
+            ..snapshot(true)
+        };
         assert_eq!(fast.position_at(6_000), 20_000);
     }
 
@@ -280,7 +313,10 @@ mod tests {
 
     #[test]
     fn progress_is_unknown_without_a_duration() {
-        let live = MediaSnapshot { duration_ms: 0, ..snapshot(true) };
+        let live = MediaSnapshot {
+            duration_ms: 0,
+            ..snapshot(true)
+        };
         assert_eq!(live.progress_at(2_000), None);
         assert_eq!(snapshot(false).progress_at(2_000), Some(0.1));
     }
@@ -288,7 +324,10 @@ mod tests {
     #[test]
     fn only_a_paused_session_goes_dormant() {
         assert_eq!(snapshot(true).into_activity(5_000).dormant_at, None);
-        assert_eq!(snapshot(false).into_activity(5_000).dormant_at, Some(5_000 + PAUSED_LINGER_MS));
+        assert_eq!(
+            snapshot(false).into_activity(5_000).dormant_at,
+            Some(5_000 + PAUSED_LINGER_MS)
+        );
     }
 
     #[test]

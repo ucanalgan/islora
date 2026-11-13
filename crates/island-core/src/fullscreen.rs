@@ -30,7 +30,10 @@ impl FullscreenWatch {
 /// full screen. Anything else in front, even a small window on another
 /// screen, leaves Windows' word standing.
 pub fn is_desktop_class(name: &str) -> bool {
-    matches!(name, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
+    matches!(
+        name,
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    )
 }
 
 #[cfg(test)]

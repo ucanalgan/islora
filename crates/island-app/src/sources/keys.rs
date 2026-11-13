@@ -15,10 +15,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_SHIFT, VK_SNAPSHOT, VK_SPACE,
 };
 use windows::Win32::UI::Input::{
-    GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK,
-    RIM_TYPEKEYBOARD, RegisterRawInputDevices,
+    GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
+    RIDEV_INPUTSINK, RIM_TYPEKEYBOARD, RegisterRawInputDevices,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, RI_KEY_BREAK};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId, RI_KEY_BREAK,
+};
 use windows::core::Result;
 
 const USAGE_PAGE_GENERIC: u16 = 0x01;
@@ -84,10 +86,17 @@ pub fn key_event(lparam: LPARAM) -> Option<KeyEvent> {
         return clip.then_some(KeyEvent::ScreenClip);
     }
     if key == VK_CAPITAL.0 {
-        Some(KeyEvent::Lock(Indicator::CapsLock { on: is_toggled(VK_CAPITAL.0) }))
+        Some(KeyEvent::Lock(Indicator::CapsLock {
+            on: is_toggled(VK_CAPITAL.0),
+        }))
     } else if key == VK_NUMLOCK.0 {
-        Some(KeyEvent::Lock(Indicator::NumLock { on: is_toggled(VK_NUMLOCK.0) }))
-    } else if [VK_SPACE, VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN].iter().any(|shortcut| shortcut.0 == key) {
+        Some(KeyEvent::Lock(Indicator::NumLock {
+            on: is_toggled(VK_NUMLOCK.0),
+        }))
+    } else if [VK_SPACE, VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
+        .iter()
+        .any(|shortcut| shortcut.0 == key)
+    {
         Some(KeyEvent::LanguageKey)
     } else {
         None
@@ -104,7 +113,11 @@ pub fn language() -> Option<String> {
     let written = unsafe {
         let thread = GetWindowThreadProcessId(GetForegroundWindow(), None);
         let layout = GetKeyboardLayout(thread);
-        LCIDToLocaleName((layout.0 as usize & LANGUAGE_MASK) as u32, Some(&mut name), 0)
+        LCIDToLocaleName(
+            (layout.0 as usize & LANGUAGE_MASK) as u32,
+            Some(&mut name),
+            0,
+        )
     };
     // The count includes the terminator.
     let length = usize::try_from(written).ok()?.checked_sub(1)?;

@@ -44,8 +44,15 @@ pub enum FocusStatus {
     Idle,
     /// Active, but no source can say for how long.
     Open,
-    Running { started: i64, ends: i64, on_break: bool },
-    Paused { remaining_ms: u64, on_break: bool },
+    Running {
+        started: i64,
+        ends: i64,
+        on_break: bool,
+    },
+    Paused {
+        remaining_ms: u64,
+        on_break: bool,
+    },
 }
 
 fn varint(bytes: &[u8]) -> Option<u64> {
@@ -60,8 +67,15 @@ fn varint(bytes: &[u8]) -> Option<u64> {
 }
 
 fn value_after(record: &[u8], tag: [u8; 2], last: bool) -> Option<u64> {
-    let mut places = record.windows(2).enumerate().filter(|(_, pair)| *pair == tag);
-    let (position, _) = if last { places.next_back()? } else { places.next()? };
+    let mut places = record
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| *pair == tag);
+    let (position, _) = if last {
+        places.next_back()?
+    } else {
+        places.next()?
+    };
     varint(record.get(position + 2..)?)
 }
 
@@ -103,13 +117,19 @@ pub fn parse_clock_state(json: &str) -> Option<ClockFocus> {
 
 /// Combines what is known. `clock` is the most trusted about the state, and the
 /// record about the time. `now` is Unix milliseconds.
-pub fn combine(active: bool, record: Option<FocusRecord>, clock: Option<ClockFocus>, now: i64) -> FocusStatus {
+pub fn combine(
+    active: bool,
+    record: Option<FocusRecord>,
+    clock: Option<ClockFocus>,
+    now: i64,
+) -> FocusStatus {
     let record = record.filter(|record| record.ends > now);
     match clock {
         Some(clock) if !clock.in_session => FocusStatus::Idle,
-        Some(clock) if clock.paused => {
-            FocusStatus::Paused { remaining_ms: clock.remaining_ms, on_break: clock.on_break }
-        }
+        Some(clock) if clock.paused => FocusStatus::Paused {
+            remaining_ms: clock.remaining_ms,
+            on_break: clock.on_break,
+        },
         Some(clock) => match record {
             Some(record) => FocusStatus::Running {
                 started: record.started,
@@ -124,9 +144,11 @@ pub fn combine(active: bool, record: Option<FocusRecord>, clock: Option<ClockFoc
             None => FocusStatus::Open,
         },
         None => match (active, record) {
-            (true, Some(record)) => {
-                FocusStatus::Running { started: record.started, ends: record.ends, on_break: false }
-            }
+            (true, Some(record)) => FocusStatus::Running {
+                started: record.started,
+                ends: record.ends,
+                on_break: false,
+            },
             (true, None) => FocusStatus::Open,
             (false, _) => FocusStatus::Idle,
         },
@@ -161,7 +183,10 @@ pub struct FocusTracker {
 
 impl Default for FocusTracker {
     fn default() -> Self {
-        Self { status: FocusStatus::Idle, command: None }
+        Self {
+            status: FocusStatus::Idle,
+            command: None,
+        }
     }
 }
 
@@ -172,14 +197,24 @@ impl FocusTracker {
 
     /// A session was asked for. Length and `now` are in milliseconds.
     pub fn expect_start(&mut self, length: i64, now: i64) {
-        self.status = FocusStatus::Running { started: now, ends: now + length, on_break: false };
-        self.command = Some(Command { deadline: now + START_WAIT_MS, starts_session: true });
+        self.status = FocusStatus::Running {
+            started: now,
+            ends: now + length,
+            on_break: false,
+        };
+        self.command = Some(Command {
+            deadline: now + START_WAIT_MS,
+            starts_session: true,
+        });
     }
 
     /// The running session was paused, resumed or ended.
     pub fn expect_change(&mut self, status: FocusStatus, now: i64) {
         self.status = status;
-        self.command = Some(Command { deadline: now + CHANGE_WAIT_MS, starts_session: false });
+        self.command = Some(Command {
+            deadline: now + CHANGE_WAIT_MS,
+            starts_session: false,
+        });
     }
 
     pub fn report(&mut self, report: FocusStatus, now: i64) -> FocusReport {
@@ -204,7 +239,9 @@ impl FocusTracker {
                 (command.starts_session, agrees, previous, report)
             {
                 self.status = FocusStatus::Idle;
-                return FocusReport::NeverStarted { remaining_ms: (ends - now).max(0) as u64 };
+                return FocusReport::NeverStarted {
+                    remaining_ms: (ends - now).max(0) as u64,
+                };
             }
             // An end from the island beats not knowing how long it runs for.
             if let (FocusStatus::Running { .. }, FocusStatus::Open) = (previous, report) {
@@ -215,10 +252,16 @@ impl FocusTracker {
             // The Clock app rounds a paused session to the minute, while the end
             // it was heading for gives the exact time left.
             (FocusStatus::Paused { on_break, .. }, FocusStatus::Running { ends, .. }) => {
-                FocusStatus::Paused { remaining_ms: (ends - now).max(0) as u64, on_break }
+                FocusStatus::Paused {
+                    remaining_ms: (ends - now).max(0) as u64,
+                    on_break,
+                }
             }
             (FocusStatus::Paused { on_break, .. }, FocusStatus::Paused { remaining_ms, .. }) => {
-                FocusStatus::Paused { remaining_ms, on_break }
+                FocusStatus::Paused {
+                    remaining_ms,
+                    on_break,
+                }
             }
             _ => report,
         };
@@ -239,7 +282,9 @@ mod tests {
     const NOW: i64 = 1_793_381_600_000;
 
     fn bytes(text: &str) -> Vec<u8> {
-        text.split(' ').map(|byte| u8::from_str_radix(byte, 16).unwrap()).collect()
+        text.split(' ')
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect()
     }
 
     fn record() -> Option<FocusRecord> {
@@ -263,7 +308,10 @@ mod tests {
     fn nonsense_is_rejected_rather_than_trusted() {
         assert_eq!(parse_record(&[]), None);
         assert_eq!(parse_record(&bytes("C6 1E 01 2A 06 01")), None);
-        assert_eq!(parse_record(&bytes("C6 1E FF FF FF FF FF FF FF FF FF FF FF")), None);
+        assert_eq!(
+            parse_record(&bytes("C6 1E FF FF FF FF FF FF FF FF FF FF FF")),
+            None
+        );
     }
 
     #[test]
@@ -275,7 +323,15 @@ mod tests {
     #[test]
     fn reads_the_clock_reply() {
         let state = parse_clock_state(RUNNING).unwrap();
-        assert_eq!(state, ClockFocus { in_session: true, paused: false, on_break: false, remaining_ms: 120_000 });
+        assert_eq!(
+            state,
+            ClockFocus {
+                in_session: true,
+                paused: false,
+                on_break: false,
+                remaining_ms: 120_000
+            }
+        );
         assert!(parse_clock_state(PAUSED).unwrap().paused);
         assert!(!parse_clock_state(AT_REST).unwrap().in_session);
     }
@@ -283,7 +339,9 @@ mod tests {
     #[test]
     fn units_are_understood_in_either_language() {
         let with_unit = |unit: &str| {
-            let json = format!(r#"{{"sessionState":0,"isPaused":0,"isBreak":0,"remainingTimeText":"3","remainingTimeUnit":"{unit}"}}"#);
+            let json = format!(
+                r#"{{"sessionState":0,"isPaused":0,"isBreak":0,"remainingTimeText":"3","remainingTimeUnit":"{unit}"}}"#
+            );
             parse_clock_state(&json).unwrap().remaining_ms
         };
         assert_eq!(with_unit("sn"), 3_000);
@@ -303,31 +361,51 @@ mod tests {
     #[test]
     fn the_exact_time_is_used_while_running() {
         let clock = parse_clock_state(RUNNING);
-        let expected = FocusStatus::Running { started: 1_793_381_528_000, ends: 1_793_382_419_196, on_break: false };
+        let expected = FocusStatus::Running {
+            started: 1_793_381_528_000,
+            ends: 1_793_382_419_196,
+            on_break: false,
+        };
         assert_eq!(combine(true, record(), clock, NOW), expected);
     }
 
     #[test]
     fn a_paused_session_stays_although_windows_calls_it_inactive() {
         let clock = parse_clock_state(PAUSED);
-        let expected = FocusStatus::Paused { remaining_ms: 120_000, on_break: false };
+        let expected = FocusStatus::Paused {
+            remaining_ms: 120_000,
+            on_break: false,
+        };
         assert_eq!(combine(false, record(), clock, NOW), expected);
     }
 
     #[test]
     fn the_clock_saying_it_stopped_beats_an_old_record() {
-        assert_eq!(combine(false, record(), parse_clock_state(AT_REST), NOW), FocusStatus::Idle);
+        assert_eq!(
+            combine(false, record(), parse_clock_state(AT_REST), NOW),
+            FocusStatus::Idle
+        );
     }
 
     #[test]
     fn without_the_record_the_clocks_rounded_time_still_works() {
-        let expected = FocusStatus::Running { started: NOW, ends: NOW + 120_000, on_break: false };
-        assert_eq!(combine(true, None, parse_clock_state(RUNNING), NOW), expected);
+        let expected = FocusStatus::Running {
+            started: NOW,
+            ends: NOW + 120_000,
+            on_break: false,
+        };
+        assert_eq!(
+            combine(true, None, parse_clock_state(RUNNING), NOW),
+            expected
+        );
     }
 
     #[test]
     fn without_the_clock_the_record_and_windows_still_work() {
-        assert!(matches!(combine(true, record(), None, NOW), FocusStatus::Running { .. }));
+        assert!(matches!(
+            combine(true, record(), None, NOW),
+            FocusStatus::Running { .. }
+        ));
         assert_eq!(combine(false, record(), None, NOW), FocusStatus::Idle);
     }
 
@@ -346,7 +424,11 @@ mod tests {
     const LENGTH: i64 = 300_000;
 
     fn running(ends: i64) -> FocusStatus {
-        FocusStatus::Running { started: NOW, ends, on_break: false }
+        FocusStatus::Running {
+            started: NOW,
+            ends,
+            on_break: false,
+        }
     }
 
     fn started() -> FocusTracker {
@@ -363,14 +445,20 @@ mod tests {
     #[test]
     fn reports_of_the_old_state_do_not_undo_a_start() {
         let mut tracker = started();
-        assert_eq!(tracker.report(FocusStatus::Idle, NOW + 1_000), FocusReport::TooEarly);
+        assert_eq!(
+            tracker.report(FocusStatus::Idle, NOW + 1_000),
+            FocusReport::TooEarly
+        );
         assert_eq!(tracker.status(), running(NOW + LENGTH));
     }
 
     #[test]
     fn the_exact_times_from_windows_replace_the_guess() {
         let mut tracker = started();
-        assert_eq!(tracker.report(running(NOW + LENGTH + 700), NOW + 2_000), FocusReport::Taken);
+        assert_eq!(
+            tracker.report(running(NOW + LENGTH + 700), NOW + 2_000),
+            FocusReport::Taken
+        );
         assert_eq!(tracker.status(), running(NOW + LENGTH + 700));
     }
 
@@ -380,7 +468,9 @@ mod tests {
         let later = NOW + START_WAIT_MS;
         assert_eq!(
             tracker.report(FocusStatus::Idle, later),
-            FocusReport::NeverStarted { remaining_ms: (LENGTH - START_WAIT_MS) as u64 }
+            FocusReport::NeverStarted {
+                remaining_ms: (LENGTH - START_WAIT_MS) as u64
+            }
         );
         assert_eq!(tracker.status(), FocusStatus::Idle);
     }
@@ -388,11 +478,20 @@ mod tests {
     #[test]
     fn a_known_length_beats_a_session_of_unknown_length() {
         let mut tracker = started();
-        assert_eq!(tracker.report(FocusStatus::Open, NOW + 1_000), FocusReport::TooEarly);
+        assert_eq!(
+            tracker.report(FocusStatus::Open, NOW + 1_000),
+            FocusReport::TooEarly
+        );
         assert_eq!(tracker.status(), running(NOW + LENGTH));
-        assert_eq!(tracker.report(FocusStatus::Open, NOW + START_WAIT_MS), FocusReport::Taken);
+        assert_eq!(
+            tracker.report(FocusStatus::Open, NOW + START_WAIT_MS),
+            FocusReport::Taken
+        );
         assert_eq!(tracker.status(), running(NOW + LENGTH));
-        assert_eq!(tracker.report(FocusStatus::Idle, NOW + START_WAIT_MS + 1), FocusReport::Taken);
+        assert_eq!(
+            tracker.report(FocusStatus::Idle, NOW + START_WAIT_MS + 1),
+            FocusReport::Taken
+        );
         assert_eq!(tracker.status(), FocusStatus::Idle);
     }
 
@@ -401,8 +500,14 @@ mod tests {
         let mut tracker = started();
         let wrong = running(NOW + 90 * 60_000);
         assert_eq!(tracker.report(wrong, NOW + 300), FocusReport::TooEarly);
-        assert_eq!(tracker.report(FocusStatus::Idle, NOW + 600), FocusReport::TooEarly);
-        assert_eq!(tracker.report(running(NOW + LENGTH + 900), NOW + 900), FocusReport::Taken);
+        assert_eq!(
+            tracker.report(FocusStatus::Idle, NOW + 600),
+            FocusReport::TooEarly
+        );
+        assert_eq!(
+            tracker.report(running(NOW + LENGTH + 900), NOW + 900),
+            FocusReport::Taken
+        );
         assert_eq!(tracker.status(), running(NOW + LENGTH + 900));
     }
 
@@ -410,15 +515,24 @@ mod tests {
     fn a_wrong_length_that_stays_is_shown_as_it_is() {
         let mut tracker = started();
         let wrong = running(NOW + 90 * 60_000);
-        assert_eq!(tracker.report(wrong, NOW + START_WAIT_MS), FocusReport::Taken);
+        assert_eq!(
+            tracker.report(wrong, NOW + START_WAIT_MS),
+            FocusReport::Taken
+        );
         assert_eq!(tracker.status(), wrong);
     }
 
     #[test]
     fn once_settled_every_report_counts() {
         let mut tracker = FocusTracker::default();
-        assert_eq!(tracker.report(running(NOW + LENGTH), NOW), FocusReport::Taken);
-        assert_eq!(tracker.report(FocusStatus::Idle, NOW + 1), FocusReport::Taken);
+        assert_eq!(
+            tracker.report(running(NOW + LENGTH), NOW),
+            FocusReport::Taken
+        );
+        assert_eq!(
+            tracker.report(FocusStatus::Idle, NOW + 1),
+            FocusReport::Taken
+        );
         assert_eq!(tracker.status(), FocusStatus::Idle);
     }
 
@@ -427,9 +541,15 @@ mod tests {
         let mut tracker = FocusTracker::default();
         tracker.report(running(NOW + LENGTH), NOW);
         tracker.expect_change(FocusStatus::Idle, NOW);
-        assert_eq!(tracker.report(running(NOW + LENGTH), NOW + 500), FocusReport::TooEarly);
+        assert_eq!(
+            tracker.report(running(NOW + LENGTH), NOW + 500),
+            FocusReport::TooEarly
+        );
         assert_eq!(tracker.status(), FocusStatus::Idle);
-        assert_eq!(tracker.report(FocusStatus::Idle, NOW + 900), FocusReport::Taken);
+        assert_eq!(
+            tracker.report(FocusStatus::Idle, NOW + 900),
+            FocusReport::Taken
+        );
     }
 
     #[test]
@@ -455,23 +575,47 @@ mod tests {
     fn pausing_keeps_the_exact_time_left() {
         let mut tracker = FocusTracker::default();
         tracker.report(running(NOW + LENGTH), NOW);
-        tracker.report(FocusStatus::Paused { remaining_ms: 300_000, on_break: false }, NOW + 28_500);
-        assert_eq!(tracker.status(), FocusStatus::Paused { remaining_ms: 271_500, on_break: false });
+        tracker.report(
+            FocusStatus::Paused {
+                remaining_ms: 300_000,
+                on_break: false,
+            },
+            NOW + 28_500,
+        );
+        assert_eq!(
+            tracker.status(),
+            FocusStatus::Paused {
+                remaining_ms: 271_500,
+                on_break: false
+            }
+        );
     }
 
     #[test]
     fn the_rounded_report_does_not_replace_a_pause_from_the_island() {
         let mut tracker = FocusTracker::default();
-        let exact = FocusStatus::Paused { remaining_ms: 271_500, on_break: false };
+        let exact = FocusStatus::Paused {
+            remaining_ms: 271_500,
+            on_break: false,
+        };
         tracker.expect_change(exact, NOW);
-        tracker.report(FocusStatus::Paused { remaining_ms: 300_000, on_break: false }, NOW + 500);
+        tracker.report(
+            FocusStatus::Paused {
+                remaining_ms: 300_000,
+                on_break: false,
+            },
+            NOW + 500,
+        );
         assert_eq!(tracker.status(), exact);
     }
 
     #[test]
     fn a_pause_found_at_startup_uses_what_the_clock_says() {
         let mut tracker = FocusTracker::default();
-        let paused = FocusStatus::Paused { remaining_ms: 120_000, on_break: false };
+        let paused = FocusStatus::Paused {
+            remaining_ms: 120_000,
+            on_break: false,
+        };
         tracker.report(paused, NOW);
         assert_eq!(tracker.status(), paused);
     }

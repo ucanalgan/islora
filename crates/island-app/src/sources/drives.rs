@@ -41,12 +41,18 @@ impl Drives {
             return Vec::new();
         }
         let letters = drive_letters(volume.dbcv_unitmask);
-        letters.into_iter().filter_map(|letter| self.drive_changed(letter, arrived)).collect()
+        letters
+            .into_iter()
+            .filter_map(|letter| self.drive_changed(letter, arrived))
+            .collect()
     }
 
     fn drive_changed(&mut self, letter: char, arrived: bool) -> Option<Indicator> {
         if !arrived {
-            let name = self.names.remove(&letter).unwrap_or_else(|| format!("{letter}:"));
+            let name = self
+                .names
+                .remove(&letter)
+                .unwrap_or_else(|| format!("{letter}:"));
             return Some(Indicator::Usb { added: false, name });
         }
         let root = HSTRING::from(format!("{letter}:\\"));
@@ -63,7 +69,10 @@ impl Drives {
 fn drive_name(root: &HSTRING, letter: char) -> String {
     let mut label = [0_u16; 64];
     let read = unsafe { GetVolumeInformationW(root, Some(&mut label), None, None, None, None) };
-    let length = label.iter().position(|&unit| unit == 0).unwrap_or(label.len());
+    let length = label
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(label.len());
     if read.is_err() || length == 0 {
         return format!("{letter}:");
     }

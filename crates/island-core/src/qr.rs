@@ -18,7 +18,9 @@ impl QrMatrix {
     pub fn encode(text: &str) -> Option<Self> {
         let code = QrCode::encode_text(text, QrCodeEcc::Low).ok()?;
         let size = code.size() as usize;
-        let dark = (0..size * size).map(|index| code.get_module((index % size) as i32, (index / size) as i32)).collect();
+        let dark = (0..size * size)
+            .map(|index| code.get_module((index % size) as i32, (index / size) as i32))
+            .collect();
         Some(Self { size, dark })
     }
 
@@ -57,11 +59,14 @@ mod tests {
 
     #[test]
     fn an_address_fits_a_small_code() {
-        let code = QrMatrix::encode("http://192.168.100.200:65535/abcdefghijklmnopqrst").expect("fits");
+        let code =
+            QrMatrix::encode("http://192.168.100.200:65535/abcdefghijklmnopqrst").expect("fits");
         // Version 3 is 29 modules a side, small enough to read from a laptop screen.
         assert!(code.size() <= 29, "{}", code.size());
         // Every code starts with a finder pattern in its top left corner.
-        assert!(code.is_dark(0, 0) && code.is_dark(6, 0) && !code.is_dark(1, 1) && code.is_dark(2, 2));
+        assert!(
+            code.is_dark(0, 0) && code.is_dark(6, 0) && !code.is_dark(1, 1) && code.is_dark(2, 2)
+        );
     }
 
     #[test]

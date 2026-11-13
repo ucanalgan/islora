@@ -61,12 +61,21 @@ impl MediaSource {
         let (publish, updates) = mpsc::channel();
         let worker_signals = signals.clone();
         let window = hwnd.0 as isize;
-        let spawned = std::thread::Builder::new().name("media".into()).spawn(move || {
-            let worker = Worker { signals: worker_signals, inbox, publish, window, clock, only_session };
-            if let Err(error) = worker.run() {
-                eprintln!("media source stopped: {error}");
-            }
-        });
+        let spawned = std::thread::Builder::new()
+            .name("media".into())
+            .spawn(move || {
+                let worker = Worker {
+                    signals: worker_signals,
+                    inbox,
+                    publish,
+                    window,
+                    clock,
+                    only_session,
+                };
+                if let Err(error) = worker.run() {
+                    eprintln!("media source stopped: {error}");
+                }
+            });
         if let Err(error) = spawned {
             eprintln!("media thread failed to start: {error}");
         }
@@ -98,29 +107,41 @@ struct Tracked {
 impl Tracked {
     fn new(session: Session, signals: &Sender<Signal>) -> Result<Self> {
         let metadata = signals.clone();
-        let metadata_token = session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
-            let _ = metadata.send(Signal::MetadataChanged);
-            Ok(())
-        }))?;
+        let metadata_token =
+            session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
+                let _ = metadata.send(Signal::MetadataChanged);
+                Ok(())
+            }))?;
         let playback = signals.clone();
-        let playback_token = session.PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
-            let _ = playback.send(Signal::StateChanged);
-            Ok(())
-        }))?;
+        let playback_token =
+            session.PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
+                let _ = playback.send(Signal::StateChanged);
+                Ok(())
+            }))?;
         let timeline = signals.clone();
-        let timeline_token = session.TimelinePropertiesChanged(&TypedEventHandler::new(move |_, _| {
-            let _ = timeline.send(Signal::TimelineChanged);
-            Ok(())
-        }))?;
-        Ok(Self { session, metadata_token, playback_token, timeline_token })
+        let timeline_token =
+            session.TimelinePropertiesChanged(&TypedEventHandler::new(move |_, _| {
+                let _ = timeline.send(Signal::TimelineChanged);
+                Ok(())
+            }))?;
+        Ok(Self {
+            session,
+            metadata_token,
+            playback_token,
+            timeline_token,
+        })
     }
 }
 
 impl Drop for Tracked {
     fn drop(&mut self) {
-        let _ = self.session.RemoveMediaPropertiesChanged(self.metadata_token);
+        let _ = self
+            .session
+            .RemoveMediaPropertiesChanged(self.metadata_token);
         let _ = self.session.RemovePlaybackInfoChanged(self.playback_token);
-        let _ = self.session.RemoveTimelinePropertiesChanged(self.timeline_token);
+        let _ = self
+            .session
+            .RemoveTimelinePropertiesChanged(self.timeline_token);
     }
 }
 
@@ -185,7 +206,10 @@ impl Worker {
         loop {
             // Asleep until something happens, or until the picture is due a second look.
             let first = match look_again {
-                Some(at) => match self.inbox.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                Some(at) => match self
+                    .inbox
+                    .recv_timeout(at.saturating_duration_since(Instant::now()))
+                {
                     Ok(signal) => Some(signal),
                     Err(RecvTimeoutError::Timeout) => None,
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -244,7 +268,10 @@ impl Worker {
                 continue;
             }
             let new_position = timeline_changed || metadata_changed;
-            self.send(self.snapshot(session, &metadata, new_position).unwrap_or(None));
+            self.send(
+                self.snapshot(session, &metadata, new_position)
+                    .unwrap_or(None),
+            );
         }
         Ok(())
     }
@@ -255,7 +282,9 @@ impl Worker {
         };
         let sessions = manager.GetSessions().ok()?;
         sessions.into_iter().find(|session| {
-            session.SourceAppUserModelId().is_ok_and(|id| id == only.as_str())
+            session
+                .SourceAppUserModelId()
+                .is_ok_and(|id| id == only.as_str())
         })
     }
 
@@ -268,14 +297,22 @@ impl Worker {
         }
     }
 
-    fn snapshot(&self, session: &Session, metadata: &Metadata, new_position: bool) -> Result<Option<MediaSnapshot>> {
+    fn snapshot(
+        &self,
+        session: &Session,
+        metadata: &Metadata,
+        new_position: bool,
+    ) -> Result<Option<MediaSnapshot>> {
         let info = session.GetPlaybackInfo()?;
         let status = info.PlaybackStatus()?;
         if metadata.title.is_empty() || matches!(status, Status::Closed | Status::Stopped) {
             return Ok(None);
         }
         let playing = status == Status::Playing;
-        let rate = info.PlaybackRate().and_then(|rate| rate.Value()).unwrap_or(1.0) as f32;
+        let rate = info
+            .PlaybackRate()
+            .and_then(|rate| rate.Value())
+            .unwrap_or(1.0) as f32;
 
         let timeline = session.GetTimelineProperties()?;
         let start = timeline.StartTime()?.Duration;
@@ -291,7 +328,11 @@ impl Worker {
         }
 
         let controls = info.Controls()?;
-        let kind = info.PlaybackType().and_then(|kind| kind.Value()).ok().or(metadata.reported);
+        let kind = info
+            .PlaybackType()
+            .and_then(|kind| kind.Value())
+            .ok()
+            .or(metadata.reported);
         let reported = match kind {
             Some(MediaPlaybackType::Video) => Reported::Video,
             Some(MediaPlaybackType::Music) => Reported::Music,
@@ -338,13 +379,17 @@ impl Worker {
 }
 
 fn windows_time_now() -> i64 {
-    let since_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let since_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     (since_unix.as_secs() + EPOCH_GAP_SECONDS) as i64 * 10_000_000
         + since_unix.subsec_nanos() as i64 / 100
 }
 
 fn shuffle_of(info: &PlaybackInfo) -> bool {
-    info.IsShuffleActive().and_then(|active| active.Value()).unwrap_or(false)
+    info.IsShuffleActive()
+        .and_then(|active| active.Value())
+        .unwrap_or(false)
 }
 
 fn repeat_of(info: &PlaybackInfo) -> RepeatMode {
@@ -380,7 +425,10 @@ fn press(session: &Session, button: MediaButton) {
 fn seek_to(session: &Session, position_ms: u64) -> bool {
     let start = session.GetTimelineProperties().and_then(|t| t.StartTime());
     let ticks = start.map_or(0, |start| start.Duration) + position_ms as i64 * TICKS_PER_MS;
-    match session.TryChangePlaybackPositionAsync(ticks).and_then(|operation| operation.join()) {
+    match session
+        .TryChangePlaybackPositionAsync(ticks)
+        .and_then(|operation| operation.join())
+    {
         Ok(accepted) => accepted,
         Err(error) => {
             eprintln!("seek failed: {error}");
@@ -396,8 +444,14 @@ fn read_metadata(session: &Session, previous: &Metadata) -> Result<Metadata> {
     let album = properties.AlbumTitle().is_ok_and(|album| !album.is_empty());
     let music_details = properties.TrackNumber().unwrap_or(0) > 0
         || properties.AlbumTrackCount().unwrap_or(0) > 0
-        || properties.AlbumArtist().is_ok_and(|artist| !artist.is_empty())
-        || properties.Genres().and_then(|genres| genres.Size()).unwrap_or(0) > 0;
+        || properties
+            .AlbumArtist()
+            .is_ok_and(|artist| !artist.is_empty())
+        || properties
+            .Genres()
+            .and_then(|genres| genres.Size())
+            .unwrap_or(0)
+            > 0;
     let reported = properties.PlaybackType().and_then(|kind| kind.Value()).ok();
 
     // The picture is read every time, as players often send the new text
@@ -412,11 +466,25 @@ fn read_metadata(session: &Session, previous: &Metadata) -> Result<Metadata> {
         (None, _) => None,
     };
     let art = artwork.as_deref().map_or(ArtShape::None, art_shape);
-    Ok(Metadata { title, artist, album, music_details, reported, artwork, art })
+    Ok(Metadata {
+        title,
+        artist,
+        album,
+        music_details,
+        reported,
+        artwork,
+        art,
+    })
 }
 
 fn read_artwork(properties: &Properties) -> Option<Arc<[u8]>> {
-    let stream = properties.Thumbnail().ok()?.OpenReadAsync().ok()?.join().ok()?;
+    let stream = properties
+        .Thumbnail()
+        .ok()?
+        .OpenReadAsync()
+        .ok()?
+        .join()
+        .ok()?;
     let size = stream.Size().ok()?;
     if size == 0 || size > MAX_ARTWORK_BYTES {
         return None;

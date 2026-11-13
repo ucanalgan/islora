@@ -22,7 +22,8 @@ use windows::core::{HSTRING, PWSTR, w};
 
 pub const MSG_CLOCK_TIMERS: u32 = WM_APP + 10;
 
-const SETTINGS_FILE: &str = "Packages\\Microsoft.WindowsAlarms_8wekyb3d8bbwe\\Settings\\settings.dat";
+const SETTINGS_FILE: &str =
+    "Packages\\Microsoft.WindowsAlarms_8wekyb3d8bbwe\\Settings\\settings.dat";
 /// The Clock writes a change in several steps.
 const SETTLE: Duration = Duration::from_millis(300);
 /// Far more than anyone keeps. A timer is one small record.
@@ -37,9 +38,11 @@ impl ClockTimerWatch {
     pub fn start(hwnd: HWND) -> Self {
         let (publish, updates) = mpsc::channel();
         let window = hwnd.0 as isize;
-        let spawned = std::thread::Builder::new().name("clock timers".into()).spawn(move || {
-            run(window, publish);
-        });
+        let spawned = std::thread::Builder::new()
+            .name("clock timers".into())
+            .spawn(move || {
+                run(window, publish);
+            });
         if let Err(error) = spawned {
             eprintln!("clock timer thread failed to start: {error}");
         }
@@ -60,8 +63,18 @@ fn open_settings() -> Option<HKEY> {
     }
     let (mut hive, mut state) = (HKEY::default(), HKEY::default());
     unsafe {
-        RegLoadAppKeyW(&HSTRING::from(file.as_os_str()), &mut hive, KEY_READ.0, 0, None).ok().ok()?;
-        RegOpenKeyExW(hive, w!("LocalState"), None, KEY_READ, &mut state).ok().ok()?;
+        RegLoadAppKeyW(
+            &HSTRING::from(file.as_os_str()),
+            &mut hive,
+            KEY_READ.0,
+            0,
+            None,
+        )
+        .ok()
+        .ok()?;
+        RegOpenKeyExW(hive, w!("LocalState"), None, KEY_READ, &mut state)
+            .ok()
+            .ok()?;
     }
     Some(state)
 }
@@ -69,7 +82,9 @@ fn open_settings() -> Option<HKEY> {
 fn run(window: isize, publish: Sender<Vec<ClockTimer>>) {
     // Stays open for good, since that is what makes Windows report changes.
     let Some(state) = open_settings() else { return };
-    let Ok(changed) = (unsafe { CreateEventW(None, false, false, None) }) else { return };
+    let Ok(changed) = (unsafe { CreateEventW(None, false, false, None) }) else {
+        return;
+    };
 
     loop {
         // The folder above, as the one for timers only exists after a first one.
@@ -79,7 +94,12 @@ fn run(window: isize, publish: Sender<Vec<ClockTimer>>) {
             return;
         }
         unsafe {
-            let _ = PostMessageW(Some(HWND(window as _)), MSG_CLOCK_TIMERS, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                Some(HWND(window as _)),
+                MSG_CLOCK_TIMERS,
+                WPARAM(0),
+                LPARAM(0),
+            );
             WaitForSingleObject(changed, INFINITE);
         }
         std::thread::sleep(SETTLE);
@@ -110,7 +130,11 @@ fn read_timers(state: HKEY) -> Vec<ClockTimer> {
             )
         };
         match status {
-            ERROR_SUCCESS => timers.extend(record.get(..size as usize).and_then(clock_timer::parse_timer)),
+            ERROR_SUCCESS => timers.extend(
+                record
+                    .get(..size as usize)
+                    .and_then(clock_timer::parse_timer),
+            ),
             ERROR_MORE_DATA => {}
             _ => break,
         }

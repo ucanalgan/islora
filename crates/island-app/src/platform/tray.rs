@@ -6,7 +6,7 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegG
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    ShellExecuteW, Shell_NotifyIconW,
+    Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, Result, w};
@@ -24,7 +24,10 @@ const ID_SETTINGS: usize = 1;
 const ID_RELEASE_NOTES: usize = 2;
 const ID_QUIT: usize = 3;
 
-const RELEASE_NOTES: &str = concat!("https://github.com/ucanalgan/islora/releases/tag/v", env!("CARGO_PKG_VERSION"));
+const RELEASE_NOTES: &str = concat!(
+    "https://github.com/ucanalgan/islora/releases/tag/v",
+    env!("CARGO_PKG_VERSION")
+);
 const BETA_RELEASE_NOTES: &str = "https://github.com/ucanalgan/islora/releases";
 
 // Resource numbers from app.rc.
@@ -59,7 +62,11 @@ impl Tray {
 
     /// A white icon would vanish on a light taskbar, and a black one on a dark.
     pub fn follow_theme(&mut self) {
-        self.data.hIcon = if taskbar_is_light() { self.black } else { self.white };
+        self.data.hIcon = if taskbar_is_light() {
+            self.black
+        } else {
+            self.white
+        };
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data);
         }
@@ -136,7 +143,13 @@ pub fn show_menu(hwnd: HWND) -> Option<Command> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
         AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Ayarlar")).ok()?;
-        AppendMenuW(menu, MF_STRING, ID_RELEASE_NOTES, &HSTRING::from("Sürüm notları")).ok()?;
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_RELEASE_NOTES,
+            &HSTRING::from("Sürüm notları"),
+        )
+        .ok()?;
         AppendMenuW(menu, MF_SEPARATOR, 0, None).ok()?;
         AppendMenuW(menu, MF_STRING, ID_QUIT, &HSTRING::from("Islora'dan çık")).ok()?;
 
@@ -167,7 +180,18 @@ pub fn show_menu(hwnd: HWND) -> Option<Command> {
 pub fn open_release_notes() {
     // Handing a link to the browser can take a while, which the UI must not wait for.
     std::thread::spawn(|| unsafe {
-        let url = if env!("CARGO_PKG_VERSION").contains('-') { BETA_RELEASE_NOTES } else { RELEASE_NOTES };
-        ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL);
+        let url = if env!("CARGO_PKG_VERSION").contains('-') {
+            BETA_RELEASE_NOTES
+        } else {
+            RELEASE_NOTES
+        };
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &HSTRING::from(url),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
     });
 }

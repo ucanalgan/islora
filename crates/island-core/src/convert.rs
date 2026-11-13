@@ -57,7 +57,11 @@ pub fn output_path(source: &str, target: Target, exists: impl Fn(&str) -> bool) 
     let name = file_name(source);
     let folder = &source[..source.len() - name.len()];
     let old_extension = extension(source);
-    let stem = if old_extension.is_empty() { name } else { &name[..name.len() - old_extension.len() - 1] };
+    let stem = if old_extension.is_empty() {
+        name
+    } else {
+        &name[..name.len() - old_extension.len() - 1]
+    };
     let base = format!("{folder}{stem}{}", target.suffix());
     let taken = |candidate: &str| candidate.eq_ignore_ascii_case(source) || exists(candidate);
 
@@ -93,8 +97,14 @@ mod tests {
 
     #[test]
     fn the_copy_goes_beside_the_original() {
-        assert_eq!(output_path(r"C:\Foto\tatil.heic", Target::Jpg, nothing_there), r"C:\Foto\tatil.jpg");
-        assert_eq!(output_path(r"C:\Foto\tatil.heic", Target::Png, nothing_there), r"C:\Foto\tatil.png");
+        assert_eq!(
+            output_path(r"C:\Foto\tatil.heic", Target::Jpg, nothing_there),
+            r"C:\Foto\tatil.jpg"
+        );
+        assert_eq!(
+            output_path(r"C:\Foto\tatil.heic", Target::Png, nothing_there),
+            r"C:\Foto\tatil.png"
+        );
         assert_eq!(
             output_path(r"C:\Foto\tatil.heic", Target::Smaller, nothing_there),
             r"C:\Foto\tatil (küçük).jpg"
@@ -104,15 +114,27 @@ mod tests {
     #[test]
     fn nothing_is_ever_replaced() {
         // The original itself, whatever the case of its name.
-        assert_eq!(output_path(r"C:\Foto\ekran.JPG", Target::Jpg, nothing_there), r"C:\Foto\ekran (2).jpg");
+        assert_eq!(
+            output_path(r"C:\Foto\ekran.JPG", Target::Jpg, nothing_there),
+            r"C:\Foto\ekran (2).jpg"
+        );
         let taken = |path: &str| path == r"C:\Foto\a.png" || path == r"C:\Foto\a (2).png";
-        assert_eq!(output_path(r"C:\Foto\a.bmp", Target::Png, taken), r"C:\Foto\a (3).png");
+        assert_eq!(
+            output_path(r"C:\Foto\a.bmp", Target::Png, taken),
+            r"C:\Foto\a (3).png"
+        );
     }
 
     #[test]
     fn dots_inside_a_name_stay() {
-        assert_eq!(output_path(r"C:\a\v1.2 son.webp", Target::Png, nothing_there), r"C:\a\v1.2 son.png");
-        assert_eq!(output_path(r"C:\a\adsız", Target::Jpg, nothing_there), r"C:\a\adsız.jpg");
+        assert_eq!(
+            output_path(r"C:\a\v1.2 son.webp", Target::Png, nothing_there),
+            r"C:\a\v1.2 son.png"
+        );
+        assert_eq!(
+            output_path(r"C:\a\adsız", Target::Jpg, nothing_there),
+            r"C:\a\adsız.jpg"
+        );
     }
 
     #[test]

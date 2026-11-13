@@ -3,8 +3,8 @@
 
 /// Picture formats Windows can read, some of them only with a Store extension.
 const IMAGE_EXTENSIONS: [&str; 15] = [
-    "jpg", "jpeg", "jpe", "jfif", "png", "bmp", "gif", "tif", "tiff", "webp", "heic", "heif", "avif",
-    "jxr", "ico",
+    "jpg", "jpeg", "jpe", "jfif", "png", "bmp", "gif", "tif", "tiff", "webp", "heic", "heif",
+    "avif", "jxr", "ico",
 ];
 
 /// One dropped file, as far as the island needs to know it.
@@ -58,7 +58,11 @@ pub fn format_size(bytes: u64) -> String {
     }
     let text = if value < 10.0 {
         let tenths = (value * 10.0).round() / 10.0;
-        if tenths >= 10.0 { "10".to_owned() } else { format!("{tenths:.1}").replace('.', ",") }
+        if tenths >= 10.0 {
+            "10".to_owned()
+        } else {
+            format!("{tenths:.1}").replace('.', ",")
+        }
     } else {
         format!("{}", value.round() as u64)
     };
@@ -82,7 +86,11 @@ mod tests {
     use super::*;
 
     fn file(path: &str, size: u64) -> DroppedFile {
-        DroppedFile { path: path.to_owned(), size, is_folder: false }
+        DroppedFile {
+            path: path.to_owned(),
+            size,
+            is_folder: false,
+        }
     }
 
     #[test]
@@ -117,10 +125,21 @@ mod tests {
 
     #[test]
     fn a_summary_names_one_file_and_counts_several() {
-        assert_eq!(summary(&[file(r"C:\a\tatil.jpg", 2_516_582)]), "tatil.jpg · 2,4 MB");
-        let three = [file("a.jpg", 1024 * 1024), file("b.jpg", 1024 * 1024), file("c.pdf", 1024 * 1024)];
+        assert_eq!(
+            summary(&[file(r"C:\a\tatil.jpg", 2_516_582)]),
+            "tatil.jpg · 2,4 MB"
+        );
+        let three = [
+            file("a.jpg", 1024 * 1024),
+            file("b.jpg", 1024 * 1024),
+            file("c.pdf", 1024 * 1024),
+        ];
         assert_eq!(summary(&three), "3 dosya · 3,0 MB");
-        let folder = DroppedFile { path: r"C:\a\Belgeler".into(), size: 0, is_folder: true };
+        let folder = DroppedFile {
+            path: r"C:\a\Belgeler".into(),
+            size: 0,
+            is_folder: true,
+        };
         assert_eq!(summary(&[folder]), "Belgeler");
         assert_eq!(summary(&[]), "");
     }

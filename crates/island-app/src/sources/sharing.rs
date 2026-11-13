@@ -10,12 +10,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use island_core::firewall;
 use island_core::http::{self, MAX_HEAD, Method, Route, Span};
 use island_core::transfer::WAIT_MS;
 use windows::Networking::Connectivity::{NetworkConnectivityLevel, NetworkInformation};
 use windows::Networking::HostNameType;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use island_core::firewall;
 use windows::Win32::Networking::NetworkListManager::{
     INetworkConnection, INetworkListManager, NLM_NETWORK_CATEGORY_DOMAIN_AUTHENTICATED,
     NLM_NETWORK_CATEGORY_PRIVATE, NetworkListManager,
@@ -51,11 +51,15 @@ pub fn local_network() -> Option<LocalNetwork> {
     let profiles = NetworkInformation::GetConnectionProfiles().ok()?;
     let mut best: Option<(u8, GUID, String, bool)> = None;
     for profile in profiles {
-        let level = profile.GetNetworkConnectivityLevel().unwrap_or(NetworkConnectivityLevel::None);
+        let level = profile
+            .GetNetworkConnectivityLevel()
+            .unwrap_or(NetworkConnectivityLevel::None);
         if level == NetworkConnectivityLevel::None {
             continue;
         }
-        let Ok(adapter) = profile.NetworkAdapter() else { continue };
+        let Ok(adapter) = profile.NetworkAdapter() else {
+            continue;
+        };
         let kind = adapter.IanaInterfaceType().unwrap_or(0);
         if kind != WIFI && kind != ETHERNET {
             continue;
@@ -64,22 +68,38 @@ pub fn local_network() -> Option<LocalNetwork> {
         // Wi-Fi first, as that is where phones are, and online ahead of local only.
         let online = matches!(
             level,
-            NetworkConnectivityLevel::InternetAccess | NetworkConnectivityLevel::ConstrainedInternetAccess
+            NetworkConnectivityLevel::InternetAccess
+                | NetworkConnectivityLevel::ConstrainedInternetAccess
         );
         let rank = u8::from(!wifi) * 2 + u8::from(!online);
-        let Ok(id) = adapter.NetworkAdapterId() else { continue };
-        let name = profile.ProfileName().map(|name| name.to_string()).unwrap_or_default();
+        let Ok(id) = adapter.NetworkAdapterId() else {
+            continue;
+        };
+        let name = profile
+            .ProfileName()
+            .map(|name| name.to_string())
+            .unwrap_or_default();
         if best.as_ref().is_none_or(|(known, ..)| rank < *known) {
             best = Some((rank, id, name, wifi));
         }
     }
     let (_, id, name, wifi) = best?;
-    Some(LocalNetwork { address: address_of(id)?, name, wifi, profile: profile_of(id) })
+    Some(LocalNetwork {
+        address: address_of(id)?,
+        name,
+        wifi,
+        profile: profile_of(id),
+    })
 }
 
 /// This computer only, for tests.
 pub fn loopback() -> LocalNetwork {
-    LocalNetwork { address: Ipv4Addr::LOCALHOST, name: "Bu bilgisayar".into(), wifi: false, profile: firewall::PRIVATE }
+    LocalNetwork {
+        address: Ipv4Addr::LOCALHOST,
+        name: "Bu bilgisayar".into(),
+        wifi: false,
+        profile: firewall::PRIVATE,
+    }
 }
 
 fn address_of(adapter: GUID) -> Option<Ipv4Addr> {
@@ -88,7 +108,13 @@ fn address_of(adapter: GUID) -> Option<Ipv4Addr> {
         if host.Type().ok()? != HostNameType::Ipv4 {
             return None;
         }
-        let owner = host.IPInformation().ok()?.NetworkAdapter().ok()?.NetworkAdapterId().ok()?;
+        let owner = host
+            .IPInformation()
+            .ok()?
+            .NetworkAdapter()
+            .ok()?
+            .NetworkAdapterId()
+            .ok()?;
         let address: Ipv4Addr = host.CanonicalName().ok()?.to_string().parse().ok()?;
         (owner == adapter && !address.is_link_local()).then_some(address)
     })
@@ -99,13 +125,16 @@ fn address_of(adapter: GUID) -> Option<Ipv4Addr> {
 fn profile_of(adapter: GUID) -> u32 {
     let check = || -> windows::core::Result<u32> {
         unsafe {
-            let manager: INetworkListManager = CoCreateInstance(&NetworkListManager, None, CLSCTX_ALL)?;
+            let manager: INetworkListManager =
+                CoCreateInstance(&NetworkListManager, None, CLSCTX_ALL)?;
             let connections = manager.GetNetworkConnections()?;
             loop {
                 let mut next: [Option<INetworkConnection>; 1] = [None];
                 let mut fetched = 0;
                 connections.Next(&mut next, Some(&mut fetched))?;
-                let Some(connection) = next[0].take().filter(|_| fetched == 1) else { return Ok(firewall::PUBLIC) };
+                let Some(connection) = next[0].take().filter(|_| fetched == 1) else {
+                    return Ok(firewall::PUBLIC);
+                };
                 if connection.GetAdapterId()? == adapter {
                     return Ok(match connection.GetNetwork()?.GetCategory()? {
                         NLM_NETWORK_CATEGORY_PRIVATE => firewall::PRIVATE,
@@ -166,7 +195,14 @@ impl Shared {
         if let Ok(events) = self.events.lock()
             && events.send(event).is_ok()
         {
-            let _ = unsafe { PostMessageW(Some(HWND(self.window as _)), MSG_SHARING, WPARAM(0), LPARAM(0)) };
+            let _ = unsafe {
+                PostMessageW(
+                    Some(HWND(self.window as _)),
+                    MSG_SHARING,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            };
         }
     }
 
@@ -212,7 +248,12 @@ impl Sharing {
         std::thread::spawn(move || accept(listener, accepting));
         let watching = shared.clone();
         std::thread::spawn(move || watch(watching, address));
-        Ok(Self { url, shared, address, events })
+        Ok(Self {
+            url,
+            shared,
+            address,
+            events,
+        })
     }
 
     pub fn events(&self) -> Vec<SharingEvent> {
@@ -246,7 +287,9 @@ fn random_bytes() -> io::Result<[u8; 13]> {
 /// Random bytes from Windows' own generator, for names and passwords.
 pub fn random(count: usize) -> Option<Vec<u8>> {
     let mut bytes = vec![0_u8; count];
-    unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }.ok().ok()?;
+    unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }
+        .ok()
+        .ok()?;
     Some(bytes)
 }
 
@@ -257,7 +300,9 @@ fn accept(listener: TcpListener, shared: Arc<Shared>) {
         }
         let Ok(stream) = stream else { continue };
         {
-            let Ok(mut progress) = shared.progress.lock() else { break };
+            let Ok(mut progress) = shared.progress.lock() else {
+                break;
+            };
             if progress.connections >= MOST_CONNECTIONS {
                 continue;
             }
@@ -275,7 +320,9 @@ fn accept(listener: TcpListener, shared: Arc<Shared>) {
 
 /// Stops the server at its deadline. A download under way holds it off.
 fn watch(shared: Arc<Shared>, address: SocketAddr) {
-    let Ok(mut progress) = shared.progress.lock() else { return };
+    let Ok(mut progress) = shared.progress.lock() else {
+        return;
+    };
     loop {
         if shared.stopped() {
             return;
@@ -284,11 +331,15 @@ fn watch(shared: Arc<Shared>, address: SocketAddr) {
             Some(deadline) if Instant::now() >= deadline => break,
             Some(deadline) => {
                 let wait = deadline.saturating_duration_since(Instant::now());
-                let Ok((next, _)) = shared.wake.wait_timeout(progress, wait) else { return };
+                let Ok((next, _)) = shared.wake.wait_timeout(progress, wait) else {
+                    return;
+                };
                 progress = next;
             }
             None => {
-                let Ok(next) = shared.wake.wait(progress) else { return };
+                let Ok(next) = shared.wake.wait(progress) else {
+                    return;
+                };
                 progress = next;
             }
         }
@@ -330,27 +381,56 @@ fn serve(mut stream: TcpStream, shared: &Shared) -> io::Result<()> {
             if !shared.visited.swap(true, Ordering::Relaxed) {
                 shared.report(SharingEvent::Visited);
             }
-            let listed: Vec<(String, u64)> = shared.files.iter().map(|file| (file.name.clone(), file.size)).collect();
+            let listed: Vec<(String, u64)> = shared
+                .files
+                .iter()
+                .map(|file| (file.name.clone(), file.size))
+                .collect();
             let page = http::page(&shared.token, &listed);
-            let body = if request.method == Method::Head { &[][..] } else { page.as_bytes() };
-            let head = http::response_head(200, &[
-                ("Content-Type", "text/html; charset=utf-8".into()),
-                ("Content-Length", page.len().to_string()),
-            ]);
+            let body = if request.method == Method::Head {
+                &[][..]
+            } else {
+                page.as_bytes()
+            };
+            let head = http::response_head(
+                200,
+                &[
+                    ("Content-Type", "text/html; charset=utf-8".into()),
+                    ("Content-Length", page.len().to_string()),
+                ],
+            );
             stream.write_all(head.as_bytes())?;
             stream.write_all(body)
         }
-        Route::File(index) => send_file(&mut stream, shared, index, request.method, request.range.as_deref()),
+        Route::File(index) => send_file(
+            &mut stream,
+            shared,
+            index,
+            request.method,
+            request.range.as_deref(),
+        ),
     }
 }
 
 fn answer(stream: &mut TcpStream, status: u16, kind: &str, body: &[u8]) -> io::Result<()> {
-    let head = http::response_head(status, &[("Content-Type", kind.into()), ("Content-Length", body.len().to_string())]);
+    let head = http::response_head(
+        status,
+        &[
+            ("Content-Type", kind.into()),
+            ("Content-Length", body.len().to_string()),
+        ],
+    );
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)
 }
 
-fn send_file(stream: &mut impl Write, shared: &Shared, index: usize, method: Method, range: Option<&str>) -> io::Result<()> {
+fn send_file(
+    stream: &mut impl Write,
+    shared: &Shared,
+    index: usize,
+    method: Method,
+    range: Option<&str>,
+) -> io::Result<()> {
     let file = &shared.files[index];
     let mut source = std::fs::File::open(&file.path)?;
     let size = source.metadata()?.len();
@@ -358,7 +438,13 @@ fn send_file(stream: &mut impl Write, shared: &Shared, index: usize, method: Met
         Span::Whole => (200, 0, size.saturating_sub(1)),
         Span::Part { first, last } => (206, first, last),
         Span::Unsatisfiable => {
-            let head = http::response_head(416, &[("Content-Range", format!("bytes */{size}")), ("Content-Length", "0".into())]);
+            let head = http::response_head(
+                416,
+                &[
+                    ("Content-Range", format!("bytes */{size}")),
+                    ("Content-Length", "0".into()),
+                ],
+            );
             return stream.write_all(head.as_bytes());
         }
     };
@@ -429,7 +515,9 @@ fn started(shared: &Shared) {
 
 /// Counts bytes as they go, and tells the island at each whole percent.
 fn sent(shared: &Shared, index: usize, bytes: u64) {
-    let Ok(mut progress) = shared.progress.lock() else { return };
+    let Ok(mut progress) = shared.progress.lock() else {
+        return;
+    };
     let size = shared.files[index].size;
     progress.sent[index] = (progress.sent[index] + bytes).min(size);
     let total: u64 = progress.sent.iter().sum();
@@ -442,7 +530,9 @@ fn sent(shared: &Shared, index: usize, bytes: u64) {
 }
 
 fn finish(shared: &Shared, index: usize, reached_the_end: bool) {
-    let Ok(mut progress) = shared.progress.lock() else { return };
+    let Ok(mut progress) = shared.progress.lock() else {
+        return;
+    };
     progress.downloads = progress.downloads.saturating_sub(1);
     if reached_the_end && progress.sent[index] >= shared.files[index].size {
         progress.done[index] = true;
@@ -466,7 +556,11 @@ fn finish(shared: &Shared, index: usize, reached_the_end: bool) {
 /// How the island names the network, such as `Wi-Fi · Ev`.
 pub fn describe(network: &LocalNetwork) -> String {
     let kind = if network.wifi { "Wi-Fi" } else { "Ethernet" };
-    if network.name.is_empty() { kind.to_owned() } else { format!("{kind} · {}", network.name) }
+    if network.name.is_empty() {
+        kind.to_owned()
+    } else {
+        format!("{kind} · {}", network.name)
+    }
 }
 
 #[cfg(test)]
@@ -475,16 +569,28 @@ mod tests {
 
     #[test]
     fn head_for_empty_file_does_not_complete_or_interrupt_a_download() {
-        let path = std::env::temp_dir().join(format!("islora-empty-transfer-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("islora-empty-transfer-{}", std::process::id()));
         std::fs::write(&path, []).unwrap();
         let (sender, events) = channel();
         let shared = Shared {
             token: "test".into(),
-            files: vec![SharedFile { path: path.to_string_lossy().into_owned(), name: "empty.txt".into(), size: 0 }],
+            files: vec![SharedFile {
+                path: path.to_string_lossy().into_owned(),
+                name: "empty.txt".into(),
+                size: 0,
+            }],
             total: 0,
             stop: AtomicBool::new(false),
             visited: AtomicBool::new(false),
-            progress: Mutex::new(Progress { sent: vec![0], done: vec![false], downloads: 1, connections: 0, deadline: None, reported_percent: 0 }),
+            progress: Mutex::new(Progress {
+                sent: vec![0],
+                done: vec![false],
+                downloads: 1,
+                connections: 0,
+                deadline: None,
+                reported_percent: 0,
+            }),
             wake: Condvar::new(),
             window: 0,
             events: Mutex::new(sender),
@@ -507,4 +613,3 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 }
-

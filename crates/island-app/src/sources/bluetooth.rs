@@ -61,33 +61,45 @@ fn watch(selector: &HSTRING, sink: IndicatorSink) -> Result<DeviceWatcher> {
     let added_names = names.clone();
     let added_sink = sink.clone();
     let added_enumerated = enumerated.clone();
-    watcher.Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(move |_, device| {
-        let Some(device) = device.as_ref() else { return Ok(()) };
-        let name = device.Name()?.to_string();
-        let id = device.Id()?.to_string();
-        added_names.lock().unwrap().insert(id.clone(), name.clone());
-        if added_enumerated.load(Ordering::Relaxed) {
-            added_sink.send(Indicator::BluetoothConnected { name: name.clone() });
-            report_battery(id, name, added_sink.clone());
-        }
-        Ok(())
-    }))?;
+    watcher.Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(
+        move |_, device| {
+            let Some(device) = device.as_ref() else {
+                return Ok(());
+            };
+            let name = device.Name()?.to_string();
+            let id = device.Id()?.to_string();
+            added_names.lock().unwrap().insert(id.clone(), name.clone());
+            if added_enumerated.load(Ordering::Relaxed) {
+                added_sink.send(Indicator::BluetoothConnected { name: name.clone() });
+                report_battery(id, name, added_sink.clone());
+            }
+            Ok(())
+        },
+    ))?;
 
-    watcher.Removed(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move |_, device| {
-        let Some(device) = device.as_ref() else { return Ok(()) };
-        if let Some(name) = names.lock().unwrap().remove(&device.Id()?.to_string()) {
-            sink.send(Indicator::BluetoothDisconnected { name });
-        }
-        Ok(())
-    }))?;
+    watcher.Removed(
+        &TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move |_, device| {
+            let Some(device) = device.as_ref() else {
+                return Ok(());
+            };
+            if let Some(name) = names.lock().unwrap().remove(&device.Id()?.to_string()) {
+                sink.send(Indicator::BluetoothDisconnected { name });
+            }
+            Ok(())
+        }),
+    )?;
 
     // The watcher only delivers removals when this handler exists too.
-    watcher.Updated(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(|_, _| Ok(())))?;
+    watcher.Updated(
+        &TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(|_, _| Ok(())),
+    )?;
 
-    watcher.EnumerationCompleted(&TypedEventHandler::<DeviceWatcher, IInspectable>::new(move |_, _| {
-        enumerated.store(true, Ordering::Relaxed);
-        Ok(())
-    }))?;
+    watcher.EnumerationCompleted(&TypedEventHandler::<DeviceWatcher, IInspectable>::new(
+        move |_, _| {
+            enumerated.store(true, Ordering::Relaxed);
+            Ok(())
+        },
+    ))?;
 
     watcher.Start()?;
     Ok(watcher)
@@ -106,7 +118,9 @@ fn report_battery(id: String, name: String, sink: IndicatorSink) {
 }
 
 fn battery_level(address: &str) -> Option<u8> {
-    let filter = HSTRING::from(format!("System.Devices.DeviceInstanceId:~~\"DEV_{address}\""));
+    let filter = HSTRING::from(format!(
+        "System.Devices.DeviceInstanceId:~~\"DEV_{address}\""
+    ));
     let property = HSTRING::from(BATTERY_PROPERTY);
     let wanted = IIterable::<HSTRING>::from(vec![property.clone()]);
     let devices = DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(
@@ -118,7 +132,13 @@ fn battery_level(address: &str) -> Option<u8> {
     .join()
     .ok()?;
     devices.into_iter().find_map(|device| {
-        let value = device.Properties().ok()?.Lookup(&property).ok()?.cast::<IPropertyValue>().ok()?;
+        let value = device
+            .Properties()
+            .ok()?
+            .Lookup(&property)
+            .ok()?
+            .cast::<IPropertyValue>()
+            .ok()?;
         value.GetUInt8().ok().filter(|&percent| percent <= 100)
     })
 }

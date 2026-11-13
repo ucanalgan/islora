@@ -13,9 +13,12 @@ const SETTLE: Duration = Duration::from_millis(300);
 
 /// Calls `changed` after each change in or below `key`, for as long as it can.
 pub fn follow(key: HKEY, mut changed: impl FnMut()) {
-    let Ok(event) = (unsafe { CreateEventW(None, false, false, None) }) else { return };
+    let Ok(event) = (unsafe { CreateEventW(None, false, false, None) }) else {
+        return;
+    };
     let filter = REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET;
-    while unsafe { RegNotifyChangeKeyValue(key, true, filter, Some(event), true) } == ERROR_SUCCESS {
+    while unsafe { RegNotifyChangeKeyValue(key, true, filter, Some(event), true) } == ERROR_SUCCESS
+    {
         unsafe { WaitForSingleObject(event, INFINITE) };
         std::thread::sleep(SETTLE);
         changed();

@@ -9,7 +9,8 @@ use windows::Win32::Media::Audio::Endpoints::{
 };
 use windows::Win32::Media::Audio::{
     AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE, EDataFlow, ERole, IMMDevice, IMMDeviceEnumerator,
-    IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator, eCapture, eConsole, eRender,
+    IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator, eCapture, eConsole,
+    eRender,
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToBSTR;
 use windows::Win32::System::Com::{CLSCTX_ALL, CLSCTX_INPROC_SERVER, CoCreateInstance, STGM_READ};
@@ -36,7 +37,9 @@ struct MicrophoneCallback {
 impl IAudioEndpointVolumeCallback_Impl for MicrophoneCallback_Impl {
     fn OnNotify(&self, data: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> Result<()> {
         let data = unsafe { data.as_ref() }.ok_or_else(Error::empty)?;
-        self.sink.send(Indicator::Microphone { muted: data.bMuted.as_bool() });
+        self.sink.send(Indicator::Microphone {
+            muted: data.bMuted.as_bool(),
+        });
         Ok(())
     }
 }
@@ -45,7 +48,10 @@ impl IAudioEndpointVolumeCallback_Impl for VolumeCallback_Impl {
     fn OnNotify(&self, data: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> Result<()> {
         let data = unsafe { data.as_ref() }.ok_or_else(Error::empty)?;
         let percent = (data.fMasterVolume * 100.0).round() as u8;
-        self.sink.send(Indicator::Volume { percent, muted: data.bMuted.as_bool() });
+        self.sink.send(Indicator::Volume {
+            percent,
+            muted: data.bMuted.as_bool(),
+        });
         Ok(())
     }
 }
@@ -58,9 +64,18 @@ struct DeviceClient {
 impl IMMNotificationClient_Impl for DeviceClient_Impl {
     fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, _device: &PCWSTR) -> Result<()> {
         if role == eConsole {
-            let device = if flow == eRender { DEVICE_OUTPUT } else { DEVICE_MICROPHONE };
+            let device = if flow == eRender {
+                DEVICE_OUTPUT
+            } else {
+                DEVICE_MICROPHONE
+            };
             unsafe {
-                let _ = PostMessageW(Some(HWND(self.window as _)), MSG_AUDIO_DEVICE, WPARAM(device), LPARAM(0));
+                let _ = PostMessageW(
+                    Some(HWND(self.window as _)),
+                    MSG_AUDIO_DEVICE,
+                    WPARAM(device),
+                    LPARAM(0),
+                );
             }
         }
         Ok(())
@@ -97,7 +112,10 @@ impl AudioWatch {
     pub fn start(hwnd: HWND, sink: IndicatorSink) -> Result<Self> {
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_INPROC_SERVER)? };
-        let device_client: IMMNotificationClient = DeviceClient { window: hwnd.0 as isize }.into();
+        let device_client: IMMNotificationClient = DeviceClient {
+            window: hwnd.0 as isize,
+        }
+        .into();
         unsafe { enumerator.RegisterEndpointNotificationCallback(&device_client)? };
 
         let mut watch = Self {
@@ -124,22 +142,38 @@ impl AudioWatch {
 
     /// Read the actual output state for the controls panel.
     pub fn output_level(&self) -> Result<Option<(u8, bool)>> {
-        let Some(endpoint) = &self.endpoint else { return Ok(None) };
+        let Some(endpoint) = &self.endpoint else {
+            return Ok(None);
+        };
         let level = unsafe { endpoint.GetMasterVolumeLevelScalar()? };
         let muted = unsafe { endpoint.GetMute()? }.as_bool();
-        Ok(Some(((level * 100.0).round().clamp(0.0, 100.0) as u8, muted)))
+        Ok(Some((
+            (level * 100.0).round().clamp(0.0, 100.0) as u8,
+            muted,
+        )))
     }
 
     pub fn set_output_level(&self, percent: u8) -> Result<Option<(u8, bool)>> {
-        let Some(endpoint) = &self.endpoint else { return Ok(None) };
-        unsafe { endpoint.SetMasterVolumeLevelScalar(f32::from(percent.min(100)) / 100.0, std::ptr::null())?; }
+        let Some(endpoint) = &self.endpoint else {
+            return Ok(None);
+        };
+        unsafe {
+            endpoint.SetMasterVolumeLevelScalar(
+                f32::from(percent.min(100)) / 100.0,
+                std::ptr::null(),
+            )?;
+        }
         self.output_level()
     }
 
     pub fn toggle_output_mute(&self) -> Result<Option<(u8, bool)>> {
-        let Some(endpoint) = &self.endpoint else { return Ok(None) };
+        let Some(endpoint) = &self.endpoint else {
+            return Ok(None);
+        };
         let muted = unsafe { endpoint.GetMute()? }.as_bool();
-        unsafe { endpoint.SetMute(!muted, std::ptr::null())?; }
+        unsafe {
+            endpoint.SetMute(!muted, std::ptr::null())?;
+        }
         self.output_level()
     }
 
@@ -147,9 +181,13 @@ impl AudioWatch {
     /// telling a change.
     pub fn follow_default_microphone(&mut self) {
         detach(&mut self.microphone, &self.microphone_callback);
-        let Ok((endpoint, _)) = self.attach(eCapture, &self.microphone_callback) else { return };
+        let Ok((endpoint, _)) = self.attach(eCapture, &self.microphone_callback) else {
+            return;
+        };
         if let Ok(muted) = unsafe { endpoint.GetMute() } {
-            self.sink.send(Indicator::Microphone { muted: muted.as_bool() });
+            self.sink.send(Indicator::Microphone {
+                muted: muted.as_bool(),
+            });
         }
         self.microphone = Some(endpoint);
     }
@@ -189,7 +227,9 @@ impl Drop for AudioWatch {
         detach(&mut self.endpoint, &self.callback);
         detach(&mut self.microphone, &self.microphone_callback);
         unsafe {
-            let _ = self.enumerator.UnregisterEndpointNotificationCallback(&self.device_client);
+            let _ = self
+                .enumerator
+                .UnregisterEndpointNotificationCallback(&self.device_client);
         }
     }
 }

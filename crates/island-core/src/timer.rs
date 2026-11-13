@@ -17,16 +17,27 @@ pub struct Timer {
 
 impl Timer {
     pub fn start(total: Millis, now: Millis) -> Self {
-        Self { total, progress: Progress::Running { ends_at: now.saturating_add(total) } }
+        Self {
+            total,
+            progress: Progress::Running {
+                ends_at: now.saturating_add(total),
+            },
+        }
     }
 
     /// One that is already under way, such as a Windows focus session.
     pub fn ending_at(ends_at: Millis, total: Millis) -> Self {
-        Self { total, progress: Progress::Running { ends_at } }
+        Self {
+            total,
+            progress: Progress::Running { ends_at },
+        }
     }
 
     pub fn paused(remaining: Millis, total: Millis) -> Self {
-        Self { total, progress: Progress::Paused { remaining } }
+        Self {
+            total,
+            progress: Progress::Paused { remaining },
+        }
     }
 
     pub fn remaining(&self, now: Millis) -> Millis {
@@ -49,8 +60,12 @@ impl Timer {
 
     pub fn toggle(&mut self, now: Millis) {
         self.progress = match self.progress {
-            Progress::Running { ends_at } => Progress::Paused { remaining: ends_at.saturating_sub(now) },
-            Progress::Paused { remaining } => Progress::Running { ends_at: now.saturating_add(remaining) },
+            Progress::Running { ends_at } => Progress::Paused {
+                remaining: ends_at.saturating_sub(now),
+            },
+            Progress::Paused { remaining } => Progress::Running {
+                ends_at: now.saturating_add(remaining),
+            },
         };
     }
 
@@ -59,24 +74,40 @@ impl Timer {
         let running = self.ends_at().is_some();
         let seconds = remaining.div_ceil(1000);
         let shown = if seconds >= 3600 {
-            format!("{:02}:{:02}:{:02}", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+            format!(
+                "{:02}:{:02}:{:02}",
+                seconds / 3600,
+                (seconds / 60) % 60,
+                seconds % 60
+            )
         } else {
             format!("{:02}:{:02}", seconds / 60, seconds % 60)
         };
-        let left = (u128::from(remaining.min(self.total)) * 1000 / u128::from(self.total.max(1))) as u16;
+        let left =
+            (u128::from(remaining.min(self.total)) * 1000 / u128::from(self.total.max(1))) as u16;
         Activity {
             leading: "Zamanlayıcı".into(),
             trailing: shown.clone(),
             title: shown,
-            detail: if running { "Zamanlayıcı".into() } else { "Duraklatıldı".into() },
-            urgent_at: self.ends_at().map(|ends_at| ends_at.saturating_sub(TIMER_URGENT_MS)),
+            detail: if running {
+                "Zamanlayıcı".into()
+            } else {
+                "Duraklatıldı".into()
+            },
+            urgent_at: self
+                .ends_at()
+                .map(|ends_at| ends_at.saturating_sub(TIMER_URGENT_MS)),
             icon: Some(Icon::Timer),
             badge: Some(Bubble::Count {
                 value: remaining.div_ceil(60_000).to_string(),
                 icon: None,
                 ring: Some((left / 10) as u8),
             }),
-            timer: Some(TimerView { running, has_controls: true, left: Some(left) }),
+            timer: Some(TimerView {
+                running,
+                has_controls: true,
+                left: Some(left),
+            }),
             ..Activity::new(Kind::TimerRunning)
         }
     }
@@ -89,7 +120,11 @@ impl Timer {
         Activity {
             kind: Kind::Focus,
             leading: name.into(),
-            detail: if running { format!("{name} oturumu") } else { "Duraklatıldı".into() },
+            detail: if running {
+                format!("{name} oturumu")
+            } else {
+                "Duraklatıldı".into()
+            },
             icon: Some(Icon::Focus),
             ..activity
         }
@@ -102,8 +137,15 @@ impl Timer {
         let running = self.ends_at().is_some();
         Activity {
             kind: Kind::ClockTimer,
-            detail: if running { format!("Saat · {name}") } else { "Duraklatıldı".into() },
-            timer: activity.timer.map(|timer| TimerView { has_controls: false, ..timer }),
+            detail: if running {
+                format!("Saat · {name}")
+            } else {
+                "Duraklatıldı".into()
+            },
+            timer: activity.timer.map(|timer| TimerView {
+                has_controls: false,
+                ..timer
+            }),
             ..activity
         }
     }
@@ -145,7 +187,14 @@ mod tests {
     fn shows_rounded_up_so_it_starts_on_the_full_time() {
         let activity = Timer::start(1_500_000, 0).activity(10);
         assert_eq!(activity.trailing, "25:00");
-        assert_eq!(activity.badge, Some(Bubble::Count { value: "25".into(), icon: None, ring: Some(99) }));
+        assert_eq!(
+            activity.badge,
+            Some(Bubble::Count {
+                value: "25".into(),
+                icon: None,
+                ring: Some(99)
+            })
+        );
     }
 
     #[test]
@@ -186,7 +235,14 @@ mod tests {
         assert_eq!(Timer::start(5_000, 0).activity(0).title, "00:05");
         assert_eq!(Timer::start(3_600_000, 0).activity(0).title, "01:00:00");
         assert_eq!(Timer::start(0, 0).activity(0).timer.unwrap().left, Some(0));
-        assert_eq!(Timer::paused(u64::MAX, u64::MAX).activity(0).timer.unwrap().left, Some(1000));
+        assert_eq!(
+            Timer::paused(u64::MAX, u64::MAX)
+                .activity(0)
+                .timer
+                .unwrap()
+                .left,
+            Some(1000)
+        );
     }
 
     #[test]

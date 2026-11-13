@@ -24,7 +24,8 @@ fn holds(format: u32) -> bool {
 /// What to say about the latest change, if anything. Password managers mark
 /// their copies with a format of their own, asking to be left alone.
 pub fn copied() -> Option<Indicator> {
-    let private = unsafe { RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")) };
+    let private =
+        unsafe { RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")) };
     if private != 0 && holds(private) {
         return None;
     }

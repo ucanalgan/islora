@@ -30,10 +30,13 @@ pub mod transfer;
 pub use activity::{Activity, Bubble, Icon, Kind, Millis, TimerView};
 pub use fullscreen::FullscreenWatch;
 pub use indicator::{Indicator, NetworkState, NetworkTracker, SystemTracker};
-pub use layout::{IslandStyle, Material, MediaButton, Pill, ProgressStyle, StartMode, TaskLayout, TimerButton};
+pub use layout::{
+    IslandStyle, Material, MediaButton, Pill, ProgressStyle, StartMode, TaskLayout, TimerButton,
+};
 pub use media::MediaSnapshot;
 pub use schedule::Upcoming;
 pub use scheduler::{
-    CalendarState, ConvertView, FocusView, Frame, HomeView, Island, PanelView, Presentation, Suppression,
+    CalendarState, ConvertView, FocusView, Frame, HomeView, Island, PanelView, Presentation,
+    Suppression,
 };
 pub use timer::Timer;

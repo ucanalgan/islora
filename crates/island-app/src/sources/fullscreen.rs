@@ -22,7 +22,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND,
-    EVENT_SYSTEM_MOVESIZESTART, GetClassNameW, GetForegroundWindow, PBT_POWERSETTINGCHANGE, PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
+    EVENT_SYSTEM_MOVESIZESTART, GetClassNameW, GetForegroundWindow, PBT_POWERSETTINGCHANGE,
+    PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
 };
 use windows::core::Result;
 
@@ -82,7 +83,12 @@ impl Presence {
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             )?;
             WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION)?;
-            Ok(Self { hwnd, drag_hook, front_hook, display })
+            Ok(Self {
+                hwnd,
+                drag_hook,
+                front_hook,
+                display,
+            })
         }
     }
 }
@@ -144,7 +150,10 @@ unsafe extern "system" fn on_front_changed(
 pub fn fullscreen_now() -> bool {
     let state: QUERY_USER_NOTIFICATION_STATE =
         unsafe { SHQueryUserNotificationState() }.unwrap_or_default();
-    matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE)
+    matches!(
+        state,
+        QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE
+    )
 }
 
 /// Whether the desktop or the taskbar is in front, which Windows also reports as

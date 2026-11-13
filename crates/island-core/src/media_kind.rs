@@ -84,7 +84,9 @@ pub fn names_a_song(title: &str, artist: &str) -> bool {
     let words = SONG_WORDS.iter().any(|word| title.contains(&fold(word)));
     let channel = artist.ends_with(" - topic") || artist.contains("vevo");
     let artist_first = artist.chars().count() >= 2
-        && [" - ", " – ", " — "].iter().any(|dash| title.starts_with(&format!("{artist}{dash}")));
+        && [" - ", " – ", " — "]
+            .iter()
+            .any(|dash| title.starts_with(&format!("{artist}{dash}")));
     words || channel || artist_first
 }
 
@@ -92,7 +94,11 @@ pub fn names_a_song(title: &str, artist: &str) -> bool {
 /// with a dot that is then dropped, and `ı` counts as `i`, so "BİR" and "BIR"
 /// both match "bir".
 fn fold(text: &str) -> String {
-    text.to_lowercase().chars().filter(|c| *c != '\u{307}').map(|c| if c == 'ı' { 'i' } else { c }).collect()
+    text.to_lowercase()
+        .chars()
+        .filter(|c| *c != '\u{307}')
+        .map(|c| if c == 'ı' { 'i' } else { c })
+        .collect()
 }
 
 /// Whether to treat what plays as a song.
@@ -122,7 +128,11 @@ pub fn is_music(signals: &Signals) -> bool {
 pub fn display_artist(artist: &str) -> &str {
     let trimmed = artist.trim();
     match trimmed.len().checked_sub(" - Topic".len()) {
-        Some(cut) if trimmed.is_char_boundary(cut) && trimmed[cut..].eq_ignore_ascii_case(" - topic") => trimmed[..cut].trim_end(),
+        Some(cut)
+            if trimmed.is_char_boundary(cut) && trimmed[cut..].eq_ignore_ascii_case(" - topic") =>
+        {
+            trimmed[..cut].trim_end()
+        }
         _ => trimmed,
     }
 }
@@ -214,52 +224,106 @@ mod tests {
     #[test]
     fn a_youtube_video_is_a_video() {
         // As measured: a channel as the artist, no album, a 16:9 frame, no tracks.
-        let video = Signals { artist: "Bir Kanal", art: ArtShape::Wide, ..browser("Evde ekmek nasıl yapılır") };
+        let video = Signals {
+            artist: "Bir Kanal",
+            art: ArtShape::Wide,
+            ..browser("Evde ekmek nasıl yapılır")
+        };
         assert!(!is_music(&video));
     }
 
     #[test]
     fn youtube_music_is_music_in_every_browser() {
         // Chrome and Edge pass the album on.
-        let chrome = Signals { artist: "Sanatçı", album: true, tracks: true, art: ArtShape::Square, duration_ms: 156_000, ..browser("Şarkı") };
+        let chrome = Signals {
+            artist: "Sanatçı",
+            album: true,
+            tracks: true,
+            art: ArtShape::Square,
+            duration_ms: 156_000,
+            ..browser("Şarkı")
+        };
         assert!(is_music(&chrome));
         // Firefox does not, which leaves the square cover and the queue.
-        let firefox = Signals { album: false, ..chrome };
+        let firefox = Signals {
+            album: false,
+            ..chrome
+        };
         assert!(is_music(&firefox));
     }
 
     #[test]
     fn a_music_video_on_youtube_is_music() {
-        let marked = Signals { artist: "Tarkan", art: ArtShape::Wide, ..browser("Tarkan - Kuzu Kuzu (Official Video)") };
+        let marked = Signals {
+            artist: "Tarkan",
+            art: ArtShape::Wide,
+            ..browser("Tarkan - Kuzu Kuzu (Official Video)")
+        };
         assert!(is_music(&marked));
-        let named = Signals { artist: "Sezen Aksu", art: ArtShape::Wide, ..browser("Sezen Aksu - Gidiyorum") };
+        let named = Signals {
+            artist: "Sezen Aksu",
+            art: ArtShape::Wide,
+            ..browser("Sezen Aksu - Gidiyorum")
+        };
         assert!(is_music(&named));
-        let topic = Signals { artist: "Sezen Aksu - Topic", art: ArtShape::Wide, ..browser("Gidiyorum") };
+        let topic = Signals {
+            artist: "Sezen Aksu - Topic",
+            art: ArtShape::Wide,
+            ..browser("Gidiyorum")
+        };
         assert!(is_music(&topic));
-        let klip = Signals { art: ArtShape::Wide, ..browser("Yeni Şarkı | Resmi Klip") };
+        let klip = Signals {
+            art: ArtShape::Wide,
+            ..browser("Yeni Şarkı | Resmi Klip")
+        };
         assert!(is_music(&klip));
     }
 
     #[test]
     fn a_live_stream_is_a_video_unless_it_is_radio() {
-        let stream = Signals { artist: "Yayıncı", live: true, duration_ms: 0, art: ArtShape::Square, ..browser("Bugün oyun oynuyoruz") };
+        let stream = Signals {
+            artist: "Yayıncı",
+            live: true,
+            duration_ms: 0,
+            art: ArtShape::Square,
+            ..browser("Bugün oyun oynuyoruz")
+        };
         assert!(!is_music(&stream));
-        let radio = Signals { live: true, duration_ms: 0, art: ArtShape::Wide, ..browser("lofi hip hop radio - beats to sleep/chill to") };
+        let radio = Signals {
+            live: true,
+            duration_ms: 0,
+            art: ArtShape::Wide,
+            ..browser("lofi hip hop radio - beats to sleep/chill to")
+        };
         assert!(is_music(&radio));
     }
 
     #[test]
     fn a_long_episode_with_a_next_button_is_a_video() {
-        let episode = Signals { tracks: true, art: ArtShape::Wide, duration_ms: 45 * MINUTE, ..browser("Bölüm 3") };
+        let episode = Signals {
+            tracks: true,
+            art: ArtShape::Wide,
+            duration_ms: 45 * MINUTE,
+            ..browser("Bölüm 3")
+        };
         assert!(!is_music(&episode));
         // A square logo for a picture does not make a film music.
-        let film = Signals { art: ArtShape::Square, duration_ms: 110 * MINUTE, ..browser("Film") };
+        let film = Signals {
+            art: ArtShape::Square,
+            duration_ms: 110 * MINUTE,
+            ..browser("Film")
+        };
         assert!(!is_music(&film));
     }
 
     #[test]
     fn a_playlist_of_videos_stays_video() {
-        let recipe = Signals { tracks: true, art: ArtShape::Wide, duration_ms: 9 * MINUTE, ..browser("Tarif 4: Ev ekmeği") };
+        let recipe = Signals {
+            tracks: true,
+            art: ArtShape::Wide,
+            duration_ms: 9 * MINUTE,
+            ..browser("Tarif 4: Ev ekmeği")
+        };
         assert!(!is_music(&recipe));
     }
 
@@ -272,15 +336,26 @@ mod tests {
             ..browser("Uzun parça")
         };
         assert!(is_music(&player));
-        let shuffling = Signals { shuffle_or_repeat: true, ..browser("Parça") };
+        let shuffling = Signals {
+            shuffle_or_repeat: true,
+            ..browser("Parça")
+        };
         assert!(is_music(&shuffling));
     }
 
     #[test]
     fn an_app_that_says_video_is_believed() {
-        let film = Signals { reported: Reported::Video, album: true, ..browser("Film") };
+        let film = Signals {
+            reported: Reported::Video,
+            album: true,
+            ..browser("Film")
+        };
         assert!(!is_music(&film));
-        let tv = Signals { channels: true, album: true, ..browser("Kanal 1") };
+        let tv = Signals {
+            channels: true,
+            album: true,
+            ..browser("Kanal 1")
+        };
         assert!(!is_music(&tv));
     }
 

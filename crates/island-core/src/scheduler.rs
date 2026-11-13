@@ -2,11 +2,11 @@ use crate::activity::{Activity, Bubble, Icon, Kind, Millis, TimerView};
 use crate::drop::DropView;
 use crate::layout::{ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout};
 use crate::media::{MediaSnapshot, PAUSED_LINGER_MS, TRACK_NOTICE_MS};
+use crate::qr::QrMatrix;
+use crate::quick_controls::QuickControls;
 use crate::schedule::{EVENT_LEAD_MS, Upcoming};
 use crate::shelf::{Shelf, ShelfView};
 use crate::timer::Timer;
-use crate::qr::QrMatrix;
-use crate::quick_controls::QuickControls;
 use crate::transfer::{DONE_MS, Direct, Stage, Transfer, WAIT_MS};
 
 /// How long the clock stays up after a peek with nothing else to show.
@@ -31,7 +31,10 @@ const HOME_EVENTS: usize = 2;
 const DROP_VIEW_MS: Millis = 6_000;
 
 fn is_layout_task(kind: Kind) -> bool {
-    matches!(kind, Kind::Transfer | Kind::Focus | Kind::TimerRunning | Kind::ClockTimer)
+    matches!(
+        kind,
+        Kind::Transfer | Kind::Focus | Kind::TimerRunning | Kind::ClockTimer
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,8 +103,16 @@ pub enum FocusView {
     Off,
     /// On, but nothing says for how long.
     Open,
-    Running { ends_at: Millis, total: Millis, on_break: bool },
-    Paused { remaining: Millis, total: Millis, on_break: bool },
+    Running {
+        ends_at: Millis,
+        total: Millis,
+        on_break: bool,
+    },
+    Paused {
+        remaining: Millis,
+        total: Millis,
+        on_break: bool,
+    },
 }
 
 /// The choice of format for pictures dropped to be converted.
@@ -203,19 +214,30 @@ pub struct Island {
 fn level_bubble(level: &Activity) -> Activity {
     let percent = level.level.unwrap_or(0);
     Activity {
-        badge: Some(Bubble::Count { value: percent.to_string(), icon: level.icon, ring: Some(percent) }),
+        badge: Some(Bubble::Count {
+            value: percent.to_string(),
+            icon: level.icon,
+            ring: Some(percent),
+        }),
         ..level.clone()
     }
 }
 
 /// Whether a countdown is at its very end, on either side of it.
 fn ending_now(timer: &Timer, now: Millis) -> bool {
-    timer.ends_at().is_some_and(|ends_at| ends_at.abs_diff(now) <= END_GRACE_MS)
+    timer
+        .ends_at()
+        .is_some_and(|ends_at| ends_at.abs_diff(now) <= END_GRACE_MS)
 }
 
 impl Island {
     pub fn new() -> Self {
-        Self { modes_offered: true, presets: TIMER_PRESETS, announces_tracks: true, ..Self::default() }
+        Self {
+            modes_offered: true,
+            presets: TIMER_PRESETS,
+            announces_tracks: true,
+            ..Self::default()
+        }
     }
 
     pub fn set_track_notices(&mut self, on: bool) {
@@ -224,7 +246,11 @@ impl Island {
 
     /// Whether a view is open, which a small confirmation would only disturb.
     pub fn is_open(&self) -> bool {
-        self.expanded || self.home || self.panel.is_some() || self.dragging.is_some() || self.quick_controls.is_some()
+        self.expanded
+            || self.home
+            || self.panel.is_some()
+            || self.dragging.is_some()
+            || self.quick_controls.is_some()
     }
 
     /// Opens Quick Controls in the same island state machine as the other views.
@@ -233,24 +259,48 @@ impl Island {
         self.quick_controls = Some(QuickControls::new(now, inactivity));
     }
 
-    pub fn quick_controls(&self) -> Option<&QuickControls> { self.quick_controls.as_ref() }
-    pub fn quick_controls_mut(&mut self) -> Option<&mut QuickControls> { self.quick_controls.as_mut() }
-    pub fn set_quick_volume(&mut self, volume: Option<(u8, bool)>) { self.quick_volume = volume; }
-    pub fn set_quick_brightness(&mut self, brightness: Option<u8>) { self.quick_brightness = brightness; }
-    pub fn quick_brightness(&self) -> Option<u8> { self.quick_brightness }
-    pub fn quick_volume(&self) -> Option<(u8, bool)> { self.quick_volume }
-    pub fn set_quick_radios(&mut self, wifi: crate::quick_controls::RadioState, bluetooth: crate::quick_controls::RadioState) {
+    pub fn quick_controls(&self) -> Option<&QuickControls> {
+        self.quick_controls.as_ref()
+    }
+    pub fn quick_controls_mut(&mut self) -> Option<&mut QuickControls> {
+        self.quick_controls.as_mut()
+    }
+    pub fn set_quick_volume(&mut self, volume: Option<(u8, bool)>) {
+        self.quick_volume = volume;
+    }
+    pub fn set_quick_brightness(&mut self, brightness: Option<u8>) {
+        self.quick_brightness = brightness;
+    }
+    pub fn quick_brightness(&self) -> Option<u8> {
+        self.quick_brightness
+    }
+    pub fn quick_volume(&self) -> Option<(u8, bool)> {
+        self.quick_volume
+    }
+    pub fn set_quick_radios(
+        &mut self,
+        wifi: crate::quick_controls::RadioState,
+        bluetooth: crate::quick_controls::RadioState,
+    ) {
         self.quick_wifi = wifi;
         self.quick_bluetooth = bluetooth;
     }
 
     /// The existing calendar schedule, shared with the home view.
     pub fn quick_calendar(&self) -> QuickCalendarView {
-        QuickCalendarView { state: self.calendar, coming: self.coming_events() }
+        QuickCalendarView {
+            state: self.calendar,
+            coming: self.coming_events(),
+        }
     }
 
     fn coming_events(&self) -> Vec<Upcoming> {
-        self.schedule.iter().filter(|event| !self.is_hidden(event)).take(HOME_EVENTS).cloned().collect()
+        self.schedule
+            .iter()
+            .filter(|event| !self.is_hidden(event))
+            .take(HOME_EVENTS)
+            .cloned()
+            .collect()
     }
 
     pub fn set_task_layout(&mut self, layout: TaskLayout) {
@@ -326,7 +376,13 @@ impl Island {
 
     /// Offers formats for pictures that were dropped to be converted.
     pub fn open_convert(&mut self, header: String, now: Millis) {
-        self.open_panel(Panel::Convert(ConvertView { header, busy: false }), now);
+        self.open_panel(
+            Panel::Convert(ConvertView {
+                header,
+                busy: false,
+            }),
+            now,
+        );
     }
 
     pub fn set_converting(&mut self, busy: bool) {
@@ -378,7 +434,10 @@ impl Island {
     /// works on it once the phone is there.
     pub fn transfer_direct_ready(&mut self, join: QrMatrix, network: String, download: QrMatrix) {
         if let Some(transfer) = &mut self.transfer {
-            transfer.direct = Some(Direct::Ready { code: std::sync::Arc::new(join), network: network.clone() });
+            transfer.direct = Some(Direct::Ready {
+                code: std::sync::Arc::new(join),
+                network: network.clone(),
+            });
             transfer.code = std::sync::Arc::new(download);
             transfer.network = network;
         }
@@ -388,7 +447,9 @@ impl Island {
         if let Some(transfer) = &mut self.transfer
             && let Some(Direct::Ready { network, .. }) = &transfer.direct
         {
-            transfer.direct = Some(Direct::Joined { network: network.clone() });
+            transfer.direct = Some(Direct::Joined {
+                network: network.clone(),
+            });
         }
     }
 
@@ -424,7 +485,9 @@ impl Island {
     /// a phone that is already on it.
     pub fn transfer_hotspot(&mut self, download: QrMatrix, network: String) {
         if let Some(transfer) = &mut self.transfer {
-            transfer.direct = Some(Direct::Hotspot { network: network.clone() });
+            transfer.direct = Some(Direct::Hotspot {
+                network: network.clone(),
+            });
             transfer.code = std::sync::Arc::new(download);
             transfer.network = network;
             transfer.warning = None;
@@ -432,7 +495,9 @@ impl Island {
     }
 
     pub fn transfer_is_direct(&self) -> bool {
-        self.transfer.as_ref().is_some_and(|transfer| transfer.direct.is_some())
+        self.transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.direct.is_some())
     }
 
     /// The phone stopped before it had everything. The code waits again.
@@ -440,7 +505,9 @@ impl Island {
         if let Some(transfer) = &mut self.transfer
             && matches!(transfer.stage, Stage::Sending { .. })
         {
-            transfer.stage = Stage::Waiting { until: now + WAIT_MS };
+            transfer.stage = Stage::Waiting {
+                until: now + WAIT_MS,
+            };
         }
     }
 
@@ -468,7 +535,10 @@ impl Island {
     fn held_open(&self) -> bool {
         self.expanded
             && self.focused == Some(Kind::Transfer)
-            && self.transfer.as_ref().is_some_and(|transfer| !matches!(transfer.stage, Stage::Done { .. }))
+            && self
+                .transfer
+                .as_ref()
+                .is_some_and(|transfer| !matches!(transfer.stage, Stage::Done { .. }))
     }
 
     pub fn set_presets(&mut self, presets: [u64; TIMER_PRESETS.len()]) {
@@ -521,17 +591,28 @@ impl Island {
         }
         let paused_deadline = previous.and_then(|a| a.dormant_at);
         let mut activity = snapshot.into_activity(now);
-        activity.dormant_at = activity.dormant_at.and(paused_deadline.or(activity.dormant_at));
+        activity.dormant_at = activity
+            .dormant_at
+            .and(paused_deadline.or(activity.dormant_at));
         self.upsert(activity);
     }
 
     /// Announces a new track for a moment. Players often report the text first
     /// and the image a little later, which then joins the notice already up.
     fn announce_track(&mut self, snapshot: &MediaSnapshot, now: Millis) {
-        let before = self.activities.iter().find(|a| a.kind == Kind::Media).and_then(|a| a.media.as_ref());
+        let before = self
+            .activities
+            .iter()
+            .find(|a| a.kind == Kind::Media)
+            .and_then(|a| a.media.as_ref());
         let new_track = before.is_some_and(|before| !before.is_same_track(snapshot));
-        let up = self.activities.iter().find(|a| a.kind == Kind::NowPlaying && a.title == snapshot.title);
-        let expires_at = up.and_then(|notice| notice.expires_at).unwrap_or(now + TRACK_NOTICE_MS);
+        let up = self
+            .activities
+            .iter()
+            .find(|a| a.kind == Kind::NowPlaying && a.title == snapshot.title);
+        let expires_at = up
+            .and_then(|notice| notice.expires_at)
+            .unwrap_or(now + TRACK_NOTICE_MS);
         // Only songs: the next video in a browser is no news.
         let news = (new_track || up.is_some()) && snapshot.playing && snapshot.is_music;
         if news && self.announces_tracks && !self.is_open() {
@@ -573,8 +654,16 @@ impl Island {
         self.focus_open = view == FocusView::Open;
         (self.focus, self.focus_break) = match view {
             FocusView::Off | FocusView::Open => (None, false),
-            FocusView::Running { ends_at, total, on_break } => (Some(Timer::ending_at(ends_at, total)), on_break),
-            FocusView::Paused { remaining, total, on_break } => (Some(Timer::paused(remaining, total)), on_break),
+            FocusView::Running {
+                ends_at,
+                total,
+                on_break,
+            } => (Some(Timer::ending_at(ends_at, total)), on_break),
+            FocusView::Paused {
+                remaining,
+                total,
+                on_break,
+            } => (Some(Timer::paused(remaining, total)), on_break),
         };
     }
 
@@ -584,14 +673,22 @@ impl Island {
 
     /// What the Clock app is counting down, with the name it has there.
     pub fn set_clock_timer(&mut self, timer: Option<(Timer, String)>, now: Millis) {
-        let running = self.clock_timer.as_ref().is_some_and(|(shown, _)| shown.ends_at().is_some());
-        let at_its_end = self.clock_timer.as_ref().is_some_and(|(shown, _)| ending_now(shown, now));
+        let running = self
+            .clock_timer
+            .as_ref()
+            .is_some_and(|(shown, _)| shown.ends_at().is_some());
+        let at_its_end = self
+            .clock_timer
+            .as_ref()
+            .is_some_and(|(shown, _)| ending_now(shown, now));
         if timer.is_none() && at_its_end {
             return;
         }
         // A paused timer can sit in the Clock for days, which is no reason to
         // keep the pill open. It shows briefly if it was paused just now.
-        let paused = timer.as_ref().is_some_and(|(timer, _)| timer.ends_at().is_none());
+        let paused = timer
+            .as_ref()
+            .is_some_and(|(timer, _)| timer.ends_at().is_none());
         self.clock_timer_dormant_at = match (paused, running) {
             (false, _) => None,
             (true, true) => Some(now + PAUSED_LINGER_MS),
@@ -606,13 +703,17 @@ impl Island {
         events.sort_by_key(|event| event.start);
         // An event that moved counts as new, and the user should hear about it.
         self.hidden_events.retain(|(start, title)| {
-            events.iter().any(|event| event.wall_start == *start && event.title == *title)
+            events
+                .iter()
+                .any(|event| event.wall_start == *start && event.title == *title)
         });
         self.schedule = events;
     }
 
     fn is_hidden(&self, event: &Upcoming) -> bool {
-        self.hidden_events.iter().any(|(start, title)| *start == event.wall_start && *title == event.title)
+        self.hidden_events
+            .iter()
+            .any(|(start, title)| *start == event.wall_start && *title == event.title)
     }
 
     /// The next event that may show by itself.
@@ -696,7 +797,9 @@ impl Island {
         self.expire(now);
         match self.top(now).map(|a| a.kind) {
             Some(kind) if kind.is_transient() => self.remove(kind),
-            _ if self.home || self.panel.is_some() || self.quick_controls.is_some() => self.close_expanded(),
+            _ if self.home || self.panel.is_some() || self.quick_controls.is_some() => {
+                self.close_expanded()
+            }
             Some(_) if self.expanded => self.close_expanded(),
             Some(_) => {
                 self.expanded = true;
@@ -737,7 +840,9 @@ impl Island {
             // This one waits to be answered, which the keyboard can do too.
             Some(Kind::TimerFinished) => self.remove(Kind::TimerFinished),
             Some(kind) if kind.is_transient() => {}
-            _ if self.home || self.panel.is_some() || self.quick_controls.is_some() => self.close_expanded(),
+            _ if self.home || self.panel.is_some() || self.quick_controls.is_some() => {
+                self.close_expanded()
+            }
             Some(_) => {
                 self.expanded = !self.expanded;
                 self.collapse_at = self.expanded.then_some(now + KEYBOARD_EXPAND_MS);
@@ -770,7 +875,12 @@ impl Island {
     pub fn frame(&mut self, now: Millis) -> Frame {
         self.update_derived(now);
         self.expire(now);
-        if self.quick_controls.as_ref().and_then(QuickControls::deadline).is_some_and(|deadline| deadline <= now) {
+        if self
+            .quick_controls
+            .as_ref()
+            .and_then(QuickControls::deadline)
+            .is_some_and(|deadline| deadline <= now)
+        {
             self.close_expanded();
         }
         if self.collapse_at.is_some_and(|at| at <= now) {
@@ -796,7 +906,9 @@ impl Island {
             || self.quick_controls.is_some()
             || (self.expanded && lasting.first().is_some_and(|a| a.kind == Kind::Transfer));
         let (top, level) = match top {
-            Some(level) if level.level.is_some() && task_open => (lasting.first().cloned(), Some(level)),
+            Some(level) if level.level.is_some() && task_open => {
+                (lasting.first().cloned(), Some(level))
+            }
             top => (top, None),
         };
         let interrupted = top.as_ref().is_some_and(|a| a.kind.is_transient());
@@ -819,35 +931,49 @@ impl Island {
         let expanded = presentation == Presentation::Expanded;
         let panel = match (&self.dragging, &self.panel) {
             (Some(view), _) if expanded => Some(PanelView::Drop(view.clone())),
-            (None, _) if expanded && !interrupted && self.quick_controls.is_some() => self.quick_controls.as_ref().map(|controls| PanelView::QuickControls(QuickControlsView {
-                page: controls.page,
-                focused: controls.focused,
-                calendar: self.quick_calendar(),
-                presets: self.presets,
-                mode: self.start_mode,
-                modes_offered: self.modes_offered,
-                volume: self.quick_volume,
-                brightness: self.quick_brightness,
-                wifi: self.quick_wifi,
-                bluetooth: self.quick_bluetooth,
-            })),
-            (None, Some(Panel::Shelf)) if expanded && !interrupted => Some(PanelView::Shelf(self.shelf.view())),
-            (None, Some(Panel::Convert(view))) if expanded && !interrupted => Some(PanelView::Convert(view.clone())),
+            (None, _) if expanded && !interrupted && self.quick_controls.is_some() => {
+                self.quick_controls.as_ref().map(|controls| {
+                    PanelView::QuickControls(QuickControlsView {
+                        page: controls.page,
+                        focused: controls.focused,
+                        calendar: self.quick_calendar(),
+                        presets: self.presets,
+                        mode: self.start_mode,
+                        modes_offered: self.modes_offered,
+                        volume: self.quick_volume,
+                        brightness: self.quick_brightness,
+                        wifi: self.quick_wifi,
+                        bluetooth: self.quick_bluetooth,
+                    })
+                })
+            }
+            (None, Some(Panel::Shelf)) if expanded && !interrupted => {
+                Some(PanelView::Shelf(self.shelf.view()))
+            }
+            (None, Some(Panel::Convert(view))) if expanded && !interrupted => {
+                Some(PanelView::Convert(view.clone()))
+            }
             _ => None,
         };
         let in_home = self.home && panel.is_none() && !interrupted && expanded;
-        let transfer_shown = top.as_ref().is_some_and(|a| a.kind == Kind::Transfer) && panel.is_none() && !in_home;
+        let transfer_shown =
+            top.as_ref().is_some_and(|a| a.kind == Kind::Transfer) && panel.is_none() && !in_home;
         let transfer_open = expanded && transfer_shown;
 
         // Side by side, the task rides in the music pill, and music rides
         // under the open code. Anything else that lasts keeps to the bubble.
         let shared = self.task_layout == TaskLayout::Shared;
-        let music_in_pill = top.as_ref().is_some_and(|a| a.media.is_some() && !a.kind.is_transient());
+        let music_in_pill = top
+            .as_ref()
+            .is_some_and(|a| a.media.is_some() && !a.kind.is_transient());
         let companion = match presentation {
-            Presentation::Compact if shared && music_in_pill => lasting.iter().find(|a| is_layout_task(a.kind)).cloned(),
-            Presentation::Expanded if shared && transfer_open => {
-                lasting.iter().find(|a| a.kind != Kind::Transfer && a.media.is_some()).cloned()
+            Presentation::Compact if shared && music_in_pill => {
+                lasting.iter().find(|a| is_layout_task(a.kind)).cloned()
             }
+            Presentation::Expanded if shared && transfer_open => lasting
+                .iter()
+                .find(|a| a.kind != Kind::Transfer && a.media.is_some())
+                .cloned(),
             _ => None,
         };
 
@@ -856,7 +982,10 @@ impl Island {
         // lasts in view beside it, unless music already shows under it.
         let shows_bubble = level.is_some()
             || (transfer_open && companion.is_none())
-            || matches!(presentation, Presentation::Compact | Presentation::Level | Presentation::Alert);
+            || matches!(
+                presentation,
+                Presentation::Compact | Presentation::Level | Presentation::Alert
+            );
         let secondary = match &level {
             _ if !shows_bubble => None,
             Some(level) => Some(level_bubble(level)),
@@ -874,11 +1003,16 @@ impl Island {
             .as_ref()
             .is_some_and(|a| matches!(a.kind, Kind::TimerRunning | Kind::ClockTimer | Kind::Focus));
         // The time left only shows while the task has the pill or is open.
-        let transfer_counts = transfer_shown && matches!(presentation, Presentation::Compact | Presentation::Expanded);
+        let transfer_counts = transfer_shown
+            && matches!(presentation, Presentation::Compact | Presentation::Expanded);
         let wake_at = self.next_deadline(now, timer_in_pill, transfer_counts);
         Frame {
             presentation,
-            activity: if presentation == Presentation::Hidden || in_home || panel.is_some() { None } else { top },
+            activity: if presentation == Presentation::Hidden || in_home || panel.is_some() {
+                None
+            } else {
+                top
+            },
             secondary,
             companion,
             home: in_home.then(|| HomeView {
@@ -897,7 +1031,11 @@ impl Island {
     /// Files on the shelf show as a bubble when nothing else wants it.
     fn shelf_bubble(&self) -> Option<Activity> {
         (!self.shelf.is_empty()).then(|| Activity {
-            badge: Some(Bubble::Count { value: self.shelf.len().to_string(), icon: Some(Icon::Shelf), ring: None }),
+            badge: Some(Bubble::Count {
+                value: self.shelf.len().to_string(),
+                icon: Some(Icon::Shelf),
+                ring: None,
+            }),
             ..Activity::new(Kind::Shelf)
         })
     }
@@ -939,8 +1077,16 @@ impl Island {
             None => self.remove(Kind::TimerRunning),
         }
 
-        if self.clock_timer.as_ref().is_some_and(|(timer, _)| timer.is_finished(now)) {
-            let name = self.clock_timer.take().map(|(_, name)| name).unwrap_or_default();
+        if self
+            .clock_timer
+            .as_ref()
+            .is_some_and(|(timer, _)| timer.is_finished(now))
+        {
+            let name = self
+                .clock_timer
+                .take()
+                .map(|(_, name)| name)
+                .unwrap_or_default();
             // No sound here, as the Clock app rings by itself.
             self.upsert(Activity {
                 title: "Süre doldu".into(),
@@ -953,7 +1099,10 @@ impl Island {
         match &self.clock_timer {
             Some((timer, name)) => {
                 let activity = timer.clock_activity(now, name);
-                self.upsert(Activity { dormant_at: self.clock_timer_dormant_at, ..activity });
+                self.upsert(Activity {
+                    dormant_at: self.clock_timer_dormant_at,
+                    ..activity
+                });
             }
             None => self.remove(Kind::ClockTimer),
         }
@@ -990,21 +1139,35 @@ impl Island {
                 title: "Odak".into(),
                 detail: "Açık".into(),
                 icon: Some(Icon::Focus),
-                timer: Some(TimerView { running: true, has_controls: true, left: None }),
+                timer: Some(TimerView {
+                    running: true,
+                    has_controls: true,
+                    left: None,
+                }),
                 ..Activity::new(Kind::Focus)
             }),
             None => self.remove(Kind::Focus),
         }
 
-        let due = self.schedule.iter().take_while(|event| event.start <= now).count();
+        let due = self
+            .schedule
+            .iter()
+            .take_while(|event| event.start <= now)
+            .count();
         let started: Vec<Upcoming> = self.schedule.drain(..due).collect();
-        let mut starting = started.iter().filter(|event| event.just_started(now) && !self.is_hidden(event));
+        let mut starting = started
+            .iter()
+            .filter(|event| event.just_started(now) && !self.is_hidden(event));
         if let Some(first) = starting.next() {
             let alert = first.starting_alert(now, starting.count());
             self.chime = true;
             self.upsert(alert);
         }
-        match self.next_event().filter(|event| event.is_near(now)).map(|event| event.activity(now)) {
+        match self
+            .next_event()
+            .filter(|event| event.is_near(now))
+            .map(|event| event.activity(now))
+        {
             Some(activity) => self.upsert(activity),
             None => self.remove(Kind::Upcoming),
         }
@@ -1021,7 +1184,9 @@ impl Island {
             .collect();
         ranked.sort_by_key(|a| a.order(now, self.focused));
         if self.task_layout != TaskLayout::Front && self.focused != Some(Kind::Transfer) {
-            let lasting: Vec<usize> = (0..ranked.len()).filter(|&i| !ranked[i].kind.is_transient()).collect();
+            let lasting: Vec<usize> = (0..ranked.len())
+                .filter(|&i| !ranked[i].kind.is_transient())
+                .collect();
             if let [first, second, ..] = lasting[..]
                 && ranked[first].kind == Kind::Transfer
             {
@@ -1031,7 +1196,9 @@ impl Island {
         }
         if self.task_layout == TaskLayout::Front
             && let Some(music) = ranked.iter().position(|a| a.kind == Kind::Media)
-            && let Some(task) = ranked.iter().position(|a| is_layout_task(a.kind) && a.kind != Kind::Transfer)
+            && let Some(task) = ranked
+                .iter()
+                .position(|a| is_layout_task(a.kind) && a.kind != Kind::Transfer)
             && task > music
         {
             let activity = ranked.remove(task);
@@ -1043,7 +1210,10 @@ impl Island {
     /// Everything that lasts, most important first.
     fn long_lived(&self, now: Millis) -> Vec<&Activity> {
         let peeking = self.peek_until.is_some() || self.hovered;
-        self.ranked(now, peeking).into_iter().filter(|a| !a.kind.is_transient()).collect()
+        self.ranked(now, peeking)
+            .into_iter()
+            .filter(|a| !a.kind.is_transient())
+            .collect()
     }
 
     /// The highest priority activity that shows without being asked for.
@@ -1054,28 +1224,57 @@ impl Island {
     /// What is on display, which includes dormant activities during a peek.
     fn top(&self, now: Millis) -> Option<&Activity> {
         let peeking = self.peek_until.is_some() || self.hovered;
-        self.awake(now).or_else(|| if peeking { self.ranked(now, true).first().copied() } else { None })
+        self.awake(now).or_else(|| {
+            if peeking {
+                self.ranked(now, true).first().copied()
+            } else {
+                None
+            }
+        })
     }
 
     fn expire(&mut self, now: Millis) {
-        self.activities.retain(|a| a.expires_at.is_none_or(|at| at > now));
+        self.activities
+            .retain(|a| a.expires_at.is_none_or(|at| at > now));
     }
 
-    fn next_deadline(&self, now: Millis, timer_in_pill: bool, transfer_counts: bool) -> Option<Millis> {
+    fn next_deadline(
+        &self,
+        now: Millis,
+        timer_in_pill: bool,
+        transfer_counts: bool,
+    ) -> Option<Millis> {
         let expiries = self.activities.iter().filter_map(|a| a.expires_at);
-        let dormancies = self.activities.iter().filter_map(|a| a.dormant_at).filter(|&at| at > now);
-        let urgencies = self.activities.iter().filter_map(|a| a.urgent_at).filter(|&at| at > now);
+        let dormancies = self
+            .activities
+            .iter()
+            .filter_map(|a| a.dormant_at)
+            .filter(|&at| at > now);
+        let urgencies = self
+            .activities
+            .iter()
+            .filter_map(|a| a.urgent_at)
+            .filter(|&at| at > now);
 
         let clock_timer = self.clock_timer.as_ref().map(|(timer, _)| timer);
-        let ticking = self.timer.iter().chain(&self.focus).chain(clock_timer).flat_map(|timer| {
-            let shows_seconds = timer_in_pill || self.expanded;
-            [timer.ends_at(), timer.next_tick(now, shows_seconds)]
-        });
+        let ticking = self
+            .timer
+            .iter()
+            .chain(&self.focus)
+            .chain(clock_timer)
+            .flat_map(|timer| {
+                let shows_seconds = timer_in_pill || self.expanded;
+                [timer.ends_at(), timer.next_tick(now, shows_seconds)]
+            });
 
         let next_event = self.next_event();
         let event_moments = next_event.iter().flat_map(|event| {
             let until = event.start.saturating_sub(now);
-            let minute = if until.is_multiple_of(60_000) { 60_000 } else { until % 60_000 };
+            let minute = if until.is_multiple_of(60_000) {
+                60_000
+            } else {
+                until % 60_000
+            };
             let lead_starts = event.start.saturating_sub(EVENT_LEAD_MS);
             [
                 Some(event.start),
@@ -1090,9 +1289,17 @@ impl Island {
             .chain(ticking.flatten())
             .chain(event_moments.flatten())
             .chain(self.schedule.first().map(|event| event.start))
-            .chain(self.transfer.as_ref().and_then(|transfer| transfer.next_moment(now, transfer_counts)))
+            .chain(
+                self.transfer
+                    .as_ref()
+                    .and_then(|transfer| transfer.next_moment(now, transfer_counts)),
+            )
             .chain(self.collapse_at)
-            .chain(self.quick_controls.as_ref().and_then(QuickControls::deadline))
+            .chain(
+                self.quick_controls
+                    .as_ref()
+                    .and_then(QuickControls::deadline),
+            )
             .chain(self.peek_until)
             .min()
     }
@@ -1108,11 +1315,17 @@ mod tests {
         island.upsert_media(snapshot(true), 0);
         island.open_quick_controls(100, Some(1_000));
         assert_eq!(island.frame(100).wake_at, Some(1_100));
-        island.quick_controls_mut().unwrap().set_interacting(true, 500);
+        island
+            .quick_controls_mut()
+            .unwrap()
+            .set_interacting(true, 500);
         assert!(island.quick_controls().unwrap().deadline().is_none());
         island.frame(2_000);
         assert!(island.quick_controls().is_some());
-        island.quick_controls_mut().unwrap().set_interacting(false, 2_000);
+        island
+            .quick_controls_mut()
+            .unwrap()
+            .set_interacting(false, 2_000);
         island.frame(3_000);
         assert!(island.quick_controls().is_none());
         assert_eq!(shown(&island.frame(3_000)), Some(Kind::Media));
@@ -1149,7 +1362,10 @@ mod tests {
     use crate::drop::DropView;
 
     fn activity(kind: Kind) -> Activity {
-        Activity { title: format!("{kind:?}"), ..Activity::new(kind) }
+        Activity {
+            title: format!("{kind:?}"),
+            ..Activity::new(kind)
+        }
     }
 
     fn event(start: Millis) -> Upcoming {
@@ -1216,7 +1432,10 @@ mod tests {
         let mut island = Island::new();
         island.upsert_media(snapshot(true), 0);
         island.start_timer(25 * MINUTE, 0);
-        island.upsert(Activity { level: Some(40), ..expiring(Kind::Alert, 1_000) });
+        island.upsert(Activity {
+            level: Some(40),
+            ..expiring(Kind::Alert, 1_000)
+        });
         let frame = island.frame(0);
         assert_eq!(frame.presentation, Presentation::Level);
         assert_eq!(second(&frame), Some(Kind::TimerRunning));
@@ -1252,7 +1471,10 @@ mod tests {
         assert_eq!(frame.presentation, Presentation::Alert);
         assert!(frame.chime);
         assert!(!island.frame(MINUTE + 1).chime);
-        assert_eq!(shown(&island.frame(MINUTE + TIMER_DONE_MS)), Some(Kind::Media));
+        assert_eq!(
+            shown(&island.frame(MINUTE + TIMER_DONE_MS)),
+            Some(Kind::Media)
+        );
     }
 
     #[test]
@@ -1261,7 +1483,12 @@ mod tests {
         island.upsert_media(snapshot(true), 0);
         island.start_timer(25 * MINUTE, 0);
         let notice = crate::notifications::Notice {
-            id: 1, app_id: "chat".into(), app: "Chat".into(), title: "Hello".into(), body: "Message".into(), logo: None,
+            id: 1,
+            app_id: "chat".into(),
+            app: "Chat".into(),
+            title: "Hello".into(),
+            body: "Message".into(),
+            logo: None,
         };
         island.upsert(notice.activity(0));
         let alert = island.frame(0);
@@ -1279,13 +1506,19 @@ mod tests {
         island.frame(MINUTE);
         let frame = island.frame(MINUTE + 2 * MINUTE);
         assert_eq!(shown(&frame), Some(Kind::TimerFinished));
-        assert_eq!(island.frame(MINUTE + TIMER_DONE_MS).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(MINUTE + TIMER_DONE_MS).presentation,
+            Presentation::Hidden
+        );
 
         let mut island = Island::new();
         island.start_timer(MINUTE, 0);
         island.frame(MINUTE);
         island.click(MINUTE + 1_000);
-        assert_eq!(island.frame(MINUTE + 1_000).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(MINUTE + 1_000).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -1294,7 +1527,10 @@ mod tests {
         island.start_timer(MINUTE, 0);
         island.frame(MINUTE);
         island.summon(MINUTE + 1_000);
-        assert_eq!(island.frame(MINUTE + 1_000).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(MINUTE + 1_000).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -1302,7 +1538,10 @@ mod tests {
         let mut island = Island::new();
         island.set_focus(focus(MINUTE, MINUTE), 0);
         island.frame(MINUTE);
-        assert_eq!(shown(&island.frame(MINUTE + 2 * MINUTE)), Some(Kind::TimerFinished));
+        assert_eq!(
+            shown(&island.frame(MINUTE + 2 * MINUTE)),
+            Some(Kind::TimerFinished)
+        );
     }
 
     #[test]
@@ -1346,7 +1585,11 @@ mod tests {
     }
 
     fn focus(ends_at: Millis, total: Millis) -> FocusView {
-        FocusView::Running { ends_at, total, on_break: false }
+        FocusView::Running {
+            ends_at,
+            total,
+            on_break: false,
+        }
     }
 
     #[test]
@@ -1378,7 +1621,14 @@ mod tests {
     #[test]
     fn a_paused_focus_session_stays_and_stops_waking() {
         let mut island = Island::new();
-        island.set_focus(FocusView::Paused { remaining: 2 * MINUTE, total: 5 * MINUTE, on_break: false }, 0);
+        island.set_focus(
+            FocusView::Paused {
+                remaining: 2 * MINUTE,
+                total: 5 * MINUTE,
+                on_break: false,
+            },
+            0,
+        );
         let frame = island.frame(0);
         assert_eq!(shown(&frame), Some(Kind::Focus));
         assert_eq!(frame.wake_at, None);
@@ -1390,7 +1640,14 @@ mod tests {
     #[test]
     fn a_break_reads_as_a_break() {
         let mut island = Island::new();
-        island.set_focus(FocusView::Running { ends_at: MINUTE, total: MINUTE, on_break: true }, 0);
+        island.set_focus(
+            FocusView::Running {
+                ends_at: MINUTE,
+                total: MINUTE,
+                on_break: true,
+            },
+            0,
+        );
         assert_eq!(island.frame(0).activity.unwrap().leading, "Mola");
     }
 
@@ -1491,7 +1748,10 @@ mod tests {
         let frame = island.frame(MINUTE);
         assert!(!frame.chime);
         assert_eq!(frame.activity.unwrap().detail, "Saat uygulaması · 5 dk");
-        assert_eq!(island.frame(MINUTE + CLOCK_TIMER_DONE_MS).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(MINUTE + CLOCK_TIMER_DONE_MS).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -1516,7 +1776,10 @@ mod tests {
         let frame = island.frame(1_000);
         assert_eq!(shown(&frame), Some(Kind::ClockTimer));
         assert_eq!(frame.wake_at, Some(1_000 + PAUSED_LINGER_MS));
-        assert_eq!(island.frame(1_000 + PAUSED_LINGER_MS).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(1_000 + PAUSED_LINGER_MS).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -1550,7 +1813,14 @@ mod tests {
     #[test]
     fn the_home_view_lists_the_next_two_events() {
         let mut island = Island::new();
-        island.set_schedule(vec![event(120 * MINUTE), event(180 * MINUTE), event(240 * MINUTE)], 0);
+        island.set_schedule(
+            vec![
+                event(120 * MINUTE),
+                event(180 * MINUTE),
+                event(240 * MINUTE),
+            ],
+            0,
+        );
         island.open_home();
         let home = island.frame(0).home.unwrap();
         assert_eq!(home.coming.len(), 2);
@@ -1562,7 +1832,10 @@ mod tests {
         let mut island = Island::new();
         island.set_calendar_state(CalendarState::NotSet);
         island.open_home();
-        assert_eq!(island.frame(0).home.unwrap().calendar, CalendarState::NotSet);
+        assert_eq!(
+            island.frame(0).home.unwrap().calendar,
+            CalendarState::NotSet
+        );
     }
 
     #[test]
@@ -1711,7 +1984,10 @@ mod tests {
     #[test]
     fn events_starting_together_are_announced_together() {
         let mut island = Island::new();
-        let other = Upcoming { title: "Toplantı".into(), ..event(3 * MINUTE) };
+        let other = Upcoming {
+            title: "Toplantı".into(),
+            ..event(3 * MINUTE)
+        };
         island.set_schedule(vec![event(3 * MINUTE), other], 0);
         let frame = island.frame(3 * MINUTE);
         assert!(frame.chime);
@@ -1723,7 +1999,10 @@ mod tests {
     #[test]
     fn a_hidden_event_does_not_count_among_those_starting() {
         let mut island = Island::new();
-        let other = Upcoming { title: "Toplantı".into(), ..event(3 * MINUTE) };
+        let other = Upcoming {
+            title: "Toplantı".into(),
+            ..event(3 * MINUTE)
+        };
         island.set_schedule(vec![event(3 * MINUTE), other], 0);
         island.hide_event();
         let alert = island.frame(3 * MINUTE).activity.unwrap();
@@ -1829,7 +2108,10 @@ mod tests {
     }
 
     fn expiring(kind: Kind, at: Millis) -> Activity {
-        Activity { expires_at: Some(at), ..activity(kind) }
+        Activity {
+            expires_at: Some(at),
+            ..activity(kind)
+        }
     }
 
     fn shown(frame: &Frame) -> Option<Kind> {
@@ -1864,7 +2146,10 @@ mod tests {
     fn upsert_replaces_the_same_kind() {
         let mut island = Island::new();
         island.upsert(activity(Kind::Media));
-        island.upsert(Activity { title: "new".into(), ..activity(Kind::Media) });
+        island.upsert(Activity {
+            title: "new".into(),
+            ..activity(Kind::Media)
+        });
         assert_eq!(island.frame(0).activity.unwrap().title, "new");
         island.remove(Kind::Media);
         assert_eq!(island.frame(0).presentation, Presentation::Hidden);
@@ -1901,7 +2186,10 @@ mod tests {
     fn a_level_uses_the_slim_pill_then_returns() {
         let mut island = Island::new();
         island.upsert(activity(Kind::Media));
-        island.upsert(Activity { level: Some(40), ..expiring(Kind::Alert, 1_000) });
+        island.upsert(Activity {
+            level: Some(40),
+            ..expiring(Kind::Alert, 1_000)
+        });
         assert_eq!(island.frame(0).presentation, Presentation::Level);
         assert_eq!(island.frame(1_000).presentation, Presentation::Compact);
     }
@@ -1909,9 +2197,15 @@ mod tests {
     #[test]
     fn each_step_of_a_level_extends_how_long_it_stays() {
         let mut island = Island::new();
-        island.upsert(Activity { level: Some(40), ..expiring(Kind::Alert, 1_000) });
+        island.upsert(Activity {
+            level: Some(40),
+            ..expiring(Kind::Alert, 1_000)
+        });
         island.frame(0);
-        island.upsert(Activity { level: Some(42), ..expiring(Kind::Alert, 1_500) });
+        island.upsert(Activity {
+            level: Some(42),
+            ..expiring(Kind::Alert, 1_500)
+        });
         let frame = island.frame(900);
         assert_eq!(frame.activity.unwrap().level, Some(42));
         assert_eq!(frame.wake_at, Some(1_500));
@@ -1954,7 +2248,10 @@ mod tests {
         assert_eq!(frame.wake_at, None);
 
         island.set_hovered(false, 2_000);
-        assert_eq!(island.frame(2_000 + COLLAPSE_DELAY_MS).presentation, Presentation::Compact);
+        assert_eq!(
+            island.frame(2_000 + COLLAPSE_DELAY_MS).presentation,
+            Presentation::Compact
+        );
     }
 
     #[test]
@@ -1965,7 +2262,10 @@ mod tests {
         assert_eq!(frame.presentation, Presentation::Compact);
         assert_eq!(frame.activity, None);
         assert_eq!(frame.wake_at, Some(1_000 + PEEK_MS));
-        assert_eq!(island.frame(1_000 + PEEK_MS).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(1_000 + PEEK_MS).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -1979,7 +2279,10 @@ mod tests {
 
         island.set_hovered(false, 10_000);
         assert_eq!(island.frame(10_000).presentation, Presentation::Compact);
-        assert_eq!(island.frame(10_000 + PEEK_MS).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(10_000 + PEEK_MS).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -1988,7 +2291,10 @@ mod tests {
         island.upsert(activity(Kind::Media));
         island.summon(0);
         assert_eq!(island.frame(0).presentation, Presentation::Expanded);
-        assert_eq!(island.frame(KEYBOARD_EXPAND_MS).presentation, Presentation::Compact);
+        assert_eq!(
+            island.frame(KEYBOARD_EXPAND_MS).presentation,
+            Presentation::Compact
+        );
     }
 
     #[test]
@@ -2020,7 +2326,10 @@ mod tests {
     }
 
     fn dormant(at: Millis) -> Activity {
-        Activity { dormant_at: Some(at), ..activity(Kind::Media) }
+        Activity {
+            dormant_at: Some(at),
+            ..activity(Kind::Media)
+        }
     }
 
     #[test]
@@ -2043,7 +2352,10 @@ mod tests {
         island.peek(2_000);
         let frame = island.frame(2_000);
         assert_eq!(shown(&frame), Some(Kind::Media));
-        assert_eq!(island.frame(2_000 + PEEK_MS).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(2_000 + PEEK_MS).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -2057,7 +2369,10 @@ mod tests {
 
         island.set_hovered(false, 3_000);
         assert_eq!(island.frame(3_000).presentation, Presentation::Expanded);
-        assert_eq!(island.frame(3_000 + PEEK_MS).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(3_000 + PEEK_MS).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -2068,7 +2383,10 @@ mod tests {
         assert_eq!(island.frame(2_000).presentation, Presentation::Compact);
         island.summon(2_500);
         assert_eq!(island.frame(2_500).presentation, Presentation::Expanded);
-        assert_eq!(island.frame(2_500 + KEYBOARD_EXPAND_MS).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(2_500 + KEYBOARD_EXPAND_MS).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -2100,16 +2418,35 @@ mod tests {
     }
 
     fn track(title: &str, playing: bool) -> MediaSnapshot {
-        MediaSnapshot { title: title.into(), ..snapshot(playing) }
+        MediaSnapshot {
+            title: title.into(),
+            ..snapshot(playing)
+        }
     }
 
     #[test]
     fn pressing_shuffle_does_not_move_the_time_on_screen() {
         let mut island = Island::new();
-        let long = MediaSnapshot { duration_ms: 200_000, sampled_at: 0, ..track("Bir", true) };
-        island.upsert_media(MediaSnapshot { position_ms: 30_000, ..long.clone() }, 0);
+        let long = MediaSnapshot {
+            duration_ms: 200_000,
+            sampled_at: 0,
+            ..track("Bir", true)
+        };
+        island.upsert_media(
+            MediaSnapshot {
+                position_ms: 30_000,
+                ..long.clone()
+            },
+            0,
+        );
         for at in [1_000, 2_000, 3_000] {
-            let stale = MediaSnapshot { position_ms: 1_000, sampled_at: at, new_position: false, shuffle: Some(true), ..long.clone() };
+            let stale = MediaSnapshot {
+                position_ms: 1_000,
+                sampled_at: at,
+                new_position: false,
+                shuffle: Some(true),
+                ..long.clone()
+            };
             island.upsert_media(stale, at);
             let media = island.frame(at).activity.unwrap().media.unwrap();
             assert_eq!(media.position_at(at), 30_000 + at);
@@ -2166,10 +2503,16 @@ mod tests {
     #[test]
     fn a_new_video_is_not_announced() {
         let mut island = Island::new();
-        let video = |title: &str| MediaSnapshot { is_music: false, ..track(title, true) };
+        let video = |title: &str| MediaSnapshot {
+            is_music: false,
+            ..track(title, true)
+        };
         island.upsert_media(video("Bir"), 0);
         island.upsert_media(video("İki"), 1_000);
-        assert_eq!(island.frame(1_000).activity.map(|a| a.kind), Some(Kind::Media));
+        assert_eq!(
+            island.frame(1_000).activity.map(|a| a.kind),
+            Some(Kind::Media)
+        );
     }
 
     #[test]
@@ -2187,7 +2530,13 @@ mod tests {
         island.upsert_media(track("Bir", true), 0);
         island.upsert_media(track("İki", true), 1_000);
         let artwork = Some(std::sync::Arc::from(&b"png"[..]));
-        island.upsert_media(MediaSnapshot { artwork, ..track("İki", true) }, 1_500);
+        island.upsert_media(
+            MediaSnapshot {
+                artwork,
+                ..track("İki", true)
+            },
+            1_500,
+        );
         let frame = island.frame(1_500);
         let notice = frame.activity.unwrap();
         assert!(notice.preview.is_some());
@@ -2198,7 +2547,10 @@ mod tests {
     fn a_brief_notice_uses_the_compact_pill_and_leaves() {
         let mut island = Island::new();
         island.upsert_media(track("Bir", true), 0);
-        island.upsert(Activity { brief: true, ..expiring(Kind::Alert, 1_000) });
+        island.upsert(Activity {
+            brief: true,
+            ..expiring(Kind::Alert, 1_000)
+        });
         let frame = island.frame(0);
         assert_eq!(frame.presentation, Presentation::Compact);
         assert_eq!(shown(&frame), Some(Kind::Alert));
@@ -2264,7 +2616,12 @@ mod tests {
     }
 
     fn drop_view() -> DropView {
-        DropView { header: "a.jpg · 1 KB".into(), hovered: None, phone_refusal: None, convert_refusal: None }
+        DropView {
+            header: "a.jpg · 1 KB".into(),
+            hovered: None,
+            phone_refusal: None,
+            convert_refusal: None,
+        }
     }
 
     fn transfer() -> Transfer {
@@ -2272,7 +2629,9 @@ mod tests {
             name: "a.jpg".into(),
             summary: "a.jpg · 1 KB".into(),
             total: 1000,
-            code: std::sync::Arc::new(crate::qr::QrMatrix::encode("http://10.0.0.2:5000/x").expect("fits")),
+            code: std::sync::Arc::new(
+                crate::qr::QrMatrix::encode("http://10.0.0.2:5000/x").expect("fits"),
+            ),
             network: "Wi-Fi · Ev".into(),
             warning: None,
             stage: Stage::Waiting { until: WAIT_MS },
@@ -2286,7 +2645,13 @@ mod tests {
     fn a_phone_that_found_the_page_stops_the_suggestion() {
         let mut island = Island::new();
         island.start_transfer(transfer());
-        let nudged = |island: &mut Island| island.frame(crate::transfer::NUDGE_MS).activity.and_then(|a| a.transfer).is_some_and(|t| t.nudge);
+        let nudged = |island: &mut Island| {
+            island
+                .frame(crate::transfer::NUDGE_MS)
+                .activity
+                .and_then(|a| a.transfer)
+                .is_some_and(|t| t.nudge)
+        };
         assert!(nudged(&mut island));
         island.transfer_visited();
         assert!(!nudged(&mut island));
@@ -2299,8 +2664,17 @@ mod tests {
         island.transfer_warning(Some("Güvenlik duvarı bu ağda engelliyor".into()));
         let download = crate::qr::QrMatrix::encode("http://192.168.137.1:5000/t").expect("fits");
         island.transfer_hotspot(download, "Mobil etkin nokta".into());
-        let view = island.frame(0).activity.and_then(|a| a.transfer).expect("view");
-        assert_eq!(view.direct, Some(Direct::Hotspot { network: "Mobil etkin nokta".into() }));
+        let view = island
+            .frame(0)
+            .activity
+            .and_then(|a| a.transfer)
+            .expect("view");
+        assert_eq!(
+            view.direct,
+            Some(Direct::Hotspot {
+                network: "Mobil etkin nokta".into()
+            })
+        );
         assert_eq!(view.network, "Mobil etkin nokta");
         assert_eq!(view.warning, None);
         assert!(island.transfer_is_direct());
@@ -2311,10 +2685,21 @@ mod tests {
         let mut island = Island::new();
         island.start_transfer(transfer());
         island.transfer_offline(true);
-        let view = island.frame(0).activity.and_then(|a| a.transfer).expect("view");
+        let view = island
+            .frame(0)
+            .activity
+            .and_then(|a| a.transfer)
+            .expect("view");
         assert!(view.offline);
         island.transfer_offline(false);
-        assert!(!island.frame(0).activity.and_then(|a| a.transfer).expect("view").offline);
+        assert!(
+            !island
+                .frame(0)
+                .activity
+                .and_then(|a| a.transfer)
+                .expect("view")
+                .offline
+        );
     }
 
     #[test]
@@ -2323,13 +2708,32 @@ mod tests {
         let mut island = Island::new();
         island.start_transfer(transfer());
         island.transfer_direct_preparing();
-        let view = |island: &mut Island| island.frame(0).activity.and_then(|a| a.transfer).and_then(|t| t.direct);
+        let view = |island: &mut Island| {
+            island
+                .frame(0)
+                .activity
+                .and_then(|a| a.transfer)
+                .and_then(|t| t.direct)
+        };
         assert_eq!(view(&mut island), Some(Direct::Preparing));
-        island.transfer_direct_ready(code("WIFI:T:WPA;S:Islora-K4FX;P:x;;"), "Islora-K4FX".into(), code("http://192.168.137.1:5000/t"));
+        island.transfer_direct_ready(
+            code("WIFI:T:WPA;S:Islora-K4FX;P:x;;"),
+            "Islora-K4FX".into(),
+            code("http://192.168.137.1:5000/t"),
+        );
         assert!(matches!(view(&mut island), Some(Direct::Ready { .. })));
         island.transfer_direct_joined();
-        assert_eq!(view(&mut island), Some(Direct::Joined { network: "Islora-K4FX".into() }));
-        let shown = island.frame(0).activity.and_then(|a| a.transfer).expect("view");
+        assert_eq!(
+            view(&mut island),
+            Some(Direct::Joined {
+                network: "Islora-K4FX".into()
+            })
+        );
+        let shown = island
+            .frame(0)
+            .activity
+            .and_then(|a| a.transfer)
+            .expect("view");
         assert_eq!(shown.network, "Islora-K4FX");
     }
 
@@ -2349,7 +2753,10 @@ mod tests {
     #[test]
     fn dragging_files_opens_the_drop_panel_over_anything() {
         let mut island = Island::new();
-        island.upsert(Activity { level: Some(40), ..activity(Kind::Alert) });
+        island.upsert(Activity {
+            level: Some(40),
+            ..activity(Kind::Alert)
+        });
         island.drag_over(drop_view());
         let frame = island.frame(0);
         assert_eq!(frame.presentation, Presentation::Expanded);
@@ -2370,7 +2777,10 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(frame.wake_at, Some(DROP_VIEW_MS));
-        assert_eq!(island.frame(DROP_VIEW_MS).presentation, Presentation::Hidden);
+        assert_eq!(
+            island.frame(DROP_VIEW_MS).presentation,
+            Presentation::Hidden
+        );
     }
 
     #[test]
@@ -2444,11 +2854,17 @@ mod tests {
         island.start_transfer(transfer());
         island.transfer_progress(500);
         let sending = island.frame(1_000);
-        assert_eq!(sending.activity.as_ref().map(|a| a.trailing.as_str()), Some("%50"));
+        assert_eq!(
+            sending.activity.as_ref().map(|a| a.trailing.as_str()),
+            Some("%50")
+        );
         assert_eq!(sending.wake_at, None);
         island.transfer_done(2_000);
         let done = island.frame(2_000);
-        assert_eq!(done.activity.map(|a| a.leading), Some("Gönderildi".to_owned()));
+        assert_eq!(
+            done.activity.map(|a| a.leading),
+            Some("Gönderildi".to_owned())
+        );
         assert_eq!(done.wake_at, Some(2_000 + DONE_MS));
         let after = island.frame(2_000 + DONE_MS);
         assert_eq!(after.presentation, Presentation::Compact);
@@ -2470,7 +2886,12 @@ mod tests {
         island.start_transfer(transfer());
         island.transfer_progress(100);
         island.transfer_broke_off(60_000);
-        assert_eq!(island.transfer_stage(), Some(Stage::Waiting { until: 60_000 + WAIT_MS }));
+        assert_eq!(
+            island.transfer_stage(),
+            Some(Stage::Waiting {
+                until: 60_000 + WAIT_MS
+            })
+        );
     }
 
     #[test]
@@ -2529,7 +2950,10 @@ mod tests {
         let frame = island.frame(1_500);
         assert_eq!(frame.presentation, Presentation::Compact);
         assert_eq!(shown(&frame), Some(Kind::Transfer));
-        assert_eq!(frame.activity.as_ref().map(|a| a.trailing.as_str()), Some("4:59"));
+        assert_eq!(
+            frame.activity.as_ref().map(|a| a.trailing.as_str()),
+            Some("4:59")
+        );
         assert_eq!(frame.wake_at, Some(2_000));
     }
 
@@ -2547,7 +2971,10 @@ mod tests {
         let mut island = music_and_a_closed_code(TaskLayout::Shared);
         let frame = island.frame(0);
         assert_eq!(shown(&frame), Some(Kind::Media));
-        assert_eq!(frame.companion.as_ref().map(|a| a.kind), Some(Kind::Transfer));
+        assert_eq!(
+            frame.companion.as_ref().map(|a| a.kind),
+            Some(Kind::Transfer)
+        );
         assert_eq!(second(&frame), None);
         // The bubble stays free for something else that lasts.
         island.start_timer(25 * MINUTE, 0);
@@ -2571,7 +2998,10 @@ mod tests {
         island.set_task_layout(TaskLayout::Shared);
         let shared = island.frame(0);
         assert_eq!(shown(&shared), Some(Kind::Media));
-        assert_eq!(shared.companion.as_ref().map(|a| a.kind), Some(Kind::Transfer));
+        assert_eq!(
+            shared.companion.as_ref().map(|a| a.kind),
+            Some(Kind::Transfer)
+        );
         assert_eq!(second(&shared), None);
 
         island.set_task_layout(TaskLayout::Front);
@@ -2636,11 +3066,23 @@ mod tests {
         let mut island = Island::new();
         island.upsert_media(snapshot(true), 0);
         island.start_transfer(transfer());
-        island.upsert(Activity { level: Some(40), icon: Some(Icon::Volume), expires_at: Some(1_500), ..activity(Kind::Alert) });
+        island.upsert(Activity {
+            level: Some(40),
+            icon: Some(Icon::Volume),
+            expires_at: Some(1_500),
+            ..activity(Kind::Alert)
+        });
         let frame = island.frame(0);
         assert_eq!(frame.presentation, Presentation::Expanded);
         assert_eq!(shown(&frame), Some(Kind::Transfer));
-        assert_eq!(bubble(&frame), Some(Bubble::Count { value: "40".into(), icon: Some(Icon::Volume), ring: Some(40) }));
+        assert_eq!(
+            bubble(&frame),
+            Some(Bubble::Count {
+                value: "40".into(),
+                icon: Some(Icon::Volume),
+                ring: Some(40)
+            })
+        );
         // A click on it opens nothing.
         island.click_secondary(0);
         assert_eq!(shown(&island.frame(0)), Some(Kind::Transfer));
@@ -2652,17 +3094,32 @@ mod tests {
     fn volume_goes_in_the_bubble_while_the_shelf_is_open() {
         let mut island = Island::new();
         island.drop_on_shelf(&shelf_files(), 0);
-        island.upsert(Activity { level: Some(70), icon: Some(Icon::Brightness), ..activity(Kind::Alert) });
+        island.upsert(Activity {
+            level: Some(70),
+            icon: Some(Icon::Brightness),
+            ..activity(Kind::Alert)
+        });
         let frame = island.frame(0);
         assert_eq!(frame.presentation, Presentation::Expanded);
         assert!(matches!(frame.panel, Some(PanelView::Shelf(_))));
-        assert_eq!(bubble(&frame), Some(Bubble::Count { value: "70".into(), icon: Some(Icon::Brightness), ring: Some(70) }));
+        assert_eq!(
+            bubble(&frame),
+            Some(Bubble::Count {
+                value: "70".into(),
+                icon: Some(Icon::Brightness),
+                ring: Some(70)
+            })
+        );
     }
 
     #[test]
     fn volume_still_covers_a_closed_pill() {
         let mut island = music_and_a_closed_code(TaskLayout::Bubble);
-        island.upsert(Activity { level: Some(40), icon: Some(Icon::Volume), ..activity(Kind::Alert) });
+        island.upsert(Activity {
+            level: Some(40),
+            icon: Some(Icon::Volume),
+            ..activity(Kind::Alert)
+        });
         assert_eq!(island.frame(0).presentation, Presentation::Level);
     }
 
@@ -2670,7 +3127,14 @@ mod tests {
     fn a_finished_send_ticks_in_the_bubble_then_leaves() {
         let mut island = music_and_a_closed_code(TaskLayout::Bubble);
         island.transfer_progress(500);
-        assert_eq!(bubble(&island.frame(0)), Some(Bubble::Count { value: "50".into(), icon: None, ring: Some(50) }));
+        assert_eq!(
+            bubble(&island.frame(0)),
+            Some(Bubble::Count {
+                value: "50".into(),
+                icon: None,
+                ring: Some(50)
+            })
+        );
         island.transfer_done(1_000);
         let done = island.frame(1_000);
         assert_eq!(shown(&done), Some(Kind::Media));

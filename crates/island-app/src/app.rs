@@ -4,49 +4,51 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
+use crate::settings_view::{
+    Action, NOTICES, Page, SettingsState, is_calendar_address, stepped_preset, toggled_notice,
+};
 use island_core::clock_timer::{self, ClockTimer};
 use island_core::config;
 use island_core::convert::Target;
 use island_core::direct;
-use island_core::drop::{DropView, ShelfHit, Zone, on_transfer_direct, on_transfer_stop, shelf_hit};
-use island_core::files::{DroppedFile, file_name, summary};
-use island_core::focus::{
-    CHANGE_WAIT_MS, FocusReport, FocusStatus, FocusTracker, START_WAIT_MS,
+use island_core::drop::{
+    DropView, ShelfHit, Zone, on_transfer_direct, on_transfer_stop, shelf_hit,
 };
+use island_core::files::{DroppedFile, file_name, summary};
+use island_core::focus::{CHANGE_WAIT_MS, FocusReport, FocusStatus, FocusTracker, START_WAIT_MS};
 use island_core::ics::{self, Event};
+use island_core::layout::{
+    QUICK_SHORTCUT, TIMER_PRESETS, WaveStyle, on_event_hide, on_home_shortcut, on_progress_bar,
+    on_settings_shortcut, preset_at, progress_fraction,
+};
 use island_core::media::{RepeatMode, Sides};
 use island_core::notifications::{Notice, NotificationQueue};
 use island_core::qr::QrMatrix;
+use island_core::quick_controls::{
+    self, Control as QuickControl, Page as QuickPage, Target as QuickTarget,
+};
 use island_core::transfer::{NUDGE_MS, Stage, Transfer, WAIT_MS};
-use island_core::layout::{
-    TIMER_PRESETS, on_event_hide, on_home_shortcut, on_progress_bar, on_settings_shortcut,
-    preset_at, progress_fraction, WaveStyle, QUICK_SHORTCUT,
-};
-use island_core::quick_controls::{self, Control as QuickControl, Page as QuickPage, Target as QuickTarget};
-use crate::settings_view::{
-    Action, NOTICES, Page, SettingsState, is_calendar_address, stepped_preset, toggled_notice,
-};
 use island_core::{
-    Activity, CalendarState, FocusView, Frame, FullscreenWatch, Icon, Indicator, Island, IslandStyle,
-    Kind, Material, MediaButton, MediaSnapshot, Millis, PanelView, Pill, Presentation, ProgressStyle,
-    StartMode, Suppression, SystemTracker, TaskLayout, TimerButton, Upcoming,
+    Activity, CalendarState, FocusView, Frame, FullscreenWatch, Icon, Indicator, Island,
+    IslandStyle, Kind, Material, MediaButton, MediaSnapshot, Millis, PanelView, Pill, Presentation,
+    ProgressStyle, StartMode, Suppression, SystemTracker, TaskLayout, TimerButton, Upcoming,
 };
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::HDC;
+use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
-    VK_TAB, VK_UP,
+    VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB,
+    VK_UP,
 };
-use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::UI::Shell::ABN_FULLSCREENAPP;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Result, w};
@@ -62,21 +64,25 @@ use crate::sources::audio::{AudioWatch, DEVICE_MICROPHONE, MSG_AUDIO_DEVICE};
 use crate::sources::bluetooth::BluetoothWatch;
 use crate::sources::calendar::{CalendarSource, CalendarUpdate, MSG_CALENDAR, unix_now};
 use crate::sources::clock_timers::{ClockTimerWatch, MSG_CLOCK_TIMERS};
-use crate::sources::drives::Drives;
-use crate::sources::focus::{self, FocusWatch, MSG_FOCUS, MSG_FOCUS_REFUSED};
 use crate::sources::direct_link::{self, DirectEvent, DirectLink, MSG_DIRECT};
+use crate::sources::drives::Drives;
 use crate::sources::firewall::{self, MSG_FIREWALL};
+use crate::sources::focus::{self, FocusWatch, MSG_FOCUS, MSG_FOCUS_REFUSED};
 use crate::sources::fullscreen::{self, MSG_APPBAR, MSG_FRONT_CHANGED, MSG_WINDOW_DRAG, Presence};
 use crate::sources::imaging::{Imaging, MSG_IMAGING, Made};
+use crate::sources::keys::KeyEvent;
 use crate::sources::media::{MSG_MEDIA, MediaSource};
-use crate::sources::notifications::{MSG_NOTIFICATIONS, NotificationSource, Update as NotificationUpdate};
+use crate::sources::notifications::{
+    MSG_NOTIFICATIONS, NotificationSource, Update as NotificationUpdate,
+};
 use crate::sources::power::{self, PowerEvent, PowerWatch};
 use crate::sources::privacy::{CameraWatch, MSG_CAMERA};
-use crate::sources::quick_radios::{MSG_QUICK_RADIOS, QuickRadios};
 use crate::sources::quick_brightness::{MSG_QUICK_BRIGHTNESS, QuickBrightness};
+use crate::sources::quick_radios::{MSG_QUICK_RADIOS, QuickRadios};
 use crate::sources::sharing::{self, MSG_SHARING, SharedFile, Sharing, SharingEvent};
-use crate::sources::keys::KeyEvent;
-use crate::sources::{IndicatorSink, MSG_INDICATOR, MSG_NETWORK_CHANGED, clipboard, keys, network, screenshots};
+use crate::sources::{
+    IndicatorSink, MSG_INDICATOR, MSG_NETWORK_CHANGED, clipboard, keys, network, screenshots,
+};
 
 // Lives in `Win32::UI::Controls`, a large feature to enable for one constant.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -182,7 +188,10 @@ enum OpenView {
 impl OpenView {
     /// Views of an activity have a way to Quick Controls in their corner.
     fn has_home_shortcut(self) -> bool {
-        matches!(self, OpenView::Media | OpenView::Timer | OpenView::Focus | OpenView::Event | OpenView::Other)
+        matches!(
+            self,
+            OpenView::Media | OpenView::Timer | OpenView::Focus | OpenView::Event | OpenView::Other
+        )
     }
 }
 
@@ -314,7 +323,10 @@ pub fn run() -> Result<()> {
     let first_run = settings::is_first_run();
 
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)? };
-    TASKBAR_CREATED.store(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }, Ordering::Relaxed);
+    TASKBAR_CREATED.store(
+        unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+        Ordering::Relaxed,
+    );
 
     let _dispatcher = render::create_dispatcher_queue()?;
     let island_window = window::create_island(Some(island_proc))?;
@@ -327,7 +339,12 @@ pub fn run() -> Result<()> {
         optional("drop", drop_target::register(target, &DROP_HANDLERS));
     }
     let selected_monitor = stored_monitor();
-    let placement = window::place(island_window, edge_window, stored_style(), selected_monitor.as_deref())?;
+    let placement = window::place(
+        island_window,
+        edge_window,
+        stored_style(),
+        selected_monitor.as_deref(),
+    )?;
     let sound_wave = stored_sound_wave();
     let reduced_motion = stored_reduced_motion();
     let quick_timeout = stored_quick_timeout();
@@ -335,7 +352,14 @@ pub fn run() -> Result<()> {
     let wave_still = argument_after("--wave").as_deref() == Some("still");
     let wave_style = stored_wave_style();
     let wave_motion = selected_wave_motion(sound_wave, false, wave_still || reduced_motion);
-    let mut renderer = Renderer::new(island_window, placement.scale, placement.width, placement.style, wave_motion, wave_style)?;
+    let mut renderer = Renderer::new(
+        island_window,
+        placement.scale,
+        placement.width,
+        placement.style,
+        wave_motion,
+        wave_style,
+    )?;
     let ui_density = stored_ui_density();
     renderer.set_density(ui_density);
 
@@ -345,8 +369,8 @@ pub fn run() -> Result<()> {
     let tray = Tray::add(island_window)?;
     let presence = Presence::start(island_window)?;
     let notices_off = stored_notices_off();
-    let windows_notifications = stored_windows_notifications()
-        && !std::env::args().any(|a| a == "--no-real-notices");
+    let windows_notifications =
+        stored_windows_notifications() && !std::env::args().any(|a| a == "--no-real-notices");
     // The shell uses one host for both levels, while brightness event delivery
     // is not guaranteed for every display. Leave Windows' fallback available.
     let native_osd = optional("Windows level flyout", native_osd::NativeOsd::start(false));
@@ -424,14 +448,19 @@ pub fn run() -> Result<()> {
         focus_hides_notifications: stored_focus_hides_notifications(),
         muted_apps: stored_muted_apps(),
         notification_queue: NotificationQueue::default(),
-        notification_source: windows_notifications.then(|| NotificationSource::start(island_window)),
+        notification_source: windows_notifications
+            .then(|| NotificationSource::start(island_window)),
         active_notification: None,
         shown_notification: false,
         network_quiet_until: 0,
         clipboard_quiet_until: 0,
         clip_expected_until: 0,
         quiet: std::env::args().any(|a| a == "--no-real-notices"),
-        preset_unit: if std::env::args().any(|a| a == "--short-timers") { 1_000 } else { 60_000 },
+        preset_unit: if std::env::args().any(|a| a == "--short-timers") {
+            1_000
+        } else {
+            60_000
+        },
         tracker,
         indicators,
         audio,
@@ -496,7 +525,11 @@ pub fn run() -> Result<()> {
     // Tests send a file as if it were dropped, to this computer only.
     if let Some(path) = argument_after("--send-file") {
         let size = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
-        app.send_to_phone(vec![DroppedFile { path, size, is_folder: false }]);
+        app.send_to_phone(vec![DroppedFile {
+            path,
+            size,
+            is_folder: false,
+        }]);
         // And over the island's own network, as the button beside Stop does.
         if std::env::args().any(|a| a == "--send-direct") {
             app.start_direct();
@@ -540,7 +573,12 @@ pub fn run() -> Result<()> {
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             // Tab, Enter and Esc in the address box act on its window, as in a dialog.
             if settings_window::is_dialog_key(&message) {
-                let _ = PostMessageW(GetParent(message.hwnd).ok(), WM_KEYDOWN, message.wParam, message.lParam);
+                let _ = PostMessageW(
+                    GetParent(message.hwnd).ok(),
+                    WM_KEYDOWN,
+                    message.wParam,
+                    message.lParam,
+                );
                 continue;
             }
             let _ = TranslateMessage(&message);
@@ -562,16 +600,24 @@ impl App {
     /// its next deadline. This is the only path that changes what is shown.
     fn refresh(&mut self) {
         let now = self.now();
-        if self.active_notification.as_ref().is_some_and(|(_, until)| now >= *until) {
+        if self
+            .active_notification
+            .as_ref()
+            .is_some_and(|(_, until)| now >= *until)
+        {
             self.active_notification = None;
             self.show_next_notification(now);
         }
         let frame = self.island.frame(now);
-        if self.island.quick_controls().is_none() && let Some(previous) = self.quick_previous_window.take() {
+        if self.island.quick_controls().is_none()
+            && let Some(previous) = self.quick_previous_window.take()
+        {
             window::controls_blur(self.island_window, previous);
         }
         // The code timed out, or the view with it was closed.
-        if self.island.transfer_stage().is_none() && (self.sharing.is_some() || self.direct.is_some()) {
+        if self.island.transfer_stage().is_none()
+            && (self.sharing.is_some() || self.direct.is_some())
+        {
             self.sharing = None;
             // The own network stays until the view closes, two seconds after
             // the last byte left, so that it does not cut that byte off.
@@ -603,24 +649,42 @@ impl App {
     }
 
     fn arm_media_tick(&mut self, frame: &Frame) {
-        let media = frame.activity.as_ref().and_then(|activity| activity.media.as_ref());
+        let media = frame
+            .activity
+            .as_ref()
+            .and_then(|activity| activity.media.as_ref());
         self.open_view = match &frame.activity {
             _ if frame.home.is_some() => OpenView::Home,
             _ if matches!(frame.panel, Some(PanelView::Drop(_))) => OpenView::Drop,
             _ if matches!(frame.panel, Some(PanelView::Shelf(_))) => OpenView::Shelf,
             _ if matches!(frame.panel, Some(PanelView::Convert(_))) => OpenView::Convert,
-            _ if matches!(frame.panel, Some(PanelView::QuickControls(_))) => OpenView::QuickControls,
+            _ if matches!(frame.panel, Some(PanelView::QuickControls(_))) => {
+                OpenView::QuickControls
+            }
             Some(activity) if activity.kind == Kind::Transfer => OpenView::Transfer,
             Some(activity) if activity.media.is_some() => OpenView::Media,
             Some(activity) if activity.kind == Kind::Focus => OpenView::Focus,
             Some(activity) if activity.kind == Kind::Upcoming => OpenView::Event,
-            Some(activity) if activity.timer.is_some_and(|timer| timer.has_controls) => OpenView::Timer,
+            Some(activity) if activity.timer.is_some_and(|timer| timer.has_controls) => {
+                OpenView::Timer
+            }
             _ => OpenView::Other,
         };
-        self.seekable_ms = media.filter(|media| media.can_seek && media.duration_ms > 0).map(|media| media.duration_ms);
-        self.alert_file = frame.activity.as_ref().and_then(|activity| activity.file.clone());
-        self.shown_notification = frame.activity.as_ref().is_some_and(|activity| activity.kind == Kind::ExternalNotification);
-        self.alert_reveals = frame.activity.as_ref().is_some_and(|activity| activity.reveal);
+        self.seekable_ms = media
+            .filter(|media| media.can_seek && media.duration_ms > 0)
+            .map(|media| media.duration_ms);
+        self.alert_file = frame
+            .activity
+            .as_ref()
+            .and_then(|activity| activity.file.clone());
+        self.shown_notification = frame
+            .activity
+            .as_ref()
+            .is_some_and(|activity| activity.kind == Kind::ExternalNotification);
+        self.alert_reveals = frame
+            .activity
+            .as_ref()
+            .is_some_and(|activity| activity.reveal);
         self.shown_media = media.cloned();
         self.companion = frame.companion.as_ref().map(|activity| activity.kind);
         self.offers_shuffle = media.is_some_and(|media| media.shuffle.is_some());
@@ -645,7 +709,9 @@ impl App {
             window::show(self.island_window);
             self.window_visible = true;
         }
-        let resized = self.renderer.present(frame, &clock_text(), now, self.scrub)?;
+        let resized = self
+            .renderer
+            .present(frame, &clock_text(), now, self.scrub)?;
         let with_bubble = frame.secondary.is_some();
         if resized || presentation != self.shown || with_bubble != self.shown_bubble {
             self.shown_bubble = with_bubble;
@@ -729,7 +795,8 @@ impl App {
             }
             TIMER_FULLSCREEN => {
                 self.cancel_timer(TIMER_FULLSCREEN);
-                self.fullscreen.front_changed(fullscreen::desktop_in_front());
+                self.fullscreen
+                    .front_changed(fullscreen::desktop_in_front());
                 self.apply_fullscreen();
             }
             _ => {}
@@ -744,8 +811,16 @@ impl App {
         }
         let bubble = Pill::BUBBLE.scaled(self.placement.scale);
         let bubble_left = self.renderer.bubble_left(pill);
-        let pill_left = bubble_left - island_core::layout::BUBBLE_GAP * self.placement.scale - pill.width;
-        window::set_group_region(self.island_window, pill, pill_left, bubble, bubble_left, &self.placement);
+        let pill_left =
+            bubble_left - island_core::layout::BUBBLE_GAP * self.placement.scale - pill.width;
+        window::set_group_region(
+            self.island_window,
+            pill,
+            pill_left,
+            bubble,
+            bubble_left,
+            &self.placement,
+        );
     }
 
     fn finish_hiding(&mut self) {
@@ -878,7 +953,10 @@ impl App {
                         self.refresh();
                         return;
                     }
-                    if waiting && !self.island.transfer_is_direct() && on_transfer_direct(pill_x, pill_y) {
+                    if waiting
+                        && !self.island.transfer_is_direct()
+                        && on_transfer_direct(pill_x, pill_y)
+                    {
                         self.start_direct();
                         return;
                     }
@@ -926,16 +1004,28 @@ impl App {
     }
 
     fn open_quick_controls(&mut self, now: Millis) {
-        self.island.open_quick_controls(now, (self.quick_timeout != 0).then_some(self.quick_timeout * 1_000));
+        self.island.open_quick_controls(
+            now,
+            (self.quick_timeout != 0).then_some(self.quick_timeout * 1_000),
+        );
         if self.quick_previous_window.is_none() {
             self.quick_previous_window = window::controls_focus(self.island_window);
         }
-        self.island.set_quick_radios(quick_controls::RadioState::Unknown, quick_controls::RadioState::Unknown);
+        self.island.set_quick_radios(
+            quick_controls::RadioState::Unknown,
+            quick_controls::RadioState::Unknown,
+        );
         self.quick_radios.refresh();
-        let volume = self.audio.as_ref().and_then(|audio| match audio.output_level() {
-            Ok(level) => level,
-            Err(error) => { eprintln!("reading output volume failed: {error}"); None }
-        });
+        let volume = self
+            .audio
+            .as_ref()
+            .and_then(|audio| match audio.output_level() {
+                Ok(level) => level,
+                Err(error) => {
+                    eprintln!("reading output volume failed: {error}");
+                    None
+                }
+            });
         self.island.set_quick_volume(volume);
         self.refresh();
     }
@@ -943,21 +1033,29 @@ impl App {
     fn on_quick_radios(&mut self) {
         if let Some((wifi, bluetooth)) = self.quick_radios.latest() {
             self.island.set_quick_radios(wifi, bluetooth);
-            if self.island.quick_controls().is_some() { self.refresh(); }
+            if self.island.quick_controls().is_some() {
+                self.refresh();
+            }
         }
     }
 
     fn on_quick_brightness(&mut self) {
         if let Some(brightness) = self.quick_brightness.latest() {
             self.island.set_quick_brightness(brightness);
-            if self.island.quick_controls().is_some() { self.refresh(); }
+            if self.island.quick_controls().is_some() {
+                self.refresh();
+            }
         }
     }
 
     fn on_quick_controls_click(&mut self, x: f32, y: f32, now: Millis) {
-        let Some(controls) = self.island.quick_controls() else { return };
+        let Some(controls) = self.island.quick_controls() else {
+            return;
+        };
         let page = controls.page;
-        if let Some(controls) = self.island.quick_controls_mut() { controls.touch(now); }
+        if let Some(controls) = self.island.quick_controls_mut() {
+            controls.touch(now);
+        }
         if quick_controls::SETTINGS_BOUNDS.contains(x, y) {
             self.island.close_views();
             self.refresh();
@@ -965,14 +1063,20 @@ impl App {
             return;
         }
         if page != QuickPage::Main && quick_controls::BACK_BOUNDS.contains(x, y) {
-            if let Some(controls) = self.island.quick_controls_mut() { controls.set_page(QuickPage::Main, now); }
+            if let Some(controls) = self.island.quick_controls_mut() {
+                controls.set_page(QuickPage::Main, now);
+            }
             self.refresh();
             return;
         }
         match page {
             QuickPage::Main => match QuickTarget::at(x, y) {
-                Some(QuickTarget::Control(QuickControl::Wifi)) => shell::open("ms-settings:network-wifi"),
-                Some(QuickTarget::Control(QuickControl::Bluetooth)) => shell::open("ms-settings:bluetooth"),
+                Some(QuickTarget::Control(QuickControl::Wifi)) => {
+                    shell::open("ms-settings:network-wifi")
+                }
+                Some(QuickTarget::Control(QuickControl::Bluetooth)) => {
+                    shell::open("ms-settings:bluetooth")
+                }
                 Some(QuickTarget::Control(control)) => {
                     let page = match control {
                         QuickControl::Volume => QuickPage::Volume,
@@ -985,7 +1089,9 @@ impl App {
                         self.island.set_quick_brightness(None);
                         self.quick_brightness.read();
                     }
-                    if let Some(controls) = self.island.quick_controls_mut() { controls.set_page(page, now); }
+                    if let Some(controls) = self.island.quick_controls_mut() {
+                        controls.set_page(page, now);
+                    }
                 }
                 _ => {}
             },
@@ -995,12 +1101,16 @@ impl App {
                     self.start_preset(index, now);
                     return;
                 }
-                if let Some(mode) = StartMode::at(x, y) && self.island.set_start_mode(mode) {
+                if let Some(mode) = StartMode::at(x, y)
+                    && self.island.set_start_mode(mode)
+                {
                     settings::remember("start_mode", mode.setting());
                 }
             }
             QuickPage::Calendar => {
-                if self.island.quick_calendar().state == CalendarState::NotSet && quick_controls::CALENDAR_SETUP_BOUNDS.contains(x, y) {
+                if self.island.quick_calendar().state == CalendarState::NotSet
+                    && quick_controls::CALENDAR_SETUP_BOUNDS.contains(x, y)
+                {
                     self.island.close_views();
                     self.refresh();
                     self.open_settings();
@@ -1010,22 +1120,37 @@ impl App {
             }
             QuickPage::Volume => {
                 let result = if let Some(percent) = quick_controls::slider_percent(x, y) {
-                    self.audio.as_ref().map(|audio| audio.set_output_level(percent))
+                    self.audio
+                        .as_ref()
+                        .map(|audio| audio.set_output_level(percent))
                 } else if quick_controls::MUTE_BOUNDS.contains(x, y) {
                     self.audio.as_ref().map(AudioWatch::toggle_output_mute)
-                } else { None };
+                } else {
+                    None
+                };
                 match result {
                     Some(Ok(Some(level))) => self.island.set_quick_volume(Some(level)),
-                    Some(Ok(None)) => { self.island.set_quick_volume(None); shell::open("ms-settings:sound"); }
-                    Some(Err(error)) => { eprintln!("output control failed: {error}"); shell::open("ms-settings:sound"); }
-                    None if quick_controls::SLIDER_BOUNDS.contains(x, y) => shell::open("ms-settings:sound"),
+                    Some(Ok(None)) => {
+                        self.island.set_quick_volume(None);
+                        shell::open("ms-settings:sound");
+                    }
+                    Some(Err(error)) => {
+                        eprintln!("output control failed: {error}");
+                        shell::open("ms-settings:sound");
+                    }
+                    None if quick_controls::SLIDER_BOUNDS.contains(x, y) => {
+                        shell::open("ms-settings:sound")
+                    }
                     None => {}
                 }
             }
             QuickPage::Brightness => {
                 if let Some(percent) = quick_controls::slider_percent(x, y) {
-                    if self.island.quick_brightness().is_some() { self.quick_brightness.set(percent); }
-                    else { shell::open("ms-settings:display"); }
+                    if self.island.quick_brightness().is_some() {
+                        self.quick_brightness.set(percent);
+                    } else {
+                        shell::open("ms-settings:display");
+                    }
                 }
             }
         }
@@ -1034,7 +1159,9 @@ impl App {
 
     fn on_quick_controls_key(&mut self, key: VIRTUAL_KEY, shift: bool) {
         let now = self.now();
-        let Some(controls) = self.island.quick_controls() else { return };
+        let Some(controls) = self.island.quick_controls() else {
+            return;
+        };
         let page = controls.page;
         let focused = controls.focused;
         if key == VK_ESCAPE {
@@ -1042,15 +1169,26 @@ impl App {
             self.refresh();
             return;
         }
-        if focused == Some(QuickTarget::Slider) && matches!(key, VK_LEFT | VK_DOWN | VK_RIGHT | VK_UP) {
+        if focused == Some(QuickTarget::Slider)
+            && matches!(key, VK_LEFT | VK_DOWN | VK_RIGHT | VK_UP)
+        {
             let current = match page {
                 QuickPage::Volume => self.island.quick_volume().map(|(level, _)| level),
                 QuickPage::Brightness => self.island.quick_brightness(),
                 _ => None,
             };
             if let Some(current) = current {
-                let next = if matches!(key, VK_RIGHT | VK_UP) { current.saturating_add(5).min(100) } else { current.saturating_sub(5) };
-                let x = (quick_controls::SLIDER_BOUNDS.x + quick_controls::SLIDER_BOUNDS.width * f32::from(next) / 100.0).min(quick_controls::SLIDER_BOUNDS.x + quick_controls::SLIDER_BOUNDS.width - 0.01);
+                let next = if matches!(key, VK_RIGHT | VK_UP) {
+                    current.saturating_add(5).min(100)
+                } else {
+                    current.saturating_sub(5)
+                };
+                let x = (quick_controls::SLIDER_BOUNDS.x
+                    + quick_controls::SLIDER_BOUNDS.width * f32::from(next) / 100.0)
+                    .min(
+                        quick_controls::SLIDER_BOUNDS.x + quick_controls::SLIDER_BOUNDS.width
+                            - 0.01,
+                    );
                 self.on_quick_controls_click(x, quick_controls::SLIDER_BOUNDS.y + 10.0, now);
             }
             return;
@@ -1060,7 +1198,9 @@ impl App {
                 QuickPage::Main => QuickTarget::ALL.to_vec(),
                 QuickPage::Timer => {
                     let mut targets = vec![QuickTarget::Back];
-                    if let Some(PanelView::QuickControls(view)) = self.island.frame(now).panel && view.modes_offered {
+                    if let Some(PanelView::QuickControls(view)) = self.island.frame(now).panel
+                        && view.modes_offered
+                    {
                         targets.extend(StartMode::ALL.into_iter().map(QuickTarget::TimerMode));
                     }
                     targets.extend((0..4).map(QuickTarget::TimerPreset));
@@ -1069,39 +1209,82 @@ impl App {
                 }
                 QuickPage::Calendar => {
                     let mut targets = vec![QuickTarget::Back];
-                    if self.island.quick_calendar().state == CalendarState::NotSet { targets.push(QuickTarget::CalendarSetup); }
+                    if self.island.quick_calendar().state == CalendarState::NotSet {
+                        targets.push(QuickTarget::CalendarSetup);
+                    }
                     targets.push(QuickTarget::Settings);
                     targets
                 }
                 QuickPage::Volume => {
                     let mut targets = vec![QuickTarget::Back, QuickTarget::Slider];
-                    if self.island.quick_volume().is_some() { targets.push(QuickTarget::Mute); }
+                    if self.island.quick_volume().is_some() {
+                        targets.push(QuickTarget::Mute);
+                    }
                     targets.push(QuickTarget::Settings);
                     targets
                 }
-                QuickPage::Brightness => vec![QuickTarget::Back, QuickTarget::Slider, QuickTarget::Settings],
+                QuickPage::Brightness => vec![
+                    QuickTarget::Back,
+                    QuickTarget::Slider,
+                    QuickTarget::Settings,
+                ],
             };
             let forward = !matches!(key, VK_LEFT | VK_UP) && !(key == VK_TAB && shift);
-            if let Some(controls) = self.island.quick_controls_mut() { controls.move_focus_in(&targets, forward, now); }
+            if let Some(controls) = self.island.quick_controls_mut() {
+                controls.move_focus_in(&targets, forward, now);
+            }
             self.refresh();
             return;
         }
-        if !matches!(key, VK_RETURN | VK_SPACE) { return; }
+        if !matches!(key, VK_RETURN | VK_SPACE) {
+            return;
+        }
         let point = match focused {
             Some(QuickTarget::Control(control)) => {
                 let bounds = control.bounds();
-                Some((bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0))
+                Some((
+                    bounds.x + bounds.width / 2.0,
+                    bounds.y + bounds.height / 2.0,
+                ))
             }
-            Some(QuickTarget::Settings) => Some((quick_controls::SETTINGS_BOUNDS.x + 10.0, quick_controls::SETTINGS_BOUNDS.y + 10.0)),
-            Some(QuickTarget::Back) => Some((quick_controls::BACK_BOUNDS.x + 10.0, quick_controls::BACK_BOUNDS.y + 10.0)),
-            Some(QuickTarget::Mute) => Some((quick_controls::MUTE_BOUNDS.x + 10.0, quick_controls::MUTE_BOUNDS.y + 10.0)),
-            Some(QuickTarget::CalendarSetup) => Some((quick_controls::CALENDAR_SETUP_BOUNDS.x + 10.0, quick_controls::CALENDAR_SETUP_BOUNDS.y + 10.0)),
-            Some(QuickTarget::TimerMode(mode)) => { let (left, width) = mode.tab(); Some((left + width / 2.0, island_core::layout::MODE_TAB_Y)) }
-            Some(QuickTarget::TimerPreset(index)) if index < 4 => Some((island_core::layout::preset_center_x(index as usize), island_core::layout::PRESET_Y)),
-            Some(QuickTarget::Slider) if (page == QuickPage::Brightness && self.island.quick_brightness().is_none()) || (page == QuickPage::Volume && self.island.quick_volume().is_none()) => Some((quick_controls::SLIDER_BOUNDS.x + 10.0, quick_controls::SLIDER_BOUNDS.y + 10.0)),
+            Some(QuickTarget::Settings) => Some((
+                quick_controls::SETTINGS_BOUNDS.x + 10.0,
+                quick_controls::SETTINGS_BOUNDS.y + 10.0,
+            )),
+            Some(QuickTarget::Back) => Some((
+                quick_controls::BACK_BOUNDS.x + 10.0,
+                quick_controls::BACK_BOUNDS.y + 10.0,
+            )),
+            Some(QuickTarget::Mute) => Some((
+                quick_controls::MUTE_BOUNDS.x + 10.0,
+                quick_controls::MUTE_BOUNDS.y + 10.0,
+            )),
+            Some(QuickTarget::CalendarSetup) => Some((
+                quick_controls::CALENDAR_SETUP_BOUNDS.x + 10.0,
+                quick_controls::CALENDAR_SETUP_BOUNDS.y + 10.0,
+            )),
+            Some(QuickTarget::TimerMode(mode)) => {
+                let (left, width) = mode.tab();
+                Some((left + width / 2.0, island_core::layout::MODE_TAB_Y))
+            }
+            Some(QuickTarget::TimerPreset(index)) if index < 4 => Some((
+                island_core::layout::preset_center_x(index as usize),
+                island_core::layout::PRESET_Y,
+            )),
+            Some(QuickTarget::Slider)
+                if (page == QuickPage::Brightness && self.island.quick_brightness().is_none())
+                    || (page == QuickPage::Volume && self.island.quick_volume().is_none()) =>
+            {
+                Some((
+                    quick_controls::SLIDER_BOUNDS.x + 10.0,
+                    quick_controls::SLIDER_BOUNDS.y + 10.0,
+                ))
+            }
             _ => None,
         };
-        if let Some((x, y)) = point { self.on_quick_controls_click(x, y, now); }
+        if let Some((x, y)) = point {
+            self.on_quick_controls_click(x, y, now);
+        }
     }
 
     /// Beside play, a button skips a track, or jumps within a video that has
@@ -1132,7 +1315,8 @@ impl App {
             StartMode::Focus => {
                 focus::start_session(self.island_window, minutes);
                 // The Clock app can take seconds to start, and this must feel instant.
-                self.focus_state.expect_start((minutes * 60_000) as i64, unix_now());
+                self.focus_state
+                    .expect_start((minutes * 60_000) as i64, unix_now());
                 self.set_timer(TIMER_FOCUS_CHECK, START_WAIT_MS as u32);
                 self.island.close_views();
                 self.load_focus();
@@ -1166,16 +1350,26 @@ impl App {
     fn toggle_focus(&mut self) {
         let wall_now = unix_now();
         match self.focus_state.status() {
-            FocusStatus::Paused { remaining_ms, on_break } => {
+            FocusStatus::Paused {
+                remaining_ms,
+                on_break,
+            } => {
                 focus::resume_session();
                 let ends = wall_now + remaining_ms as i64;
                 let started = ends - self.focus_total as i64;
-                self.expect_focus(FocusStatus::Running { started, ends, on_break });
+                self.expect_focus(FocusStatus::Running {
+                    started,
+                    ends,
+                    on_break,
+                });
             }
             FocusStatus::Running { ends, on_break, .. } => {
                 focus::pause_session();
                 let remaining_ms = (ends - wall_now).max(0) as u64;
-                self.expect_focus(FocusStatus::Paused { remaining_ms, on_break });
+                self.expect_focus(FocusStatus::Paused {
+                    remaining_ms,
+                    on_break,
+                });
             }
             _ => focus::pause_session(),
         }
@@ -1188,7 +1382,9 @@ impl App {
     }
 
     fn on_calendar(&mut self) {
-        let Some(update) = self.calendar.latest() else { return };
+        let Some(update) = self.calendar.latest() else {
+            return;
+        };
         let state = match update {
             CalendarUpdate::Events(events) => {
                 self.events = events;
@@ -1242,7 +1438,9 @@ impl App {
     }
 
     fn on_focus(&mut self) {
-        let Some(status) = self.focus_watch.latest() else { return };
+        let Some(status) = self.focus_watch.latest() else {
+            return;
+        };
         match self.focus_state.report(status, unix_now()) {
             FocusReport::TooEarly => return,
             FocusReport::Taken => self.load_focus(),
@@ -1263,7 +1461,11 @@ impl App {
             FocusStatus::Idle => FocusView::Off,
             FocusStatus::Open => FocusView::Open,
             FocusStatus::Running { ends, .. } if ends <= wall_now => FocusView::Off,
-            FocusStatus::Running { started, ends, on_break } => {
+            FocusStatus::Running {
+                started,
+                ends,
+                on_break,
+            } => {
                 self.focus_total = (ends - started) as Millis;
                 FocusView::Running {
                     ends_at: now + (ends - wall_now) as Millis,
@@ -1271,7 +1473,10 @@ impl App {
                     on_break,
                 }
             }
-            FocusStatus::Paused { remaining_ms, on_break } => FocusView::Paused {
+            FocusStatus::Paused {
+                remaining_ms,
+                on_break,
+            } => FocusView::Paused {
                 remaining: remaining_ms,
                 total: self.focus_total.max(remaining_ms),
                 on_break,
@@ -1290,7 +1495,9 @@ impl App {
     }
 
     fn on_notifications(&mut self) {
-        let Some(source) = &self.notification_source else { return };
+        let Some(source) = &self.notification_source else {
+            return;
+        };
         let updates: Vec<_> = source.updates().collect();
         for update in updates {
             match update {
@@ -1298,7 +1505,11 @@ impl App {
                 NotificationUpdate::Added(notice) => self.notification_queue.add(notice),
                 NotificationUpdate::Removed(id) => {
                     self.notification_queue.remove(id);
-                    if self.active_notification.as_ref().is_some_and(|(notice, _)| notice.id == id) {
+                    if self
+                        .active_notification
+                        .as_ref()
+                        .is_some_and(|(notice, _)| notice.id == id)
+                    {
                         self.active_notification = None;
                         self.island.remove(Kind::ExternalNotification);
                     }
@@ -1310,7 +1521,9 @@ impl App {
     }
 
     fn show_next_notification(&mut self, now: Millis) {
-        if self.active_notification.is_some() { return; }
+        if self.active_notification.is_some() {
+            return;
+        }
         if let Some(notice) = self.notification_queue.pop() {
             let activity = notice.activity(now);
             let until = activity.expires_at.unwrap_or(now);
@@ -1320,8 +1533,12 @@ impl App {
     }
 
     fn mute_shown_app(&mut self) {
-        if !self.shown_notification { return; }
-        let Some((notice, _)) = self.active_notification.take() else { return };
+        if !self.shown_notification {
+            return;
+        }
+        let Some((notice, _)) = self.active_notification.take() else {
+            return;
+        };
         if !self.muted_apps.contains(&notice.app_id) {
             self.muted_apps.push(notice.app_id);
             settings::remember("muted_apps", &self.muted_apps.join(","));
@@ -1352,11 +1569,14 @@ impl App {
     }
 
     fn on_camera(&mut self) {
-        let Some(app) = self.camera_watch.latest() else { return };
+        let Some(app) = self.camera_watch.latest() else {
+            return;
+        };
         if self.quiet {
             return;
         }
-        self.island.set_camera(app.filter(|_| !self.is_turned_off("camera")));
+        self.island
+            .set_camera(app.filter(|_| !self.is_turned_off("camera")));
         self.refresh();
     }
 
@@ -1364,7 +1584,9 @@ impl App {
         if self.quiet {
             return;
         }
-        if let Some(indicator) = keys::language().and_then(|code| self.tracker.keyboard_language_changed(code)) {
+        if let Some(indicator) =
+            keys::language().and_then(|code| self.tracker.keyboard_language_changed(code))
+        {
             self.show_indicator(indicator);
         }
     }
@@ -1379,7 +1601,9 @@ impl App {
         }
         if let Some(indicator) = clipboard::copied() {
             self.clipboard_quiet_until = now + CLIPBOARD_QUIET_MS;
-            if matches!(indicator, Indicator::Copied { what: "Görsel" }) && now < self.clip_expected_until {
+            if matches!(indicator, Indicator::Copied { what: "Görsel" })
+                && now < self.clip_expected_until
+            {
                 self.clip_expected_until = 0;
                 self.set_timer(TIMER_SCREEN_CLIP, SCREEN_CLIP_SETTLE_MS);
                 return;
@@ -1419,14 +1643,20 @@ impl App {
         self.task_layout = stored_task_layout();
         self.notices_off = stored_notices_off();
         self.focus_hides_notifications = stored_focus_hides_notifications();
-        self.notification_queue.set_focus(self.focus_hides_notifications
-            && matches!(self.focus_state.status(), FocusStatus::Running { .. } | FocusStatus::Open));
+        self.notification_queue.set_focus(
+            self.focus_hides_notifications
+                && matches!(
+                    self.focus_state.status(),
+                    FocusStatus::Running { .. } | FocusStatus::Open
+                ),
+        );
         self.muted_apps = stored_muted_apps();
         self.notification_queue.set_muted(self.muted_apps.clone());
         let wanted_notifications = stored_windows_notifications() && !self.quiet;
         if wanted_notifications != self.windows_notifications {
             self.windows_notifications = wanted_notifications;
-            self.notification_source = wanted_notifications.then(|| NotificationSource::start(self.island_window));
+            self.notification_source =
+                wanted_notifications.then(|| NotificationSource::start(self.island_window));
             if !wanted_notifications {
                 self.notification_queue.clear();
                 self.active_notification = None;
@@ -1452,7 +1682,9 @@ impl App {
 
     /// Puts the chosen material on, unless Windows has a reason against it now.
     fn apply_material(&mut self) {
-        let material = self.material.in_effect(tray::transparency_is_on(), self.battery_saver);
+        let material = self
+            .material
+            .in_effect(tray::transparency_is_on(), self.battery_saver);
         if let Err(error) = self.renderer.set_material(material) {
             eprintln!("material failed: {error}");
         }
@@ -1472,7 +1704,13 @@ impl App {
             .unwrap_or_default();
         let hidden_away = std::env::args().any(|a| a == "--settings-offscreen");
         let state = self.settings_state(page);
-        match SettingsWindow::open(self.island_window, Some(settings_proc), state, &address, hidden_away) {
+        match SettingsWindow::open(
+            self.island_window,
+            Some(settings_proc),
+            state,
+            &address,
+            hidden_away,
+        ) {
             Ok(window) => self.settings = Some(window),
             Err(error) => eprintln!("settings window failed: {error}"),
         }
@@ -1515,7 +1753,9 @@ impl App {
     }
 
     fn on_settings_click(&mut self, x: i32, y: i32) {
-        let Some(window) = &mut self.settings else { return };
+        let Some(window) = &mut self.settings else {
+            return;
+        };
         if let Some(action) = window.action_at(x, y) {
             window.focus_on(action);
             self.on_settings_action(action);
@@ -1523,14 +1763,20 @@ impl App {
     }
 
     fn on_settings_key(&mut self, key: VIRTUAL_KEY, shift: bool) {
-        if let Some(action) = self.settings.as_mut().and_then(|window| window.on_key(key, shift)) {
+        if let Some(action) = self
+            .settings
+            .as_mut()
+            .and_then(|window| window.on_key(key, shift))
+        {
             self.on_settings_action(action);
         }
     }
 
     /// Every change takes effect at once, and the window then shows what is true.
     fn on_settings_action(&mut self, action: Action) {
-        let Some(mut page) = self.settings.as_ref().map(|window| window.state().page) else { return };
+        let Some(mut page) = self.settings.as_ref().map(|window| window.state().page) else {
+            return;
+        };
         let mut calendar_note = None;
         match action {
             Action::Open(chosen) => page = chosen,
@@ -1562,14 +1808,24 @@ impl App {
             }
             Action::ReducedMotion => {
                 self.reduced_motion = !self.reduced_motion;
-                settings::remember("reduced_motion", if self.reduced_motion { "on" } else { "off" });
+                settings::remember(
+                    "reduced_motion",
+                    if self.reduced_motion { "on" } else { "off" },
+                );
                 render::set_reduced_motion(self.reduced_motion);
                 self.apply_wave();
             }
             Action::QuickTimeout { next } => {
                 let choices = config::QUICK_TIMEOUTS;
-                let current = choices.iter().position(|value| *value == self.quick_timeout).unwrap_or(2);
-                let index = if next { (current + 1) % choices.len() } else { (current + choices.len() - 1) % choices.len() };
+                let current = choices
+                    .iter()
+                    .position(|value| *value == self.quick_timeout)
+                    .unwrap_or(2);
+                let index = if next {
+                    (current + 1) % choices.len()
+                } else {
+                    (current + choices.len() - 1) % choices.len()
+                };
                 self.quick_timeout = choices[index];
                 settings::remember("quick_controls_timeout", &self.quick_timeout.to_string());
             }
@@ -1583,10 +1839,19 @@ impl App {
             Action::Notice(index) => self.toggle_notice(NOTICES[index].0),
             Action::WindowsNotifications => {
                 self.windows_notifications = !self.windows_notifications;
-                settings::remember("windows_notifications", if self.windows_notifications { "on" } else { "off" });
+                settings::remember(
+                    "windows_notifications",
+                    if self.windows_notifications {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                );
                 if self.windows_notifications {
                     let source = NotificationSource::start(self.island_window);
-                    if let Err(error) = source.request_access() { eprintln!("notification access request failed: {error}"); }
+                    if let Err(error) = source.request_access() {
+                        eprintln!("notification access request failed: {error}");
+                    }
                     self.notification_source = Some(source);
                 } else {
                     self.notification_source = None;
@@ -1598,9 +1863,21 @@ impl App {
             }
             Action::FocusHidesNotifications => {
                 self.focus_hides_notifications = !self.focus_hides_notifications;
-                settings::remember("focus_hides_notifications", if self.focus_hides_notifications { "on" } else { "off" });
-                self.notification_queue.set_focus(self.focus_hides_notifications
-                    && matches!(self.focus_state.status(), FocusStatus::Running { .. } | FocusStatus::Open));
+                settings::remember(
+                    "focus_hides_notifications",
+                    if self.focus_hides_notifications {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                );
+                self.notification_queue.set_focus(
+                    self.focus_hides_notifications
+                        && matches!(
+                            self.focus_state.status(),
+                            FocusStatus::Running { .. } | FocusStatus::Open
+                        ),
+                );
             }
             Action::ClearMutedApps => {
                 self.muted_apps.clear();
@@ -1610,7 +1887,10 @@ impl App {
             Action::Preset { index, longer } => {
                 let mut presets = self.island.presets();
                 presets[index] = stepped_preset(presets[index], longer);
-                settings::remember("timer_presets", &presets.map(|minutes| minutes.to_string()).join(", "));
+                settings::remember(
+                    "timer_presets",
+                    &presets.map(|minutes| minutes.to_string()).join(", "),
+                );
                 self.island.set_presets(presets);
                 self.refresh();
             }
@@ -1637,7 +1917,10 @@ impl App {
                 return;
             }
         }
-        let state = SettingsState { calendar_note, ..self.settings_state(page) };
+        let state = SettingsState {
+            calendar_note,
+            ..self.settings_state(page)
+        };
         if let Some(window) = &mut self.settings {
             window.update(state);
         }
@@ -1669,7 +1952,11 @@ impl App {
     /// Both the user's off switch and Energy Saver remove the wave. The stored
     /// choice returns when Energy Saver ends.
     fn apply_wave(&mut self) {
-        let motion = selected_wave_motion(self.sound_wave, self.battery_saver, self.wave_still || self.reduced_motion);
+        let motion = selected_wave_motion(
+            self.sound_wave,
+            self.battery_saver,
+            self.wave_still || self.reduced_motion,
+        );
         if let Err(error) = self.renderer.set_wave_motion(motion) {
             eprintln!("wave failed: {error}");
         }
@@ -1697,7 +1984,11 @@ impl App {
         }
         settings::remember("calendar_ics_url", &address);
         self.calendar.refresh();
-        Some(if address.is_empty() { "Takvim adresi kaldırıldı" } else { "Kaydedildi, takvim yenileniyor" })
+        Some(if address.is_empty() {
+            "Takvim adresi kaldırıldı"
+        } else {
+            "Kaydedildi, takvim yenileniyor"
+        })
     }
 
     fn set_style(&mut self, style: IslandStyle) {
@@ -1714,18 +2005,34 @@ impl App {
     fn monitor_label(&self) -> String {
         let monitors = window::monitors();
         if let Some(selected) = &self.selected_monitor
-            && !monitors.iter().any(|monitor| &monitor.device == selected) {
+            && !monitors.iter().any(|monitor| &monitor.device == selected)
+        {
             return "Seçilen ekran bağlı değil · Birincil kullanılıyor".into();
         }
-        let Some(monitor) = window::selected_monitor(&monitors, self.selected_monitor.as_deref()) else { return "Ekran bulunamadı".into() };
-        let name = monitor.device.rsplit('\\').next().unwrap_or(&monitor.device);
-        format!("{} · {} × {}{}", name, monitor.rect.right - monitor.rect.left, monitor.rect.bottom - monitor.rect.top,
-            if monitor.primary { " · Birincil" } else { "" })
+        let Some(monitor) = window::selected_monitor(&monitors, self.selected_monitor.as_deref())
+        else {
+            return "Ekran bulunamadı".into();
+        };
+        let name = monitor
+            .device
+            .rsplit('\\')
+            .next()
+            .unwrap_or(&monitor.device);
+        format!(
+            "{} · {} × {}{}",
+            name,
+            monitor.rect.right - monitor.rect.left,
+            monitor.rect.bottom - monitor.rect.top,
+            if monitor.primary { " · Birincil" } else { "" }
+        )
     }
 
     fn choose_monitor(&mut self, next: bool) {
         let monitors = window::monitors();
-        let Some(monitor) = window::step_monitor(&monitors, self.selected_monitor.as_deref(), next) else { return };
+        let Some(monitor) = window::step_monitor(&monitors, self.selected_monitor.as_deref(), next)
+        else {
+            return;
+        };
         self.selected_monitor = Some(monitor.device.clone());
         settings::remember("monitor", &monitor.device);
         self.on_display_changed();
@@ -1745,8 +2052,13 @@ impl App {
     /// bubble beside it pushes left.
     fn to_expanded_pill(&self, x: i32, y: i32) -> (f32, f32) {
         let scale = self.placement.scale;
-        let left = self.renderer.pill_left(self.renderer.pill_for(Presentation::Expanded));
-        ((x as f32 - left) / scale, y as f32 / scale - self.placement.style.margin())
+        let left = self
+            .renderer
+            .pill_left(self.renderer.pill_for(Presentation::Expanded));
+        (
+            (x as f32 - left) / scale,
+            y as f32 / scale - self.placement.style.margin(),
+        )
     }
 
     /// Side by side, the right end of the music pill holds the task, and the
@@ -1761,7 +2073,9 @@ impl App {
         let width = pill.width / scale;
         match self.shown {
             Presentation::Compact => (width - TASK_RESERVED..=width).contains(&from_left),
-            Presentation::Expanded => from_top >= Pill::EXPANDED.height && (0.0..=width).contains(&from_left),
+            Presentation::Expanded => {
+                from_top >= Pill::EXPANDED.height && (0.0..=width).contains(&from_left)
+            }
             _ => false,
         }
     }
@@ -1792,7 +2106,9 @@ impl App {
     /// The pointer may have left during the drag without the island hearing.
     fn settle_hover(&mut self) {
         let mut cursor = POINT::default();
-        let inside = unsafe { GetCursorPos(&mut cursor).is_ok() && WindowFromPoint(cursor) == self.island_window };
+        let inside = unsafe {
+            GetCursorPos(&mut cursor).is_ok() && WindowFromPoint(cursor) == self.island_window
+        };
         if inside {
             self.pointer_inside = false;
             self.track_pointer();
@@ -1811,7 +2127,9 @@ impl App {
     }
 
     fn on_media(&mut self) {
-        let Some(update) = self.media.latest() else { return };
+        let Some(update) = self.media.latest() else {
+            return;
+        };
         // The demo shows a made-up track, which real updates would wipe out.
         if self.demo_step.is_some() {
             return;
@@ -1832,7 +2150,8 @@ impl App {
             self.refresh();
         }
         if let Some((index, start_x, start_y)) = self.pressed_file {
-            let (reach_x, reach_y) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+            let (reach_x, reach_y) =
+                unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
             if (x - start_x).abs() > reach_x || (y - start_y).abs() > reach_y {
                 self.pressed_file = None;
                 let _ = unsafe { ReleaseCapture() };
@@ -1855,7 +2174,8 @@ impl App {
     /// Files dragged out may have been moved, which the shelf then forgets.
     fn after_drag_out(&mut self) {
         self.dragging_out = false;
-        self.island.forget_missing(|path| std::path::Path::new(path).exists());
+        self.island
+            .forget_missing(|path| std::path::Path::new(path).exists());
         self.settle_hover();
         self.refresh();
     }
@@ -1879,7 +2199,9 @@ impl App {
     /// Lights the zone under the pointer, and says whether it takes the files.
     fn on_drag_over(&mut self, point: POINT) -> bool {
         let zone = self.zone_at(point);
-        let Some(view) = &mut self.drop_view else { return false };
+        let Some(view) = &mut self.drop_view else {
+            return false;
+        };
         if view.hovered != zone {
             view.hovered = zone;
             self.island.drag_over(view.clone());
@@ -1925,7 +2247,8 @@ impl App {
             }
             Some(Zone::Phone) => self.send_to_phone(files),
             Some(Zone::Convert) => {
-                let pictures: Vec<DroppedFile> = files.into_iter().filter(DroppedFile::is_image).collect();
+                let pictures: Vec<DroppedFile> =
+                    files.into_iter().filter(DroppedFile::is_image).collect();
                 self.to_convert = pictures.iter().map(|file| file.path.clone()).collect();
                 self.island.open_convert(summary(&pictures), now);
             }
@@ -1942,7 +2265,11 @@ impl App {
         }
         // Tests reach the server from this computer, which needs no firewall rule.
         let loopback = std::env::args().any(|a| a == "--share-loopback");
-        let network = if loopback { Some(sharing::loopback()) } else { sharing::local_network() };
+        let network = if loopback {
+            Some(sharing::loopback())
+        } else {
+            sharing::local_network()
+        };
         // One send at a time: a new one takes over from the last.
         self.sharing = None;
         self.direct = None;
@@ -1950,24 +2277,36 @@ impl App {
         self.shared_files = files.clone();
         let Some(network) = network else {
             // No network to share with a phone: the island makes its own.
-            let Some(waiting) = QrMatrix::encode("Islora") else { return };
+            let Some(waiting) = QrMatrix::encode("Islora") else {
+                return;
+            };
             self.begin_transfer(&files, waiting, "Islora".into(), None);
             self.start_direct();
             return;
         };
         let shared = files
             .iter()
-            .map(|file| SharedFile { path: file.path.clone(), name: file.name().to_owned(), size: file.size })
+            .map(|file| SharedFile {
+                path: file.path.clone(),
+                name: file.name().to_owned(),
+                size: file.size,
+            })
             .collect();
         let started = Sharing::start(self.island_window, shared, network.address);
-        if (loopback || prints_address()) && let Ok(sharing) = &started {
+        if (loopback || prints_address())
+            && let Ok(sharing) = &started
+        {
             eprintln!("sharing at {}", sharing.url);
         }
         let Some((sharing, code)) = started.ok().and_then(|sharing| {
             let code = QrMatrix::encode(&sharing.url)?;
             Some((sharing, code))
         }) else {
-            self.notify("Telefona gönderilemedi", "Bağlantı açılamadı", Icon::Warning);
+            self.notify(
+                "Telefona gönderilemedi",
+                "Bağlantı açılamadı",
+                Icon::Warning,
+            );
             return;
         };
         self.begin_transfer(&files, code, sharing::describe(&network), None);
@@ -1985,8 +2324,12 @@ impl App {
         if prints_address() {
             eprintln!("firewall {reach:?}");
         }
-        if ticket == self.firewall_ticket && self.sharing.is_some() && !self.island.transfer_is_direct() {
-            self.island.transfer_warning(reach.warning().map(str::to_owned));
+        if ticket == self.firewall_ticket
+            && self.sharing.is_some()
+            && !self.island.transfer_is_direct()
+        {
+            self.island
+                .transfer_warning(reach.warning().map(str::to_owned));
             self.refresh();
         }
     }
@@ -2000,7 +2343,13 @@ impl App {
         }
     }
 
-    fn begin_transfer(&mut self, files: &[DroppedFile], code: QrMatrix, network: String, warning: Option<String>) {
+    fn begin_transfer(
+        &mut self,
+        files: &[DroppedFile],
+        code: QrMatrix,
+        network: String,
+        warning: Option<String>,
+    ) {
         let name = match files {
             [only] => only.name().to_owned(),
             several => format!("{} dosya", several.len()),
@@ -2012,7 +2361,9 @@ impl App {
             code: Arc::new(code),
             network,
             warning,
-            stage: Stage::Waiting { until: self.now() + WAIT_MS },
+            stage: Stage::Waiting {
+                until: self.now() + WAIT_MS,
+            },
             direct: None,
             offline: false,
             nudge_at: Some(self.now() + NUDGE_MS),
@@ -2031,7 +2382,11 @@ impl App {
             return;
         }
         let Some(random) = sharing::random(direct::RANDOM_BYTES) else {
-            self.notify("Doğrudan bağlantı kurulamadı", "Şifre üretilemedi", Icon::Warning);
+            self.notify(
+                "Doğrudan bağlantı kurulamadı",
+                "Şifre üretilemedi",
+                Icon::Warning,
+            );
             return;
         };
         let (name, secret) = random.split_at(4);
@@ -2044,7 +2399,9 @@ impl App {
     }
 
     fn on_direct(&mut self) {
-        let Some(events) = self.direct.as_ref().map(|(link, ..)| link.events()) else { return };
+        let Some(events) = self.direct.as_ref().map(|(link, ..)| link.events()) else {
+            return;
+        };
         for event in events {
             match event {
                 DirectEvent::Ready(address) => self.serve_direct(address),
@@ -2058,18 +2415,26 @@ impl App {
 
     /// Serves the files again on the own network, under a new code.
     fn serve_direct(&mut self, address: std::net::Ipv4Addr) {
-        let Some((_, network, passphrase)) = &self.direct else { return };
+        let Some((_, network, passphrase)) = &self.direct else {
+            return;
+        };
         let (network, passphrase) = (network.clone(), passphrase.clone());
         let shared = self
             .shared_files
             .iter()
-            .map(|file| SharedFile { path: file.path.clone(), name: file.name().to_owned(), size: file.size })
+            .map(|file| SharedFile {
+                path: file.path.clone(),
+                name: file.name().to_owned(),
+                size: file.size,
+            })
             .collect();
-        let ready = Sharing::start(self.island_window, shared, address).ok().and_then(|sharing| {
-            let download = QrMatrix::encode(&sharing.url)?;
-            let join = QrMatrix::encode(&direct::join_code_text(&network, &passphrase))?;
-            Some((sharing, download, join))
-        });
+        let ready = Sharing::start(self.island_window, shared, address)
+            .ok()
+            .and_then(|sharing| {
+                let download = QrMatrix::encode(&sharing.url)?;
+                let join = QrMatrix::encode(&direct::join_code_text(&network, &passphrase))?;
+                Some((sharing, download, join))
+            });
         match ready {
             Some((sharing, download, join)) => {
                 if prints_address() {
@@ -2087,7 +2452,11 @@ impl App {
         let shared = self
             .shared_files
             .iter()
-            .map(|file| SharedFile { path: file.path.clone(), name: file.name().to_owned(), size: file.size })
+            .map(|file| SharedFile {
+                path: file.path.clone(),
+                name: file.name().to_owned(),
+                size: file.size,
+            })
             .collect();
         let ready = Sharing::start(self.island_window, shared, address)
             .ok()
@@ -2097,11 +2466,16 @@ impl App {
                 if prints_address() {
                     eprintln!("hotspot sharing at {}", sharing.url);
                 }
-                self.island.transfer_hotspot(download, "Mobil etkin nokta".into());
+                self.island
+                    .transfer_hotspot(download, "Mobil etkin nokta".into());
                 self.sharing = Some(sharing);
                 self.refresh();
             }
-            None => self.notify("Etkin noktadan gönderilemedi", "Bağlantı açılamadı", Icon::Warning),
+            None => self.notify(
+                "Etkin noktadan gönderilemedi",
+                "Bağlantı açılamadı",
+                Icon::Warning,
+            ),
         }
     }
 
@@ -2111,7 +2485,11 @@ impl App {
         self.direct = None;
         self.island.transfer_direct_failed();
         if self.sharing.is_some() {
-            self.notify("Doğrudan bağlantı kurulamadı", "Wi-Fi kapalı", Icon::Warning);
+            self.notify(
+                "Doğrudan bağlantı kurulamadı",
+                "Wi-Fi kapalı",
+                Icon::Warning,
+            );
         } else {
             self.island.transfer_offline(true);
             self.waiting_for_wifi = true;
@@ -2129,7 +2507,9 @@ impl App {
     }
 
     fn on_sharing(&mut self) {
-        let Some(events) = self.sharing.as_ref().map(Sharing::events) else { return };
+        let Some(events) = self.sharing.as_ref().map(Sharing::events) else {
+            return;
+        };
         let now = self.now();
         for event in events {
             match event {
@@ -2157,7 +2537,8 @@ impl App {
             return;
         }
         self.island.set_converting(true);
-        self.imaging.convert(std::mem::take(&mut self.to_convert), target);
+        self.imaging
+            .convert(std::mem::take(&mut self.to_convert), target);
         self.refresh();
     }
 
@@ -2192,7 +2573,8 @@ impl App {
                             self.converted = done.outputs;
                         }
                         None => {
-                            let reason = done.failure.unwrap_or_else(|| "Dönüştürülemedi".to_owned());
+                            let reason =
+                                done.failure.unwrap_or_else(|| "Dönüştürülemedi".to_owned());
                             self.notify("Dönüştürülemedi", &reason, Icon::Warning);
                         }
                     }
@@ -2262,7 +2644,9 @@ impl App {
                 self.show_indicator(indicator);
             }
         }
-        if quick_updated && self.island.quick_controls().is_some() { self.refresh(); }
+        if quick_updated && self.island.quick_controls().is_some() {
+            self.refresh();
+        }
     }
 
     fn on_power(&mut self, event: PowerEvent) {
@@ -2299,7 +2683,9 @@ impl App {
             // The file's notice, with its picture, stands for the clip as well.
             self.cancel_timer(TIMER_SCREEN_CLIP);
         }
-        let turned_off = indicator.setting().is_some_and(|name| self.is_turned_off(name));
+        let turned_off = indicator
+            .setting()
+            .is_some_and(|name| self.is_turned_off(name));
         if turned_off || (indicator.is_brief() && self.island.is_open()) {
             return;
         }
@@ -2308,8 +2694,10 @@ impl App {
         }
         let is_volume = matches!(&indicator, Indicator::Volume { .. });
         let mut activity = indicator.into_activity(self.now());
-        if is_volume && let Some(name) = self.tracker.audio_output()
-            && let Some(context) = &mut activity.indicator_context {
+        if is_volume
+            && let Some(name) = self.tracker.audio_output()
+            && let Some(context) = &mut activity.indicator_context
+        {
             context.subtitle = Some(name.to_owned());
         }
         self.island.upsert(activity);
@@ -2338,11 +2726,19 @@ impl App {
 
     /// Shows every indicator in turn, since most need real hardware to trigger.
     fn advance_indicator_demo(&mut self) {
-        let Some(step) = self.indicator_demo_step else { return };
+        let Some(step) = self.indicator_demo_step else {
+            return;
+        };
         let name = String::from("Kulaklık");
         let all = [
-            Indicator::Volume { percent: 40, muted: false },
-            Indicator::Volume { percent: 40, muted: true },
+            Indicator::Volume {
+                percent: 40,
+                muted: false,
+            },
+            Indicator::Volume {
+                percent: 40,
+                muted: true,
+            },
             Indicator::Brightness { percent: 70 },
             Indicator::CapsLock { on: true },
             Indicator::NumLock { on: false },
@@ -2350,22 +2746,53 @@ impl App {
             Indicator::Unplugged { percent: 64 },
             Indicator::LowBattery { percent: 20 },
             Indicator::BluetoothConnected { name: name.clone() },
-            Indicator::BluetoothBattery { name: name.clone(), percent: 80 },
+            Indicator::BluetoothBattery {
+                name: name.clone(),
+                percent: 80,
+            },
             Indicator::BluetoothDisconnected { name: name.clone() },
             Indicator::AudioOutput { name: name.clone() },
             Indicator::Microphone { muted: true },
             Indicator::Microphone { muted: false },
-            Indicator::MicrophoneInUse { app: "Discord".into() },
-            Indicator::Internet { online: false, network: None },
-            Indicator::Internet { online: true, network: Some("Ev Wi-Fi".into()) },
-            Indicator::Wifi { name: "Okul Wi-Fi".into() },
-            Indicator::Vpn { connected: true, name: "Okul VPN".into() },
+            Indicator::MicrophoneInUse {
+                app: "Discord".into(),
+            },
+            Indicator::Internet {
+                online: false,
+                network: None,
+            },
+            Indicator::Internet {
+                online: true,
+                network: Some("Ev Wi-Fi".into()),
+            },
+            Indicator::Wifi {
+                name: "Okul Wi-Fi".into(),
+            },
+            Indicator::Vpn {
+                connected: true,
+                name: "Okul VPN".into(),
+            },
             Indicator::AirplaneMode { on: true },
-            Indicator::Usb { added: true, name: "SANDISK (E:)".into() },
-            Indicator::Usb { added: false, name: "SANDISK (E:)".into() },
-            Indicator::Display { added: true, count: 2 },
-            Indicator::Display { added: false, count: 1 },
-            Indicator::Screenshot { path: String::new(), image: None },
+            Indicator::Usb {
+                added: true,
+                name: "SANDISK (E:)".into(),
+            },
+            Indicator::Usb {
+                added: false,
+                name: "SANDISK (E:)".into(),
+            },
+            Indicator::Display {
+                added: true,
+                count: 2,
+            },
+            Indicator::Display {
+                added: false,
+                count: 1,
+            },
+            Indicator::Screenshot {
+                path: String::new(),
+                image: None,
+            },
             Indicator::Copied { what: "Metin" },
             Indicator::BatterySaver { on: true },
             Indicator::KeyboardLanguage { code: "EN".into() },
@@ -2380,14 +2807,16 @@ impl App {
     }
 
     fn on_fullscreen(&mut self, reported: bool) {
-        self.fullscreen.report(reported, fullscreen::desktop_in_front());
+        self.fullscreen
+            .report(reported, fullscreen::desktop_in_front());
         self.cancel_timer(TIMER_FULLSCREEN);
         self.apply_fullscreen();
         self.stay_on_top();
     }
 
     fn on_front_changed(&mut self) {
-        self.fullscreen.front_changed(fullscreen::desktop_in_front());
+        self.fullscreen
+            .front_changed(fullscreen::desktop_in_front());
         self.stay_on_top();
         if self.fullscreen.active() {
             self.set_timer(TIMER_FULLSCREEN, FULLSCREEN_SETTLE_MS);
@@ -2439,7 +2868,12 @@ impl App {
     }
 
     fn on_display_changed(&mut self) {
-        match window::place(self.island_window, self.edge_window, self.placement.style, self.selected_monitor.as_deref()) {
+        match window::place(
+            self.island_window,
+            self.edge_window,
+            self.placement.style,
+            self.selected_monitor.as_deref(),
+        ) {
             Ok(placement) => {
                 self.placement = placement;
                 if let Err(error) = self.renderer.set_metrics(placement.scale, placement.width) {
@@ -2451,7 +2885,9 @@ impl App {
                 }
                 if let Some(page) = self.settings.as_ref().map(|window| window.state().page) {
                     let state = self.settings_state(page);
-                    if let Some(window) = &mut self.settings { window.update(state); }
+                    if let Some(window) = &mut self.settings {
+                        window.update(state);
+                    }
                 }
             }
             Err(error) => eprintln!("placement failed: {error}"),
@@ -2462,7 +2898,11 @@ impl App {
     /// with made-up files. Nothing is sent: the code leads nowhere.
     fn show_drop_demo(&mut self, step: u32) {
         let now = self.now();
-        let file = |path: &str, size| DroppedFile { path: path.into(), size, is_folder: false };
+        let file = |path: &str, size| DroppedFile {
+            path: path.into(),
+            size,
+            is_folder: false,
+        };
         let photo = file(r"C:\Demo\Kapadokya.jpg", 2_516_582);
         let report = file(r"C:\Demo\Rapor.pdf", 1_048_576);
         // The pointer is said to rest on the island, which keeps every view open.
@@ -2482,12 +2922,15 @@ impl App {
                 let mut paths = demo_pictures(if step == 4 { 6 } else { 2 });
                 paths.push(report.path.clone());
                 let added = self.island.drop_on_shelf(&paths, now);
-                self.imaging.thumbnails(added, (THUMBNAIL_DIPS * self.placement.scale).ceil() as i32);
+                self.imaging
+                    .thumbnails(added, (THUMBNAIL_DIPS * self.placement.scale).ceil() as i32);
                 if step == 13 {
                     self.island.close_views();
                 }
             }
-            5 => self.island.open_convert(summary(std::slice::from_ref(&photo)), now),
+            5 => self
+                .island
+                .open_convert(summary(std::slice::from_ref(&photo)), now),
             // 16 is the code without a warning, as most networks show it. 26 waits
             // for Wi-Fi, 27 suggests the own network, 28 serves on the hotspot.
             6..=11 | 16 | 26..=28 => {
@@ -2500,7 +2943,9 @@ impl App {
                     code: Arc::new(code),
                     network: "Wi-Fi · Ev".into(),
                     warning: (step == 6).then(|| "Güvenlik duvarı bu ağda engelliyor".to_owned()),
-                    stage: Stage::Waiting { until: now + WAIT_MS },
+                    stage: Stage::Waiting {
+                        until: now + WAIT_MS,
+                    },
                     direct: None,
                     offline: step == 26,
                     nudge_at: Some(if step == 27 { now } else { now + NUDGE_MS }),
@@ -2524,9 +2969,11 @@ impl App {
                     self.island.close_views();
                 }
                 if step == 28
-                    && let Some(download) = QrMatrix::encode("http://192.168.137.1:52731/q7m2k4vx9pd3hz6tbw5n")
+                    && let Some(download) =
+                        QrMatrix::encode("http://192.168.137.1:52731/q7m2k4vx9pd3hz6tbw5n")
                 {
-                    self.island.transfer_hotspot(download, "Mobil etkin nokta".into());
+                    self.island
+                        .transfer_hotspot(download, "Mobil etkin nokta".into());
                 }
             }
             // The island's own network: starting, its code, and the phone on it.
@@ -2542,7 +2989,8 @@ impl App {
                 self.begin_transfer(std::slice::from_ref(&photo), waiting, "Islora".into(), None);
                 self.island.transfer_direct_preparing();
                 if step >= 19 {
-                    self.island.transfer_direct_ready(join, "Islora-K4FX".into(), download);
+                    self.island
+                        .transfer_direct_ready(join, "Islora-K4FX".into(), download);
                 }
                 if step == 20 {
                     self.island.transfer_direct_joined();
@@ -2580,17 +3028,31 @@ impl App {
             17 => {
                 // Music playing in the small pill, with its wave, and nothing else.
                 self.demo_step = Some(0);
-                self.island.upsert_media(demo_track("Kısa Şarkı", true, now), now);
+                self.island
+                    .upsert_media(demo_track("Kısa Şarkı", true, now), now);
             }
             // Music playing while a send waits, closes, goes, and is done, and
             // the volume changing while its code is open.
             21..=25 => {
                 self.demo_step = Some(0);
-                self.island.upsert_media(demo_track("Kısa Şarkı", true, now), now);
-                let Some(code) = QrMatrix::encode("http://192.168.1.20:52731/q7m2k4vx9pd3hz6tbw5n") else { return };
-                self.begin_transfer(std::slice::from_ref(&photo), code, "Wi-Fi · Ev".into(), None);
+                self.island
+                    .upsert_media(demo_track("Kısa Şarkı", true, now), now);
+                let Some(code) = QrMatrix::encode("http://192.168.1.20:52731/q7m2k4vx9pd3hz6tbw5n")
+                else {
+                    return;
+                };
+                self.begin_transfer(
+                    std::slice::from_ref(&photo),
+                    code,
+                    "Wi-Fi · Ev".into(),
+                    None,
+                );
                 if step == 25 {
-                    let mut volume = Indicator::Volume { percent: 40, muted: false }.into_activity(now);
+                    let mut volume = Indicator::Volume {
+                        percent: 40,
+                        muted: false,
+                    }
+                    .into_activity(now);
                     // Long enough to be photographed.
                     volume.expires_at = Some(now + 60_000);
                     self.island.upsert(volume);
@@ -2630,13 +3092,25 @@ impl App {
         self.demo_step = Some((step + 1) % DEMO_STEPS);
         let now = self.now();
         match step {
-            0 => self.island.upsert_media(demo_track("Kısa Şarkı", true, now), now),
-            1 => self.island.upsert_media(demo_track("Örnek Şarkı Adı Burada Görünür", true, now), now),
-            2 => self.island.upsert_media(demo_track("Kısa Şarkı", false, now), now),
+            0 => self
+                .island
+                .upsert_media(demo_track("Kısa Şarkı", true, now), now),
+            1 => self
+                .island
+                .upsert_media(demo_track("Örnek Şarkı Adı Burada Görünür", true, now), now),
+            2 => self
+                .island
+                .upsert_media(demo_track("Kısa Şarkı", false, now), now),
             3 => self.island.click(now),
             4 => {
                 self.island.click(now);
-                self.island.upsert(Indicator::Volume { percent: 40, muted: false }.into_activity(now));
+                self.island.upsert(
+                    Indicator::Volume {
+                        percent: 40,
+                        muted: false,
+                    }
+                    .into_activity(now),
+                );
             }
             5 => self.island.upsert(demo_activity(
                 Kind::Notification,
@@ -2670,12 +3144,20 @@ impl App {
 
 /// Pictures Windows ships with, which stand in for the user's own files.
 fn demo_pictures(count: usize) -> Vec<String> {
-    let folders = [r"C:\Windows\Web\Wallpaper\Windows", r"C:\Windows\Web\Screen", r"C:\Windows\Web\4K\Wallpaper\Windows"];
+    let folders = [
+        r"C:\Windows\Web\Wallpaper\Windows",
+        r"C:\Windows\Web\Screen",
+        r"C:\Windows\Web\4K\Wallpaper\Windows",
+    ];
     let mut pictures: Vec<String> = folders
         .iter()
         .filter_map(|folder| std::fs::read_dir(folder).ok())
         .flatten()
-        .filter_map(|entry| entry.ok().map(|entry| entry.path().to_string_lossy().into_owned()))
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .map(|entry| entry.path().to_string_lossy().into_owned())
+        })
         .filter(|path| island_core::files::is_image(path))
         .collect();
     pictures.truncate(count);
@@ -2705,11 +3187,15 @@ fn demo_track(title: &str, playing: bool, now: Millis) -> MediaSnapshot {
 /// An optional feature that fails to start is logged, not fatal: a machine
 /// without Bluetooth should still get everything else.
 fn optional<T>(name: &str, started: Result<T>) -> Option<T> {
-    started.map_err(|error| eprintln!("{name} unavailable: {error}")).ok()
+    started
+        .map_err(|error| eprintln!("{name} unavailable: {error}"))
+        .ok()
 }
 
 fn argument_after(flag: &str) -> Option<String> {
-    std::env::args().skip_while(|argument| argument != flag).nth(1)
+    std::env::args()
+        .skip_while(|argument| argument != flag)
+        .nth(1)
 }
 
 fn monitor_count() -> u32 {
@@ -2721,8 +3207,10 @@ fn stored_notices_off() -> Vec<String> {
 }
 
 fn stored_windows_notifications() -> bool {
-    settings::read().and_then(|text| config::read_value(&text, "windows_notifications"))
-        .as_deref() == Some("on")
+    settings::read()
+        .and_then(|text| config::read_value(&text, "windows_notifications"))
+        .as_deref()
+        == Some("on")
 }
 
 fn stored_monitor() -> Option<String> {
@@ -2730,13 +3218,23 @@ fn stored_monitor() -> Option<String> {
 }
 
 fn stored_focus_hides_notifications() -> bool {
-    settings::read().and_then(|text| config::read_value(&text, "focus_hides_notifications"))
-        .as_deref() != Some("off")
+    settings::read()
+        .and_then(|text| config::read_value(&text, "focus_hides_notifications"))
+        .as_deref()
+        != Some("off")
 }
 
 fn stored_muted_apps() -> Vec<String> {
-    settings::read().and_then(|text| config::read_value(&text, "muted_apps"))
-        .map_or_else(Vec::new, |value| value.split(',').map(str::trim).filter(|part| !part.is_empty()).map(str::to_owned).collect())
+    settings::read()
+        .and_then(|text| config::read_value(&text, "muted_apps"))
+        .map_or_else(Vec::new, |value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
 }
 
 /// Tests ask for the notch directly, which leaves the user's choice alone.
@@ -2744,15 +3242,21 @@ fn stored_style() -> IslandStyle {
     if std::env::args().any(|a| a == "--notch") {
         return IslandStyle::Notch;
     }
-    settings::read().and_then(|text| config::read_island_style(&text)).unwrap_or_default()
+    settings::read()
+        .and_then(|text| config::read_island_style(&text))
+        .unwrap_or_default()
 }
 
 fn stored_material() -> Material {
-    settings::read().and_then(|text| config::read_material(&text)).unwrap_or_default()
+    settings::read()
+        .and_then(|text| config::read_material(&text))
+        .unwrap_or_default()
 }
 
 fn stored_ui_density() -> island_core::layout::UiDensity {
-    settings::read().map_or(island_core::layout::UiDensity::default(), |text| config::read_ui_density(&text))
+    settings::read().map_or(island_core::layout::UiDensity::default(), |text| {
+        config::read_ui_density(&text)
+    })
 }
 
 fn stored_sound_wave() -> bool {
@@ -2782,7 +3286,9 @@ fn selected_wave_motion(enabled: bool, saver: bool, force_still: bool) -> WaveMo
 }
 
 fn ask_running_copy_for_settings() {
-    let Some(running) = window::find_running() else { return };
+    let Some(running) = window::find_running() else {
+        return;
+    };
     unsafe {
         let mut process = 0;
         GetWindowThreadProcessId(running, Some(&mut process));
@@ -2798,7 +3304,9 @@ fn prints_address() -> bool {
 }
 
 fn stored_progress_style() -> ProgressStyle {
-    settings::read().map(|text| config::read_progress_style(&text)).unwrap_or_default()
+    settings::read()
+        .map(|text| config::read_progress_style(&text))
+        .unwrap_or_default()
 }
 
 /// Islora starts with Windows unless the user said otherwise once. Copies run
@@ -2814,7 +3322,9 @@ fn start_with_windows_by_default() {
 }
 
 fn stored_task_layout() -> TaskLayout {
-    settings::read().map(|text| config::read_task_layout(&text)).unwrap_or_default()
+    settings::read()
+        .map(|text| config::read_task_layout(&text))
+        .unwrap_or_default()
 }
 
 fn apply_settings(island: &mut Island) {
@@ -2822,7 +3332,11 @@ fn apply_settings(island: &mut Island) {
     island.set_progress_style(config::read_progress_style(&text));
     island.set_task_layout(config::read_task_layout(&text));
     island.set_presets(config::read_presets(&text).unwrap_or(TIMER_PRESETS));
-    island.set_track_notices(!config::read_notices_off(&text).iter().any(|name| name == "track_change"));
+    island.set_track_notices(
+        !config::read_notices_off(&text)
+            .iter()
+            .any(|name| name == "track_change"),
+    );
     if let Some(mode) = config::read_start_mode(&text) {
         island.set_start_mode(mode);
     }
@@ -2869,12 +3383,23 @@ fn quick_context_menu(hwnd: HWND, target: Option<QuickControl>) -> usize {
             None => None,
         };
         let mut ok = AppendMenuW(menu, MF_STRING, 1, w!("Islora ayarları")).is_ok();
-        if let Some(label) = label { ok &= AppendMenuW(menu, MF_STRING, 2, label).is_ok(); }
+        if let Some(label) = label {
+            ok &= AppendMenuW(menu, MF_STRING, 2, label).is_ok();
+        }
         let mut point = POINT::default();
         ok &= GetCursorPos(&mut point).is_ok();
         let chosen = if ok {
             let _ = SetForegroundWindow(hwnd);
-            TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, point.x, point.y, None, hwnd, None).0 as usize
+            TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                point.x,
+                point.y,
+                None,
+                hwnd,
+                None,
+            )
+            .0 as usize
         } else {
             eprintln!("could not open the Quick Controls menu");
             0
@@ -2884,7 +3409,12 @@ fn quick_context_menu(hwnd: HWND, target: Option<QuickControl>) -> usize {
     }
 }
 
-unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn island_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_KEYDOWN => {
@@ -2893,17 +3423,26 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                 if app.island.quick_controls().is_some() {
                     app.on_quick_controls_key(VIRTUAL_KEY(wparam.0 as u16), shift);
                     true
-                } else { false }
-            }) == Some(true) { return LRESULT(0); }
+                } else {
+                    false
+                }
+            }) == Some(true)
+            {
+                return LRESULT(0);
+            }
         }
-        WM_KILLFOCUS => {
-            unsafe { let _ = PostMessageW(Some(hwnd), MSG_QUICK_FOCUS_LOST, WPARAM(0), LPARAM(0)); }
-        }
+        WM_KILLFOCUS => unsafe {
+            let _ = PostMessageW(Some(hwnd), MSG_QUICK_FOCUS_LOST, WPARAM(0), LPARAM(0));
+        },
         MSG_QUICK_FOCUS_LOST => {
             with_app(|app| {
                 if app.quick_previous_window.is_some()
-                    && app.island.quick_controls().is_some_and(|controls| !controls.is_interacting())
-                    && unsafe { GetForegroundWindow() } != hwnd {
+                    && app
+                        .island
+                        .quick_controls()
+                        .is_some_and(|controls| !controls.is_interacting())
+                    && unsafe { GetForegroundWindow() } != hwnd
+                {
                     app.island.close_views();
                     app.refresh();
                 }
@@ -2924,27 +3463,45 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                 let now = app.now();
                 let controls = app.island.quick_controls_mut()?;
                 let target = if controls.page == QuickPage::Main {
-                    match QuickTarget::at(x, y) { Some(QuickTarget::Control(control)) => Some(control), _ => None }
-                } else { None };
+                    match QuickTarget::at(x, y) {
+                        Some(QuickTarget::Control(control)) => Some(control),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 controls.set_interacting(true, now);
                 Some(target)
-            }).flatten();
+            })
+            .flatten();
             if let Some(target) = quick {
                 let selected = quick_context_menu(hwnd, target);
                 with_app(|app| {
                     let now = app.now();
-                    if let Some(controls) = app.island.quick_controls_mut() { controls.set_interacting(false, now); }
+                    if let Some(controls) = app.island.quick_controls_mut() {
+                        controls.set_interacting(false, now);
+                    }
                     if selected == 0 && unsafe { GetForegroundWindow() } != hwnd {
                         app.island.close_views();
                         app.refresh();
                         return;
                     }
                     match selected {
-                        1 => { app.island.close_views(); app.refresh(); app.open_settings(); }
-                        2 => if let Some(control) = target {
-                            let bounds = control.bounds();
-                            app.on_quick_controls_click(bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0, now);
-                        },
+                        1 => {
+                            app.island.close_views();
+                            app.refresh();
+                            app.open_settings();
+                        }
+                        2 => {
+                            if let Some(control) = target {
+                                let bounds = control.bounds();
+                                app.on_quick_controls_click(
+                                    bounds.x + bounds.width / 2.0,
+                                    bounds.y + bounds.height / 2.0,
+                                    now,
+                                );
+                            }
+                        }
                         _ => app.refresh(),
                     }
                 });
@@ -3106,7 +3663,12 @@ unsafe extern "system" fn island_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     LRESULT(0)
 }
 
-unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn settings_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         // Painted in full each time, which an erased background would only flash.
         WM_ERASEBKGND => return LRESULT(1),
@@ -3127,7 +3689,9 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_CTLCOLOREDIT => {
             let dc = HDC(wparam.0 as _);
-            if let Some(Some(brush)) = with_app(|app| app.settings.as_ref().map(|window| window.color_field(dc))) {
+            if let Some(Some(brush)) =
+                with_app(|app| app.settings.as_ref().map(|window| window.color_field(dc)))
+            {
                 return brush;
             }
         }
@@ -3140,7 +3704,11 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             return LRESULT(0);
         }
         WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT && wparam.0 == hwnd.0 as usize => {
-            let on_control = with_app(|app| app.settings.as_ref().is_some_and(SettingsWindow::pointer_on_control));
+            let on_control = with_app(|app| {
+                app.settings
+                    .as_ref()
+                    .is_some_and(SettingsWindow::pointer_on_control)
+            });
             if on_control == Some(true) {
                 unsafe { SetCursor(LoadCursorW(None, IDC_HAND).ok()) };
                 return LRESULT(1);
@@ -3149,7 +3717,11 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         WM_DPICHANGED => {
             let dpi = (wparam.0 & 0xFFFF) as u32;
             let suggested = unsafe { *(lparam.0 as *const RECT) };
-            with_app(|app| app.settings.as_mut().map(|window| window.on_dpi_changed(dpi, &suggested)));
+            with_app(|app| {
+                app.settings
+                    .as_mut()
+                    .map(|window| window.on_dpi_changed(dpi, &suggested))
+            });
         }
         WM_TIMER => {
             with_app(|app| app.settings.as_mut().map(SettingsWindow::on_timer));
@@ -3178,7 +3750,12 @@ fn open_tray_menu(hwnd: HWND) {
     }
 }
 
-unsafe extern "system" fn edge_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn edge_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_MOUSEMOVE => {
@@ -3197,7 +3774,10 @@ mod tests {
     fn wave_switch_and_energy_saver_hide_bars_without_losing_the_choice() {
         assert_eq!(selected_wave_motion(true, false, false), WaveMotion::Always);
         assert_eq!(selected_wave_motion(true, true, false), WaveMotion::Hidden);
-        assert_eq!(selected_wave_motion(false, false, false), WaveMotion::Hidden);
+        assert_eq!(
+            selected_wave_motion(false, false, false),
+            WaveMotion::Hidden
+        );
         assert_eq!(selected_wave_motion(false, true, false), WaveMotion::Hidden);
         // The load measurement can still ask for a stationary visible wave.
         assert_eq!(selected_wave_motion(true, false, true), WaveMotion::Still);

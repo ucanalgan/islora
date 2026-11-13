@@ -222,13 +222,21 @@ impl Painter {
             let graphics = interop.CreateGraphicsDevice(&device)?;
             let dwrite = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let wic = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
-            Ok(Self { graphics, dwrite, wic, decoded: RefCell::new(None) })
+            Ok(Self {
+                graphics,
+                dwrite,
+                wic,
+                decoded: RefCell::new(None),
+            })
         }
     }
 
     pub fn create_surface(&self, width: f32, height: f32) -> Result<CompositionDrawingSurface> {
         self.graphics.CreateDrawingSurface(
-            Size { Width: width, Height: height },
+            Size {
+                Width: width,
+                Height: height,
+            },
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
             DirectXAlphaMode::Premultiplied,
         )
@@ -240,7 +248,12 @@ impl Painter {
             let mut offset = POINT::default();
             let dc: ID2D1DeviceContext = interop.BeginDraw(None, &mut offset)?;
 
-            dc.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+            dc.Clear(Some(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }));
             dc.SetTransform(&Matrix3x2::translation(offset.x as f32, offset.y as f32));
             // ClearType needs an opaque background, which this surface lacks.
             dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
@@ -264,7 +277,12 @@ impl Painter {
     /// How wide a line of text is at `size`, in the same units.
     pub fn measure(&self, text: &str, size: f32, bold: bool) -> Result<f32> {
         const ROOMY: f32 = 4096.0;
-        let bounds = Bounds { x: 0.0, y: 0.0, width: ROOMY, height: ROOMY };
+        let bounds = Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: ROOMY,
+            height: ROOMY,
+        };
         let run = TextRun {
             text,
             bounds,
@@ -279,7 +297,9 @@ impl Painter {
         let utf16: Vec<u16> = text.encode_utf16().collect();
         let mut metrics = DWRITE_TEXT_METRICS::default();
         unsafe {
-            let layout = self.dwrite.CreateTextLayout(&utf16, &format, ROOMY, ROOMY)?;
+            let layout = self
+                .dwrite
+                .CreateTextLayout(&utf16, &format, ROOMY, ROOMY)?;
             layout.GetMetrics(&mut metrics)?;
         }
         Ok(metrics.widthIncludingTrailingWhitespace)
@@ -294,9 +314,17 @@ impl Painter {
                 radiusY: shape.radius,
             };
             unsafe {
-                dc.FillRoundedRectangle(&rounded, &dc.CreateSolidColorBrush(&color(shape.fill), None)?);
+                dc.FillRoundedRectangle(
+                    &rounded,
+                    &dc.CreateSolidColorBrush(&color(shape.fill), None)?,
+                );
                 if let Some((border, width)) = shape.border {
-                    dc.DrawRoundedRectangle(&rounded, &dc.CreateSolidColorBrush(&color(border), None)?, width, None);
+                    dc.DrawRoundedRectangle(
+                        &rounded,
+                        &dc.CreateSolidColorBrush(&color(border), None)?,
+                        width,
+                        None,
+                    );
                 }
             }
         }
@@ -310,9 +338,18 @@ impl Painter {
             unsafe { self.draw_code(dc, code)? };
         }
         for bar in &painting.bars {
-            let color = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: bar.opacity };
+            let color = D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: bar.opacity,
+            };
             let radius = bar.bounds.height / 2.0;
-            let rounded = D2D1_ROUNDED_RECT { rect: bar.bounds.rect(), radiusX: radius, radiusY: radius };
+            let rounded = D2D1_ROUNDED_RECT {
+                rect: bar.bounds.rect(),
+                radiusX: radius,
+                radiusY: radius,
+            };
             unsafe {
                 let brush = dc.CreateSolidColorBrush(&color, None)?;
                 dc.FillRoundedRectangle(&rounded, &brush);
@@ -331,7 +368,12 @@ impl Painter {
         let colored = painting.colored.iter().map(|(run, color)| (run, *color));
         for (run, [r, g, b]) in white.chain(colored) {
             let format = self.format(run)?;
-            let color = D2D1_COLOR_F { r, g, b, a: run.opacity };
+            let color = D2D1_COLOR_F {
+                r,
+                g,
+                b,
+                a: run.opacity,
+            };
             let utf16: Vec<u16> = run.text.encode_utf16().collect();
             unsafe {
                 let brush = dc.CreateSolidColorBrush(&color, None)?;
@@ -361,7 +403,12 @@ impl Painter {
                 even_digits: false,
             };
             let format = self.format(&run)?;
-            let color = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: run.opacity };
+            let color = D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: run.opacity,
+            };
             let utf16: Vec<u16> = run.text.encode_utf16().collect();
             unsafe {
                 let brush = dc.CreateSolidColorBrush(&color, None)?;
@@ -388,29 +435,56 @@ impl Painter {
         brush: &ID2D1Brush,
     ) -> Result<()> {
         let bounds = run.bounds;
-        let feature = DWRITE_FONT_FEATURE { nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, parameter: 1 };
-        let whole = DWRITE_TEXT_RANGE { startPosition: 0, length: utf16.len() as u32 };
+        let feature = DWRITE_FONT_FEATURE {
+            nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+            parameter: 1,
+        };
+        let whole = DWRITE_TEXT_RANGE {
+            startPosition: 0,
+            length: utf16.len() as u32,
+        };
         unsafe {
-            let layout = self.dwrite.CreateTextLayout(utf16, format, bounds.width, bounds.height)?;
+            let layout =
+                self.dwrite
+                    .CreateTextLayout(utf16, format, bounds.width, bounds.height)?;
             let typography = self.dwrite.CreateTypography()?;
             typography.AddFontFeature(feature)?;
             layout.SetTypography(&typography, whole)?;
-            let origin = Vector2 { X: bounds.x, Y: bounds.y };
+            let origin = Vector2 {
+                X: bounds.x,
+                Y: bounds.y,
+            };
             dc.DrawTextLayout(origin, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
         Ok(())
     }
 
-    unsafe fn draw_clipped(&self, dc: &ID2D1DeviceContext, shape: &ShapeRun, outer: Bounds, radius: f32) -> Result<()> {
+    unsafe fn draw_clipped(
+        &self,
+        dc: &ID2D1DeviceContext,
+        shape: &ShapeRun,
+        outer: Bounds,
+        radius: f32,
+    ) -> Result<()> {
         let [r, g, b, a] = shape.fill;
         unsafe {
             let factory = dc.GetFactory()?;
-            let rounded = D2D1_ROUNDED_RECT { rect: outer.rect(), radiusX: radius, radiusY: radius };
+            let rounded = D2D1_ROUNDED_RECT {
+                rect: outer.rect(),
+                radiusX: radius,
+                radiusY: radius,
+            };
             let within = factory.CreateRoundedRectangleGeometry(&rounded)?;
             let part = factory.CreateRectangleGeometry(&shape.bounds.rect())?;
             let path = factory.CreatePathGeometry()?;
             let sink = path.Open()?;
-            within.CombineWithGeometry(&part, D2D1_COMBINE_MODE_INTERSECT, None, D2D1_DEFAULT_FLATTENING_TOLERANCE, &sink)?;
+            within.CombineWithGeometry(
+                &part,
+                D2D1_COMBINE_MODE_INTERSECT,
+                None,
+                D2D1_DEFAULT_FLATTENING_TOLERANCE,
+                &sink,
+            )?;
             sink.Close()?;
             let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a }, None)?;
             dc.FillGeometry(&path, &brush, None);
@@ -424,12 +498,19 @@ impl Painter {
         }
         let half = outline.width / 2.0;
         let (left, top) = (outline.bounds.x + half, outline.bounds.y + half);
-        let (right, bottom) = (outline.bounds.x + outline.bounds.width - half, outline.bounds.y + outline.bounds.height - half);
-        let radius = (outline.radius - half).clamp(0.0, ((right - left).min(bottom - top) / 2.0).max(0.0));
+        let (right, bottom) = (
+            outline.bounds.x + outline.bounds.width - half,
+            outline.bounds.y + outline.bounds.height - half,
+        );
+        let radius =
+            (outline.radius - half).clamp(0.0, ((right - left).min(bottom - top) / 2.0).max(0.0));
         let middle = (left + right) / 2.0;
         let corner = |x: f32, y: f32| D2D1_ARC_SEGMENT {
             point: Vector2 { X: x, Y: y },
-            size: D2D_SIZE_F { width: radius, height: radius },
+            size: D2D_SIZE_F {
+                width: radius,
+                height: radius,
+            },
             rotationAngle: 0.0,
             sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
             arcSize: D2D1_ARC_SIZE_SMALL,
@@ -459,7 +540,8 @@ impl Painter {
                 sink.AddLine(point(left, top + radius));
                 sink.AddArc(&corner(left + radius, top));
                 sink.AddLine(point(middle, top));
-                let straight = 2.0 * (right - left - 2.0 * radius) + 2.0 * (bottom - top - 2.0 * radius);
+                let straight =
+                    2.0 * (right - left - 2.0 * radius) + 2.0 * (bottom - top - 2.0 * radius);
                 straight + std::f32::consts::TAU * radius
             };
             sink.EndFigure(D2D1_FIGURE_END_OPEN);
@@ -468,16 +550,29 @@ impl Painter {
             let (dashes, cap) = match outline.dash {
                 Some(dash) => (vec![dash, dash * 0.8], D2D1_CAP_STYLE_FLAT),
                 None if outline.fraction >= 0.999 => (Vec::new(), D2D1_CAP_STYLE_FLAT),
-                None => (vec![around * outline.fraction / outline.width, around / outline.width + 4.0], D2D1_CAP_STYLE_ROUND),
+                None => (
+                    vec![
+                        around * outline.fraction / outline.width,
+                        around / outline.width + 4.0,
+                    ],
+                    D2D1_CAP_STYLE_ROUND,
+                ),
             };
             let properties = D2D1_STROKE_STYLE_PROPERTIES {
                 startCap: cap,
                 endCap: cap,
                 dashCap: cap,
-                dashStyle: if dashes.is_empty() { Default::default() } else { D2D1_DASH_STYLE_CUSTOM },
+                dashStyle: if dashes.is_empty() {
+                    Default::default()
+                } else {
+                    D2D1_DASH_STYLE_CUSTOM
+                },
                 ..Default::default()
             };
-            let stroke = factory.CreateStrokeStyle(&properties, (!dashes.is_empty()).then_some(dashes.as_slice()))?;
+            let stroke = factory.CreateStrokeStyle(
+                &properties,
+                (!dashes.is_empty()).then_some(dashes.as_slice()),
+            )?;
             let [r, g, b, a] = outline.color;
             let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a }, None)?;
             dc.DrawGeometry(&path, &brush, outline.width, &stroke);
@@ -489,21 +584,58 @@ impl Painter {
     /// between them make a code harder for a camera to read.
     unsafe fn draw_code(&self, dc: &ID2D1DeviceContext, run: &CodeRun) -> Result<()> {
         let modules = run.code.size() + QUIET_ZONE * 2;
-        let module = (run.bounds.width.min(run.bounds.height) / modules as f32).floor().max(1.0);
+        let module = (run.bounds.width.min(run.bounds.height) / modules as f32)
+            .floor()
+            .max(1.0);
         let side = module * modules as f32;
         let left = (run.bounds.x + (run.bounds.width - side) / 2.0).round();
         let top = (run.bounds.y + (run.bounds.height - side) / 2.0).round();
         unsafe {
-            let paper = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
-            let card = Bounds { x: left, y: top, width: side, height: side }.rect();
-            dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: card, radiusX: module * 1.5, radiusY: module * 1.5 }, &paper);
-            let ink = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, None)?;
+            let paper = dc.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
+            let card = Bounds {
+                x: left,
+                y: top,
+                width: side,
+                height: side,
+            }
+            .rect();
+            dc.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: card,
+                    radiusX: module * 1.5,
+                    radiusY: module * 1.5,
+                },
+                &paper,
+            );
+            let ink = dc.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
             dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
             for y in 0..run.code.size() {
                 let row_top = top + (QUIET_ZONE + y) as f32 * module;
                 for (start, length) in run.code.runs(y) {
                     let x = left + (QUIET_ZONE + start) as f32 * module;
-                    let rect = Bounds { x, y: row_top, width: length as f32 * module, height: module }.rect();
+                    let rect = Bounds {
+                        x,
+                        y: row_top,
+                        width: length as f32 * module,
+                        height: module,
+                    }
+                    .rect();
                     dc.FillRectangle(&rect, &ink);
                 }
             }
@@ -513,16 +645,39 @@ impl Painter {
     }
 
     unsafe fn draw_ring(&self, dc: &ID2D1DeviceContext, ring: &RingRun) -> Result<()> {
-        let center = Vector2 { X: ring.center_x, Y: ring.center_y };
-        let full = D2D1_ELLIPSE { point: center, radiusX: ring.radius, radiusY: ring.radius };
+        let center = Vector2 {
+            X: ring.center_x,
+            Y: ring.center_y,
+        };
+        let full = D2D1_ELLIPSE {
+            point: center,
+            radiusX: ring.radius,
+            radiusY: ring.radius,
+        };
         unsafe {
             // The track fades with the ring, so a ring on its way out leaves nothing.
             let [r, g, b] = ring.track_color.unwrap_or(super::tokens::RING_TRACK);
-            let track = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a: ring.opacity }, None)?;
+            let track = dc.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r,
+                    g,
+                    b,
+                    a: ring.opacity,
+                },
+                None,
+            )?;
             dc.DrawEllipse(&full, &track, ring.width, None);
 
             let [r, g, b] = super::tokens::PRIMARY;
-            let white = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a: ring.opacity }, None)?;
+            let white = dc.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r,
+                    g,
+                    b,
+                    a: ring.opacity,
+                },
+                None,
+            )?;
             if ring.fraction >= 0.999 {
                 dc.DrawEllipse(&full, &white, ring.width, None);
                 return Ok(());
@@ -531,7 +686,10 @@ impl Painter {
                 return Ok(());
             }
             let angle = ring.fraction * std::f32::consts::TAU;
-            let top = Vector2 { X: center.X, Y: center.Y - ring.radius };
+            let top = Vector2 {
+                X: center.X,
+                Y: center.Y - ring.radius,
+            };
             let end = Vector2 {
                 X: center.X + ring.radius * angle.sin(),
                 Y: center.Y - ring.radius * angle.cos(),
@@ -542,10 +700,17 @@ impl Painter {
             sink.BeginFigure(top, D2D1_FIGURE_BEGIN_HOLLOW);
             sink.AddArc(&D2D1_ARC_SEGMENT {
                 point: end,
-                size: D2D_SIZE_F { width: ring.radius, height: ring.radius },
+                size: D2D_SIZE_F {
+                    width: ring.radius,
+                    height: ring.radius,
+                },
                 rotationAngle: 0.0,
                 sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-                arcSize: if ring.fraction > 0.5 { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
+                arcSize: if ring.fraction > 0.5 {
+                    D2D1_ARC_SIZE_LARGE
+                } else {
+                    D2D1_ARC_SIZE_SMALL
+                },
             });
             sink.EndFigure(D2D1_FIGURE_END_OPEN);
             sink.Close()?;
@@ -569,8 +734,18 @@ impl Painter {
                 image.x - (size.width - image.size) / 2.0,
                 image.y - (size.height - image.size) / 2.0,
             ));
-            let rect = Bounds { x: image.x, y: image.y, width: image.size, height: image.size }.rect();
-            let rounded = D2D1_ROUNDED_RECT { rect, radiusX: image.radius, radiusY: image.radius };
+            let rect = Bounds {
+                x: image.x,
+                y: image.y,
+                width: image.size,
+                height: image.size,
+            }
+            .rect();
+            let rounded = D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: image.radius,
+                radiusY: image.radius,
+            };
             dc.FillRoundedRectangle(&rounded, &brush);
         }
         Ok(())
@@ -586,7 +761,11 @@ impl Painter {
             return Ok(cached.bitmap.clone());
         }
         let bitmap = self.decode(dc, image.encoded, size)?;
-        *decoded = Some(DecodedImage { encoded: image.encoded.clone(), size, bitmap: bitmap.clone() });
+        *decoded = Some(DecodedImage {
+            encoded: image.encoded.clone(),
+            size,
+            bitmap: bitmap.clone(),
+        });
         Ok(bitmap)
     }
 
@@ -610,7 +789,12 @@ impl Painter {
             let scaled_height = (height as f64 * scale).round().max(1.0) as u32;
 
             let scaler = self.wic.CreateBitmapScaler()?;
-            scaler.Initialize(&frame, scaled_width, scaled_height, WICBitmapInterpolationModeHighQualityCubic)?;
+            scaler.Initialize(
+                &frame,
+                scaled_width,
+                scaled_height,
+                WICBitmapInterpolationModeHighQualityCubic,
+            )?;
 
             let converter = self.wic.CreateFormatConverter()?;
             converter.Initialize(
@@ -626,7 +810,11 @@ impl Painter {
     }
 
     fn format(&self, run: &TextRun) -> Result<IDWriteTextFormat> {
-        let weight = if run.bold { DWRITE_FONT_WEIGHT_SEMI_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL };
+        let weight = if run.bold {
+            DWRITE_FONT_WEIGHT_SEMI_BOLD
+        } else {
+            DWRITE_FONT_WEIGHT_NORMAL
+        };
         let family = match run.font {
             Font::Text => TEXT_FONT,
             Font::Icons => ICON_FONT,

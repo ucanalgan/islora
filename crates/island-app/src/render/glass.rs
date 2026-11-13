@@ -39,7 +39,11 @@ struct Effect {
 
 impl IGraphicsEffect_Impl for Effect_Impl {
     fn Name(&self) -> Result<HSTRING> {
-        Ok(self.name.lock().unwrap_or_else(PoisonError::into_inner).clone())
+        Ok(self
+            .name
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone())
     }
 
     fn SetName(&self, name: &HSTRING) -> Result<()> {
@@ -69,11 +73,17 @@ impl IGraphicsEffectD2D1Interop_Impl for Effect_Impl {
     }
 
     fn GetProperty(&self, index: u32) -> Result<IPropertyValue> {
-        self.properties.get(index as usize).cloned().ok_or_else(|| E_BOUNDS.into())
+        self.properties
+            .get(index as usize)
+            .cloned()
+            .ok_or_else(|| E_BOUNDS.into())
     }
 
     fn GetSource(&self, index: u32) -> Result<IGraphicsEffectSource> {
-        self.sources.get(index as usize).cloned().ok_or_else(|| E_BOUNDS.into())
+        self.sources
+            .get(index as usize)
+            .cloned()
+            .ok_or_else(|| E_BOUNDS.into())
     }
 
     fn GetSourceCount(&self) -> Result<u32> {
@@ -81,8 +91,18 @@ impl IGraphicsEffectD2D1Interop_Impl for Effect_Impl {
     }
 }
 
-fn effect(id: GUID, properties: Vec<IPropertyValue>, sources: Vec<IGraphicsEffectSource>) -> Result<IGraphicsEffectSource> {
-    let effect: IGraphicsEffect = Effect { id, properties, sources, name: Mutex::new(HSTRING::new()) }.into();
+fn effect(
+    id: GUID,
+    properties: Vec<IPropertyValue>,
+    sources: Vec<IGraphicsEffectSource>,
+) -> Result<IGraphicsEffectSource> {
+    let effect: IGraphicsEffect = Effect {
+        id,
+        properties,
+        sources,
+        name: Mutex::new(HSTRING::new()),
+    }
+    .into();
     effect.cast()
 }
 
@@ -99,16 +119,35 @@ fn saturation_matrix(saturation: f32) -> [f32; 20] {
     let rest = 1.0 - saturation;
     let [red, green, blue] = [0.2126 * rest, 0.7152 * rest, 0.0722 * rest];
     [
-        red + saturation, red, red, 0.0,
-        green, green + saturation, green, 0.0,
-        blue, blue, blue + saturation, 0.0,
-        0.0, 0.0, 0.0, 1.0,
-        0.0, 0.0, 0.0, 0.0,
+        red + saturation,
+        red,
+        red,
+        0.0,
+        green,
+        green + saturation,
+        green,
+        0.0,
+        blue,
+        blue,
+        blue + saturation,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     ]
 }
 
-pub fn brush(compositor: &Compositor, backdrop: &CompositionBackdropBrush) -> Result<CompositionBrush> {
-    let behind: IGraphicsEffectSource = CompositionEffectSourceParameter::Create(h!("backdrop"))?.cast()?;
+pub fn brush(
+    compositor: &Compositor,
+    backdrop: &CompositionBackdropBrush,
+) -> Result<CompositionBrush> {
+    let behind: IGraphicsEffectSource =
+        CompositionEffectSourceParameter::Create(h!("backdrop"))?.cast()?;
     let vivid = effect(
         CLSID_D2D1ColorMatrix,
         vec![
@@ -121,7 +160,11 @@ pub fn brush(compositor: &Compositor, backdrop: &CompositionBackdropBrush) -> Re
     let level = effect(CLSID_D2D1Flood, vec![floats(&LEVEL)?], Vec::new())?;
     // The colour of what is behind, at the brightness of the level. The blend
     // takes its colour from the first input and its brightness from the second.
-    let blend = effect(CLSID_D2D1Blend, vec![number(D2D1_BLEND_MODE_LUMINOSITY.0 as u32)?], vec![level, vivid])?;
+    let blend = effect(
+        CLSID_D2D1Blend,
+        vec![number(D2D1_BLEND_MODE_LUMINOSITY.0 as u32)?],
+        vec![level, vivid],
+    )?;
     let factory = compositor.CreateEffectFactory(&blend.cast::<IGraphicsEffect>()?)?;
     let brush = factory.CreateBrush()?;
     brush.SetSourceParameter(h!("backdrop"), backdrop)?;

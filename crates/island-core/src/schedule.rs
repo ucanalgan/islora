@@ -99,7 +99,10 @@ mod tests {
     #[test]
     fn shows_time_and_place() {
         assert_eq!(event(0).activity(0).detail, "19:30 · A-12");
-        let without = Upcoming { location: None, ..event(0) };
+        let without = Upcoming {
+            location: None,
+            ..event(0)
+        };
         assert_eq!(without.activity(0).detail, "19:30");
     }
 
@@ -119,6 +122,9 @@ mod tests {
     #[test]
     fn an_alert_counts_what_else_starts_before_saying_where() {
         assert_eq!(event(0).starting_alert(0, 0).detail, "Başlıyor · A-12");
-        assert_eq!(event(0).starting_alert(0, 1).detail, "Başlıyor · +1 etkinlik · A-12");
+        assert_eq!(
+            event(0).starting_alert(0, 1).detail,
+            "Başlıyor · +1 etkinlik · A-12"
+        );
     }
 }

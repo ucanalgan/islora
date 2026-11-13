@@ -69,7 +69,10 @@ pub fn reach(settings: Profile, rules: &[Rule], profile: u32) -> Reach {
         return Reach::Blocked;
     }
     let mine: Vec<&Rule> = rules.iter().filter(|rule| rule.speaks_of_tcp()).collect();
-    let here: Vec<&&Rule> = mine.iter().filter(|rule| rule.profiles & profile != 0).collect();
+    let here: Vec<&&Rule> = mine
+        .iter()
+        .filter(|rule| rule.profiles & profile != 0)
+        .collect();
     if here.iter().any(|rule| !rule.allow) {
         return Reach::Blocked;
     }
@@ -78,23 +81,40 @@ pub fn reach(settings: Profile, rules: &[Rule], profile: u32) -> Reach {
     }
     // Rules for other networks only: the user allowed it elsewhere, not here,
     // and Windows does not ask again.
-    if mine.is_empty() { Reach::Asks } else { Reach::Blocked }
+    if mine.is_empty() {
+        Reach::Asks
+    } else {
+        Reach::Blocked
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ON: Profile = Profile { enabled: true, block_all: false, default_allow: false };
+    const ON: Profile = Profile {
+        enabled: true,
+        block_all: false,
+        default_allow: false,
+    };
 
     fn rule(allow: bool, profiles: u32) -> Rule {
-        Rule { inbound: true, allow, enabled: true, profiles, protocol: TCP }
+        Rule {
+            inbound: true,
+            allow,
+            enabled: true,
+            profiles,
+            protocol: TCP,
+        }
     }
 
     #[test]
     fn allowed_on_this_network_gets_through() {
         assert_eq!(reach(ON, &[rule(true, PUBLIC)], PUBLIC), Reach::Open);
-        assert_eq!(reach(ON, &[rule(true, PRIVATE | PUBLIC)], PRIVATE), Reach::Open);
+        assert_eq!(
+            reach(ON, &[rule(true, PRIVATE | PUBLIC)], PRIVATE),
+            Reach::Open
+        );
     }
 
     #[test]
@@ -104,7 +124,10 @@ mod tests {
 
     #[test]
     fn a_blocking_rule_wins() {
-        assert_eq!(reach(ON, &[rule(true, PUBLIC), rule(false, PUBLIC)], PUBLIC), Reach::Blocked);
+        assert_eq!(
+            reach(ON, &[rule(true, PUBLIC), rule(false, PUBLIC)], PUBLIC),
+            Reach::Blocked
+        );
     }
 
     #[test]
@@ -114,21 +137,48 @@ mod tests {
 
     #[test]
     fn rules_that_do_not_apply_are_left_out() {
-        let udp = Rule { protocol: 17, ..rule(false, PUBLIC) };
-        let off = Rule { enabled: false, ..rule(false, PUBLIC) };
-        let outbound = Rule { inbound: false, ..rule(false, PUBLIC) };
-        assert_eq!(reach(ON, &[udp, off, outbound, rule(true, PUBLIC)], PUBLIC), Reach::Open);
-        let any = Rule { protocol: ANY_PROTOCOL, ..rule(true, PUBLIC) };
+        let udp = Rule {
+            protocol: 17,
+            ..rule(false, PUBLIC)
+        };
+        let off = Rule {
+            enabled: false,
+            ..rule(false, PUBLIC)
+        };
+        let outbound = Rule {
+            inbound: false,
+            ..rule(false, PUBLIC)
+        };
+        assert_eq!(
+            reach(ON, &[udp, off, outbound, rule(true, PUBLIC)], PUBLIC),
+            Reach::Open
+        );
+        let any = Rule {
+            protocol: ANY_PROTOCOL,
+            ..rule(true, PUBLIC)
+        };
         assert_eq!(reach(ON, &[any], PUBLIC), Reach::Open);
     }
 
     #[test]
     fn the_profile_settings_come_first() {
-        let off = Profile { enabled: false, ..ON };
+        let off = Profile {
+            enabled: false,
+            ..ON
+        };
         assert_eq!(reach(off, &[rule(false, PUBLIC)], PUBLIC), Reach::Open);
-        let shields_up = Profile { block_all: true, ..ON };
-        assert_eq!(reach(shields_up, &[rule(true, PUBLIC)], PUBLIC), Reach::Blocked);
-        let open_door = Profile { default_allow: true, ..ON };
+        let shields_up = Profile {
+            block_all: true,
+            ..ON
+        };
+        assert_eq!(
+            reach(shields_up, &[rule(true, PUBLIC)], PUBLIC),
+            Reach::Blocked
+        );
+        let open_door = Profile {
+            default_allow: true,
+            ..ON
+        };
         assert_eq!(reach(open_door, &[], PUBLIC), Reach::Open);
     }
 
