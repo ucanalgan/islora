@@ -210,6 +210,7 @@ pub struct Scene {
     pub icon: Option<Icon>,
     pub level: Option<u8>,
     pub indicator_alert: bool,
+    pub indicator_context: Option<island_core::activity::IndicatorContext>,
     /// For an open timer view: whether it runs, and whether it has buttons.
     pub timer: Option<TimerView>,
     pub home: Option<HomeScene>,
@@ -309,6 +310,7 @@ impl Scene {
                 icon: None,
                 level: None,
                 indicator_alert: false,
+                indicator_context: None,
                 timer: None,
                 home,
                 hideable: false,
@@ -364,6 +366,7 @@ impl Scene {
             icon: activity.icon,
             level: activity.level.or(activity.indicator_percent),
             indicator_alert: activity.indicator_percent.is_some(),
+            indicator_context: activity.indicator_context.clone(),
             timer: activity.timer,
             home: None,
             hideable: activity.kind == Kind::Upcoming,
@@ -618,7 +621,10 @@ impl Scene {
         } else {
             let label = if self.title.is_empty() { &self.leading } else { &self.title };
             painting.texts.push(canvas.text(label, canvas.rect(layout.title), 14.0, true, 1.0, Align::Leading));
-            let context = match self.icon { Some(Icon::Muted) => "Sessize alındı", Some(Icon::Volume) => "Sistem sesi", Some(Icon::Brightness) => "Ekran parlaklığı", Some(Icon::Charging) => "Harici güç", Some(Icon::Battery) => "Pil gücü", Some(Icon::BatteryLow) => "Pil seviyesi düşük", _ => "" };
+            let fallback = match self.icon { Some(Icon::Muted) => "Sessize alındı", Some(Icon::Volume) => "Sistem sesi", Some(Icon::Brightness) => "Ekran parlaklığı", Some(Icon::Charging) => "Harici güç", Some(Icon::Battery) => "Pil gücü", Some(Icon::BatteryLow) => "Pil seviyesi düşük", _ => "" };
+            let context = if self.density == UiDensity::Detailed {
+                self.indicator_context.as_ref().and_then(|context| context.subtitle.as_deref()).unwrap_or(fallback)
+            } else { fallback };
             painting.texts.push(canvas.text(context, canvas.rect(layout.detail), 11.0, false, 0.65, Align::Leading));
             let track = layout.progress;
             painting.shapes.push(ShapeRun { bounds: canvas.rect(track), radius: track.height * canvas.scale / 2.0, fill: with_alpha(super::tokens::INDICATOR_TRACK, 1.0), border: None });
@@ -627,15 +633,9 @@ impl Scene {
                 painting.shapes.push(ShapeRun { bounds: canvas.bounds(track.x, track.y, width, track.height), radius: (width.min(track.height) / 2.0) * canvas.scale, fill: with_alpha(super::tokens::PRIMARY, 1.0), border: None });
             }
             if self.density == UiDensity::Detailed {
-                let chip = match self.icon {
-                    Some(Icon::Muted) => Some("Sessiz"),
-                    Some(Icon::Volume) => Some("Ses açık"),
-                    Some(Icon::Charging) => Some("Güç bağlı"),
-                    Some(Icon::Battery) => Some("Pilde"),
-                    _ => None,
-                };
-                if let Some(label) = chip {
-                    let bounds = canvas.bounds(20.0, 79.0, 76.0, 14.0);
+                let chips = self.indicator_context.as_ref().map_or(&[][..], |context| context.chips.as_slice());
+                for (label, rect) in chips.iter().zip(island_core::layout::indicator_chip_bounds(chips)) {
+                    let bounds = canvas.rect(rect);
                     painting.shapes.push(ShapeRun { bounds, radius: 7.0 * canvas.scale, fill: with_alpha(super::tokens::SURFACE, 1.0), border: None });
                     painting.texts.push(canvas.text(label, bounds, 9.0, false, 0.85, Align::Center));
                 }
@@ -1518,6 +1518,7 @@ mod tests {
             icon: None,
             level: None,
             indicator_alert: false,
+            indicator_context: None,
             timer: None,
             home: None,
             hideable: false,
@@ -1637,6 +1638,7 @@ mod tests {
         scene.title = "Ses".into();
         scene.detail = "%75".into();
         scene.icon = Some(Icon::Volume);
+        scene.indicator_context = Some(island_core::activity::IndicatorContext { subtitle: None, chips: vec!["Ses açık".into()] });
         for density in UiDensity::ALL {
             scene.density = density;
             for value in [0, 1, 25, 50, 75, 99, 100, 255] {
@@ -1664,6 +1666,34 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn detailed_indicator_clips_long_context_and_limits_chips() {
+        let mut scene = playing_music(false);
+        scene.presentation = Presentation::Level;
+        scene.media = None;
+        scene.density = UiDensity::Detailed;
+        scene.title = "Ses".into();
+        scene.detail = "%42".into();
+        scene.level = Some(42);
+        let long_name = "A long output device name that cannot fit in the indicator panel";
+        scene.indicator_context = Some(island_core::activity::IndicatorContext {
+            subtitle: Some(long_name.into()),
+            chips: vec!["first very long context label".into(), "second long label".into(), "not displayed".into()],
+        });
+        let layout = UiDensity::Detailed.level_layout();
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let pill = layout.pill.scaled(scale);
+            let painting = scene.painting(pill, scale, layout.pill.radius, false);
+            let subtitle = painting.texts.iter().find(|run| run.text == long_name).unwrap();
+            assert!(subtitle.bounds.x + subtitle.bounds.width <= layout.value.x * scale);
+            assert!(!painting.texts.iter().any(|run| run.text == "not displayed"));
+            let chips: Vec<_> = painting.texts.iter().filter(|run| run.text.contains("label")).collect();
+            assert_eq!(chips.len(), 2);
+            assert!(chips[0].bounds.x + chips[0].bounds.width < chips[1].bounds.x);
+            assert!(chips[1].bounds.x + chips[1].bounds.width <= pill.width);
         }
     }
 

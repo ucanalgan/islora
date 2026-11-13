@@ -2306,7 +2306,13 @@ impl App {
         if cfg!(debug_assertions) {
             eprintln!("{} ms: {indicator:?}", self.now());
         }
-        self.island.upsert(indicator.into_activity(self.now()));
+        let is_volume = matches!(&indicator, Indicator::Volume { .. });
+        let mut activity = indicator.into_activity(self.now());
+        if is_volume && let Some(name) = self.tracker.audio_output()
+            && let Some(context) = &mut activity.indicator_context {
+            context.subtitle = Some(name.to_owned());
+        }
+        self.island.upsert(activity);
         self.refresh();
     }
 
@@ -2320,8 +2326,13 @@ impl App {
             return;
         }
         let name = audio.follow_default_device();
-        if let Some(indicator) = name.and_then(|name| self.tracker.audio_output_changed(name)) {
-            self.show_indicator(indicator);
+        match name {
+            Some(name) => {
+                if let Some(indicator) = self.tracker.audio_output_changed(name) {
+                    self.show_indicator(indicator);
+                }
+            }
+            None => self.tracker.clear_audio_output(),
         }
     }
 

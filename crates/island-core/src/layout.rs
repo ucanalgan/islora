@@ -21,6 +21,25 @@ impl UiDensity {
     }
 }
 
+/// Up to two compact chips within the Detailed panel's inner width.
+pub fn indicator_chip_bounds(labels: &[String]) -> Vec<crate::geometry::Rect> {
+    use crate::geometry::Rect;
+    let count = labels.len().min(2);
+    if count == 0 { return Vec::new(); }
+    let left = 20.0;
+    let available = UiDensity::Detailed.level_layout().pill.width - left * 2.0;
+    let gap = 8.0;
+    let limit = (available - gap * (count - 1) as f32) / count as f32;
+    let mut x = left;
+    labels.iter().take(count).map(|label| {
+        // An estimate keeps short chips compact; DirectWrite bounds long text.
+        let width = (label.chars().count() as f32 * 5.3 + 20.0).clamp(52.0, limit);
+        let rect = Rect { x, y: 79.0, width, height: 14.0 };
+        x += width + gap;
+        rect
+    }).collect()
+}
+
 /// Level indicator geometry in logical pixels, shared by the compositor and painter.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LevelLayout {
@@ -519,6 +538,25 @@ impl Pill {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_chips_are_bounded_and_never_overlap() {
+        assert!(indicator_chip_bounds(&[]).is_empty());
+        for count in [1, 2, 3, 100] {
+            let labels = vec!["Long context label to be clipped".to_owned(); count];
+            let chips = indicator_chip_bounds(&labels);
+            assert_eq!(chips.len(), count.min(2));
+            let panel = UiDensity::Detailed.level_layout();
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                for chip in &chips {
+                    assert!(chip.x >= 0.0 && chip.y >= panel.progress.y + panel.progress.height);
+                    assert!((chip.x + chip.width) * scale <= panel.pill.width * scale);
+                    assert!((chip.y + chip.height) * scale <= panel.pill.height * scale);
+                }
+                if chips.len() == 2 { assert!(chips[0].x + chips[0].width < chips[1].x); }
+            }
+        }
+    }
 
     #[test]
     fn indicator_layouts_fit_and_keep_content_separate_at_common_scales() {

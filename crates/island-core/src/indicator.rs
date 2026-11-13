@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::activity::{Activity, Icon, Kind, Millis};
+use crate::activity::{Activity, Icon, IndicatorContext, Kind, Millis};
 
 /// A level stays briefly, since it usually changes in a burst of steps.
 const LEVEL_MS: Millis = 1_800;
@@ -98,7 +98,17 @@ impl Indicator {
     }
 
     pub fn into_activity(self, now: Millis) -> Activity {
-        match self {
+        let context = match &self {
+            Indicator::Volume { muted, .. } => Some(IndicatorContext {
+                subtitle: None,
+                chips: vec![if *muted { "Sessiz" } else { "Ses açık" }.into()],
+            }),
+            Indicator::PluggedIn { .. } => Some(IndicatorContext { subtitle: Some("Harici güç".into()), chips: vec!["Güç bağlı".into()] }),
+            Indicator::Unplugged { .. } => Some(IndicatorContext { subtitle: Some("Pil gücü".into()), chips: vec!["Pilde".into()] }),
+            Indicator::LowBattery { .. } => Some(IndicatorContext { subtitle: Some("Pil seviyesi düşük".into()), chips: Vec::new() }),
+            _ => None,
+        };
+        let mut activity = match self {
             Indicator::Screenshot { path, image } => Activity {
                 preview: image,
                 file: Some(path),
@@ -173,7 +183,9 @@ impl Indicator {
             Indicator::BluetoothDisconnected { name } => {
                 notice(Icon::Bluetooth, "Bağlantı kesildi", name, now)
             }
-        }
+        };
+        activity.indicator_context = context;
+        activity
     }
 }
 
@@ -274,6 +286,14 @@ impl SystemTracker {
     pub fn audio_output_changed(&mut self, name: String) -> Option<Indicator> {
         let previous = self.audio_output.replace(name.clone())?;
         (previous != name).then_some(Indicator::AudioOutput { name })
+    }
+
+    pub fn audio_output(&self) -> Option<&str> {
+        self.audio_output.as_deref().filter(|name| !name.is_empty())
+    }
+
+    pub fn clear_audio_output(&mut self) {
+        self.audio_output = None;
     }
 
     /// A new resolution reports the same way, with the same number of screens.
@@ -424,6 +444,27 @@ pub fn capability_app_name(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_context_clears_when_the_device_is_no_longer_known() {
+        let mut tracker = SystemTracker::new();
+        assert_eq!(tracker.audio_output(), None);
+        tracker.audio_output_changed("Speakers".into());
+        assert_eq!(tracker.audio_output(), Some("Speakers"));
+        tracker.clear_audio_output();
+        assert_eq!(tracker.audio_output(), None);
+        assert_eq!(tracker.audio_output_changed("New device".into()), None);
+    }
+
+    #[test]
+    fn volume_context_describes_the_reported_mute_state() {
+        for muted in [true, false] {
+            let activity = Indicator::Volume { percent: 40, muted }.into_activity(0);
+            let context = activity.indicator_context.unwrap();
+            assert_eq!(context.subtitle, None);
+            assert_eq!(context.chips, [if muted { "Sessiz" } else { "Ses açık" }]);
+        }
+    }
 
     #[test]
     fn a_power_change_without_a_battery_reading_does_not_invent_a_percentage() {

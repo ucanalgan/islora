@@ -1,0 +1,35 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Formatting
+        run: cargo fmt --all -- --check
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Release build
+        run: cargo build --release

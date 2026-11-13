@@ -86,6 +86,13 @@ pub struct TimerView {
     pub left: Option<u16>,
 }
 
+/// Confirmed optional context for an indicator, never a second event source.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IndicatorContext {
+    pub subtitle: Option<String>,
+    pub chips: Vec<String>,
+}
+
 /// One thing the island can show. There is at most one activity per [`Kind`]:
 /// a newer one replaces the older.
 #[derive(Clone, Debug, PartialEq)]
@@ -108,6 +115,7 @@ pub struct Activity {
     pub level: Option<u8>,
     /// An informational battery percentage; unlike `level`, it does not alter scheduling.
     pub indicator_percent: Option<u8>,
+    pub indicator_context: Option<IndicatorContext>,
     /// From this moment on it outranks everything that is not an interruption.
     pub urgent_at: Option<Millis>,
     /// How it looks as a bubble, unless derived from its media.
@@ -139,6 +147,7 @@ impl Activity {
             icon: None,
             level: None,
             indicator_percent: None,
+            indicator_context: None,
             urgent_at: None,
             badge: None,
             timer: None,
