@@ -1,6 +1,6 @@
 //! The settings file: one `key = "value"` per line, `#` for comments.
 
-use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout, WaveStyle};
+use crate::layout::{IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout, UiDensity, WaveStyle};
 
 const LONGEST_PRESET_MINUTES: u64 = 720;
 
@@ -75,6 +75,11 @@ pub fn read_reduced_motion(text: &str) -> bool {
     read_value(text, "reduced_motion").as_deref() == Some("on")
 }
 
+pub fn read_ui_density(text: &str) -> UiDensity {
+    let value = read_value(text, "ui_density");
+    UiDensity::ALL.into_iter().find(|density| value.as_deref() == Some(density.setting())).unwrap_or_default()
+}
+
 pub fn read_wave_style(text: &str) -> WaveStyle {
     let value = read_value(text, "wave_style");
     WaveStyle::ALL.into_iter().find(|style| value.as_deref() == Some(style.setting())).unwrap_or_default()
@@ -129,6 +134,19 @@ pub fn read_task_layout(text: &str) -> TaskLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn density_defaults_and_round_trips_without_changing_existing_settings() {
+        let old = "task_layout = \"shared\"\ntimer_presets = \"3, 7, 20, 30\"\n";
+        assert_eq!(read_ui_density(old), UiDensity::Balanced);
+        assert_eq!(read_ui_density("ui_density = \"invalid\""), UiDensity::Balanced);
+        for density in UiDensity::ALL {
+            let updated = write_value(old, "ui_density", density.setting());
+            assert_eq!(read_ui_density(&updated), density);
+            assert_eq!(read_task_layout(&updated), TaskLayout::Shared);
+            assert_eq!(read_presets(&updated), Some([3, 7, 20, 30]));
+        }
+    }
 
     #[test]
     fn starting_with_windows_is_undecided_until_chosen() {

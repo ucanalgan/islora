@@ -9,7 +9,7 @@ use island_core::layout::{
     MODE_TAB_Y, MediaButton, PRESET_HEIGHT, PRESET_WIDTH, PRESET_Y, PROGRESS_HEIGHT,
     PROGRESS_WIDTH, PROGRESS_X, PROGRESS_Y, SETTINGS_SHORTCUT_SIZE, SETTINGS_SHORTCUT_X,
     SETTINGS_SHORTCUT_Y, STRIP_HEIGHT, StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS, QUICK_SHORTCUT,
-    TIMER_RING_RADIUS, TIMER_RING_WIDTH, TIMER_RING_X, TIMER_RING_Y, TimerButton, preset_center_x,
+    TIMER_RING_RADIUS, TIMER_RING_WIDTH, TIMER_RING_X, TIMER_RING_Y, TimerButton, UiDensity, preset_center_x,
 };
 use island_core::convert::Target;
 use island_core::drop::{
@@ -198,6 +198,7 @@ pub enum Companion {
 
 #[derive(Clone, PartialEq)]
 pub struct Scene {
+    pub density: UiDensity,
     pub presentation: Presentation,
     pub wave_visible: bool,
     pub clock: Option<String>,
@@ -295,6 +296,7 @@ impl Scene {
         let Some(activity) = &frame.activity else {
             let home = frame.home.as_ref().map(|home| HomeScene::new(home, clock));
             return Self {
+                density: UiDensity::default(),
                 presentation,
                 wave_visible,
                 clock: (home.is_none() && frame.panel.is_none()).then(|| clock.time.clone()),
@@ -348,6 +350,7 @@ impl Scene {
             _ => None,
         });
         Self {
+            density: UiDensity::default(),
             presentation,
             wave_visible,
             clock: None,
@@ -486,7 +489,7 @@ impl Scene {
     /// `corner` is how round the pill's corners look, in DIPs.
     /// `notch` says the top edge joins the screen's.
     pub fn painting(&self, pill: Pill, scale: f32, corner: f32, notch: bool) -> Painting<'_> {
-        let canvas = Canvas { scale, width: pill.width / scale, height: pill.height / scale, corner, notch };
+        let canvas = Canvas { scale, width: pill.width / scale, height: pill.height / scale, corner, notch, density: self.density };
         if let Some(clock) = &self.clock {
             let mut painting = Painting::default();
             let bounds = canvas.bounds(0.0, 0.0, canvas.width, canvas.height);
@@ -564,8 +567,13 @@ impl Scene {
         canvas.artwork(&mut painting, media, inset, inset, COMPACT_ART, radius);
 
         let width = canvas.width - COMPACT_ART_TEXT_X - compact_media_end(media, self.companion.as_ref(), self.wave_visible);
-        let bounds = canvas.bounds(COMPACT_ART_TEXT_X, 0.0, width, canvas.height);
-        painting.texts.push(canvas.text(&self.leading, bounds, COMPACT_TEXT_SIZE, true, 1.0, Align::Leading));
+        if self.density == UiDensity::Detailed && !self.detail.is_empty() {
+            painting.texts.push(canvas.text(&self.leading, canvas.bounds(COMPACT_ART_TEXT_X, 2.0, width, 17.0), 11.5, true, 1.0, Align::Leading));
+            painting.texts.push(canvas.text(&self.detail, canvas.bounds(COMPACT_ART_TEXT_X, 18.0, width, 15.0), 10.0, false, 0.7, Align::Leading));
+        } else {
+            let bounds = canvas.bounds(COMPACT_ART_TEXT_X, 0.0, width, canvas.height);
+            painting.texts.push(canvas.text(&self.leading, bounds, COMPACT_TEXT_SIZE, true, 1.0, Align::Leading));
+        }
         if let Some(Companion::Task(shown)) = &self.companion {
             // As far in from the end as the cover is from the start.
             let center_x = canvas.width - inset - COMPACT_ART / 2.0;
@@ -589,7 +597,10 @@ impl Scene {
         const LABEL_WIDTH: f32 = 42.0;
         let width = canvas.width - BAR_X - LABEL_WIDTH - 22.0;
         let filled = width * self.level.unwrap_or(0) as f32 / 100.0;
-        let top = (height - BAR_HEIGHT) / 2.0;
+        let top = if self.density == UiDensity::Detailed && !self.leading.is_empty() { height - 13.0 } else { (height - BAR_HEIGHT) / 2.0 };
+        if self.density == UiDensity::Detailed && !self.leading.is_empty() {
+            painting.texts.push(canvas.text(&self.leading, canvas.bounds(BAR_X, 4.0, width, 18.0), 10.5, false, 0.8, Align::Leading));
+        }
         painting.bars.push(BarRun { bounds: canvas.bounds(BAR_X, top, width, BAR_HEIGHT), opacity: 0.25 });
         if filled > 0.0 {
             painting.bars.push(BarRun { bounds: canvas.bounds(BAR_X, top, filled.max(BAR_HEIGHT), BAR_HEIGHT), opacity: 1.0 });
@@ -602,9 +613,10 @@ impl Scene {
 
     fn alert(&self, canvas: &Canvas) -> Painting<'_> {
         let mut painting = Painting::default();
-        let inset = (canvas.height - ALERT_ART) / 2.0;
+        let art = if self.density == UiDensity::Detailed { 36.0 } else { ALERT_ART };
+        let inset = (canvas.height - art) / 2.0;
         let left = match (&self.preview, self.icon) {
-            (Some(_), _) => inset + ALERT_ART + ALERT_ART_TEXT_GAP,
+            (Some(_), _) => inset + art + ALERT_ART_TEXT_GAP,
             (None, Some(_)) => 62.0,
             (None, None) => 28.0,
         };
@@ -613,7 +625,7 @@ impl Scene {
                 encoded,
                 x: inset * canvas.scale,
                 y: inset * canvas.scale,
-                size: ALERT_ART * canvas.scale,
+                size: art * canvas.scale,
                 radius: ALERT_ART_RADIUS * canvas.scale,
             });
         } else if let Some(icon) = self.icon {
@@ -796,8 +808,13 @@ impl Scene {
         let opacity = 1.0;
         let header_icon = self.icon.unwrap_or(Icon::Timer);
         let header = if header_icon == Icon::Focus { "Focus" } else { "Timer" };
-        painting.texts.push(canvas.icon(glyph(header_icon), canvas.bounds(18.0, 14.0, 20.0, 20.0), 15.0));
-        painting.texts.push(canvas.text(header, canvas.bounds(42.0, 14.0, 74.0, 20.0), 13.0, true, 1.0, Align::Leading));
+        if self.density != UiDensity::Minimal {
+            painting.texts.push(canvas.icon(glyph(header_icon), canvas.bounds(18.0, 14.0, 20.0, 20.0), 15.0));
+            painting.texts.push(canvas.text(header, canvas.bounds(42.0, 14.0, 74.0, 20.0), 13.0, true, 1.0, Align::Leading));
+        }
+        if self.density == UiDensity::Detailed && let Some(left) = timer.left {
+            painting.owned_labels.push((format!("{}%", left / 10), canvas.bounds(36.0, 130.0, 44.0, 20.0)));
+        }
         painting.rings.push(RingRun {
             center_x: TIMER_RING_X * canvas.scale,
             center_y: TIMER_RING_Y * canvas.scale,
@@ -845,7 +862,9 @@ impl Scene {
         const MARGIN: f32 = 30.0;
         let inner = canvas.width - MARGIN * 2.0;
         let label = canvas.bounds(MARGIN, 14.0, inner, 16.0);
-        painting.texts.push(canvas.text(&home.today, label, 11.5, false, 0.6, Align::Trailing));
+        if self.density != UiDensity::Minimal {
+            painting.texts.push(canvas.text(&home.today, label, 11.5, false, 0.6, Align::Trailing));
+        }
         match home.events.as_slice() {
             [] => {
                 let (title, detail) = match home.calendar {
@@ -1017,7 +1036,7 @@ fn music_strip<'a>(painting: &mut Painting<'a>, media: &'a MediaScene, text: &'a
 
 /// What the small bubble beside the pill shows.
 pub fn bubble_painting(bubble: &Bubble, size: f32, scale: f32) -> Painting<'_> {
-    let canvas = Canvas { scale, width: size / scale, height: size / scale, corner: size / scale / 2.0, notch: false };
+    let canvas = Canvas { scale, width: size / scale, height: size / scale, corner: size / scale / 2.0, notch: false, density: UiDensity::Balanced };
     let middle = canvas.width / 2.0;
     let mut painting = Painting::default();
     match bubble {
@@ -1099,6 +1118,9 @@ fn quick_controls_panel<'a>(view: &'a QuickControlsView, canvas: &Canvas) -> Pai
                 let y = 60.0 + index as f32 * 42.0;
                 painting.texts.push(canvas.text(&event.title, canvas.bounds(32.0, y, 220.0, 24.0), 14.0, true, 1.0, Align::Leading));
                 painting.texts.push(canvas.text(&event.when, canvas.bounds(252.0, y, 116.0, 24.0), 12.0, false, 0.7, Align::Trailing));
+                if canvas.density == UiDensity::Detailed && let Some(location) = event.location.as_deref().filter(|location| !location.is_empty()) {
+                    painting.texts.push(canvas.text(location, canvas.bounds(32.0, y + 23.0, 336.0, 16.0), 10.0, false, 0.7, Align::Leading));
+                }
             }
         }
         return painting;
@@ -1159,6 +1181,16 @@ fn quick_controls_panel<'a>(view: &'a QuickControlsView, canvas: &Canvas) -> Pai
         if let Some(state) = radio {
             let label = match state { RadioState::On => "On", RadioState::Off => "Off", RadioState::Unknown => "—" };
             painting.texts.push(canvas.text(label, canvas.bounds(area.x, area.y + area.height + 22.0, area.width, 14.0), 9.0, false, 0.6, Align::Center));
+        }
+        if canvas.density == UiDensity::Detailed {
+            let value = match control {
+                QuickControl::Volume => view.volume.map(|(level, muted)| if muted { "Muted".to_owned() } else { format!("{level}%") }),
+                QuickControl::Brightness => view.brightness.map(|level| format!("{level}%")),
+                _ => None,
+            };
+            if let Some(value) = value {
+                painting.owned_labels.push((value, canvas.bounds(area.x, area.y + area.height + 22.0, area.width, 14.0)));
+            }
         }
         if view.focused == Some(QuickTarget::Control(control)) {
             painting.outlines.push(OutlineRun { bounds, radius: 12.0 * canvas.scale, width: 2.0 * canvas.scale, color: [1.0, 1.0, 1.0, 1.0], fraction: 1.0, dash: None, open_top: false });
@@ -1286,6 +1318,7 @@ struct Canvas {
     height: f32,
     corner: f32,
     notch: bool,
+    density: UiDensity,
 }
 
 impl Canvas {
@@ -1382,7 +1415,7 @@ mod tests {
             bluetooth: RadioState::Unknown,
         };
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let canvas = Canvas { scale, width: 400.0, height: 170.0, corner: 42.0, notch: false };
+            let canvas = Canvas { scale, width: 400.0, height: 170.0, corner: 42.0, notch: false, density: UiDensity::Balanced };
             let painting = quick_controls_panel(&view, &canvas);
             assert_eq!(painting.shapes.len(), 7);
             assert_eq!(painting.texts.len(), 16);
@@ -1396,8 +1429,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn detailed_quick_controls_add_known_levels_without_removing_controls() {
+        let view = QuickControlsView {
+            page: QuickPage::Main,
+            focused: Some(QuickTarget::Control(QuickControl::Volume)),
+            calendar: island_core::scheduler::QuickCalendarView { state: CalendarState::NotSet, coming: Vec::new() },
+            presets: TIMER_PRESETS,
+            mode: StartMode::Timer,
+            modes_offered: false,
+            volume: Some((42, false)), brightness: Some(75),
+            wifi: RadioState::On, bluetooth: RadioState::Unknown,
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for density in UiDensity::ALL {
+                let canvas = Canvas { scale, width: 400.0, height: 170.0, corner: 42.0, notch: false, density };
+                let painting = quick_controls_panel(&view, &canvas);
+                assert_eq!(painting.shapes.len(), 7);
+                assert_eq!(painting.outlines.len(), 1);
+                assert_eq!(painting.owned_labels.len(), if density == UiDensity::Detailed { 2 } else { 0 });
+                for (_, bounds) in &painting.owned_labels {
+                    assert!(bounds.x >= 0.0 && bounds.x + bounds.width <= canvas.width * scale);
+                    assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= canvas.height * scale);
+                }
+            }
+        }
+    }
+
     fn playing_music(wave_visible: bool) -> Scene {
         Scene {
+            density: UiDensity::default(),
             presentation: Presentation::Compact,
             wave_visible,
             clock: None,
@@ -1427,6 +1488,43 @@ mod tests {
             transfer: None,
             reveal: false,
             companion: None,
+        }
+    }
+
+    #[test]
+    fn detailed_music_and_timer_expose_existing_information() {
+        let mut music = playing_music(false);
+        music.detail = "Artist".into();
+        let balanced = music.painting(Pill::COMPACT, 1.0, Pill::COMPACT.radius, false);
+        assert!(!balanced.texts.iter().any(|text| text.text == "Artist"));
+        music.density = UiDensity::Detailed;
+        let detailed = music.painting(Pill::COMPACT, 1.0, Pill::COMPACT.radius, false);
+        assert!(detailed.texts.iter().any(|text| text.text == "Artist"));
+
+        music.presentation = Presentation::Expanded;
+        music.media = None;
+        music.timer = Some(TimerView { running: true, has_controls: true, left: Some(500) });
+        music.title = "05:00".into();
+        music.icon = Some(Icon::Timer);
+        let painting = music.painting(Pill::EXPANDED, 1.0, Pill::EXPANDED.radius, false);
+        assert!(painting.owned_labels.iter().any(|(label, _)| label == "50%"));
+        assert!(painting.texts.iter().any(|text| text.text == "Pause"));
+    }
+
+    #[test]
+    fn detailed_system_level_keeps_the_value_and_adds_its_name() {
+        let mut scene = playing_music(false);
+        scene.presentation = Presentation::Level;
+        scene.media = None;
+        scene.leading = "Volume".into();
+        scene.detail = "42%".into();
+        scene.level = Some(42);
+        for density in UiDensity::ALL {
+            scene.density = density;
+            let painting = scene.painting(Pill::LEVEL, 1.0, Pill::LEVEL.radius, false);
+            assert!(painting.texts.iter().any(|text| text.text == "42%"));
+            assert_eq!(painting.texts.iter().any(|text| text.text == "Volume"), density == UiDensity::Detailed);
+            assert_eq!(painting.bars.len(), 2);
         }
     }
 

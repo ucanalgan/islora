@@ -391,6 +391,7 @@ struct Surfaces {
 }
 
 pub struct Renderer {
+    density: island_core::layout::UiDensity,
     compositor: Compositor,
     _target: DesktopWindowTarget,
     hwnd: HWND,
@@ -522,6 +523,7 @@ impl Renderer {
 
         let painter = Painter::new(&compositor)?;
         let mut renderer = Self {
+            density: island_core::layout::UiDensity::default(),
             compositor,
             _target: target,
             hwnd,
@@ -792,6 +794,7 @@ impl Renderer {
     pub fn present(&mut self, frame: &Frame, clock: &ClockText, now: Millis, scrub: Option<f32>) -> Result<bool> {
         let hidden = frame.presentation == Presentation::Hidden;
         let mut scene = Scene::new(frame, clock, now, scrub, self.wave_motion != WaveMotion::Hidden);
+        scene.density = self.density;
         if frame.presentation == Presentation::Compact {
             self.fit_compact(&mut scene);
         }
@@ -858,6 +861,10 @@ impl Renderer {
         self.update_wave(&scene)?;
         self.scene = Some(scene);
         Ok(resized)
+    }
+
+    pub fn set_density(&mut self, density: island_core::layout::UiDensity) {
+        self.density = density;
     }
 
     fn update_wave(&mut self, scene: &Scene) -> Result<()> {

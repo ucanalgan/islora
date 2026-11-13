@@ -1,7 +1,7 @@
 //! What the settings window shows and where, in DIPs. Nothing here draws, so the
 //! layout and what each click means can be tested without a window.
 
-use island_core::layout::{IslandStyle, Material, ProgressStyle, StartMode, TaskLayout, WaveStyle};
+use island_core::layout::{IslandStyle, Material, ProgressStyle, StartMode, TaskLayout, UiDensity, WaveStyle};
 pub use island_core::geometry::Rect;
 
 pub const WINDOW_WIDTH: f32 = 760.0;
@@ -85,6 +85,7 @@ impl Page {
 pub enum Action {
     Open(Page),
     Material(Material),
+    Density(UiDensity),
     Style(IslandStyle),
     Layout(TaskLayout),
     Progress(ProgressStyle),
@@ -118,6 +119,7 @@ pub enum Focus {
 pub enum Look {
     Tab { selected: bool },
     Choice { selected: bool },
+    DensityCard { selected: bool },
     Switch { on: bool },
     Button,
     Step,
@@ -146,6 +148,7 @@ pub struct Label {
 pub struct SettingsState {
     pub page: Page,
     pub material: Material,
+    pub density: UiDensity,
     pub style: IslandStyle,
     pub layout: TaskLayout,
     pub progress: ProgressStyle,
@@ -285,7 +288,12 @@ fn appearance(view: &mut View, state: &SettingsState) {
     view.choices(426.0, WaveStyle::ALL.map(|style| {
         (Action::WaveStyle(style), state.wave_style == style, style.label())
     }));
-    view.caption("Kapalıyken ve enerji tasarrufunda dalga gizlenir", 478.0);
+    view.caption("Arayüz yoğunluğu", 470.0);
+    let width = (WIDTH - GAP * 2.0) / 3.0;
+    for (index, density) in UiDensity::ALL.into_iter().enumerate() {
+        let bounds = Rect { x: LEFT + index as f32 * (width + GAP), y: 492.0, width, height: 40.0 };
+        view.control(Action::Density(density), Look::DensityCard { selected: state.density == density }, bounds, density.label());
+    }
 }
 
 /// How a short task shares the island with music, and how a send shows.
@@ -447,6 +455,7 @@ mod tests {
         SettingsState {
             page,
             material: Material::Black,
+            density: UiDensity::Balanced,
             style: IslandStyle::Island,
             layout: TaskLayout::Bubble,
             progress: ProgressStyle::Ring,
@@ -552,6 +561,21 @@ mod tests {
         assert_eq!(look(Action::Style(IslandStyle::Island)), Look::Choice { selected: false });
         assert_eq!(look(Action::SoundWave), Look::Switch { on: false });
         assert_eq!(look(Action::WaveStyle(WaveStyle::Calm)), Look::Choice { selected: true });
+    }
+
+    #[test]
+    fn density_cards_are_selectable_and_keyboard_reachable() {
+        let mut current = state(Page::Appearance);
+        current.density = UiDensity::Detailed;
+        let view = view(&current);
+        let order = view.focus_order(Page::Appearance);
+        for density in UiDensity::ALL {
+            let action = Action::Density(density);
+            let control = view.controls.iter().find(|control| control.action == action).unwrap();
+            assert_eq!(control.look, Look::DensityCard { selected: density == UiDensity::Detailed });
+            assert_eq!(view.action_at(control.bounds.x + control.bounds.width / 2.0, control.bounds.y + control.bounds.height / 2.0), Some(action));
+            assert!(order.contains(&Focus::Control(action)));
+        }
     }
 
     #[test]

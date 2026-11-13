@@ -1,5 +1,26 @@
 use crate::scheduler::Presentation;
 
+/// Visual density changes presentation only; task scheduling remains independent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiDensity {
+    Minimal,
+    #[default]
+    Balanced,
+    Detailed,
+}
+
+impl UiDensity {
+    pub const ALL: [Self; 3] = [Self::Minimal, Self::Balanced, Self::Detailed];
+
+    pub fn setting(self) -> &'static str {
+        match self { Self::Minimal => "minimal", Self::Balanced => "balanced", Self::Detailed => "detailed" }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self { Self::Minimal => "Minimal", Self::Balanced => "Dengeli", Self::Detailed => "Ayrıntılı" }
+    }
+}
+
 /// Size of the transparent window that hosts the pill, in DIPs. The pill can
 /// overshoot its target while springing, so this is larger than `EXPANDED`.
 pub const WINDOW_WIDTH: f32 = 460.0;

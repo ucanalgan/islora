@@ -78,6 +78,7 @@ Before replacing settings, Islora keeps the previous complete version in `config
 | `sound_wave` | `off` removes the wave from the small pill. Energy Saver hides it too, restoring your choice when it ends. | `on` |
 | `wave_style` | The moving wave's pace and height: `calm`, `normal` or `lively`. | `normal` |
 | `reduced_motion` | `on` minimizes transitions and keeps the sound wave still. Also available under **Genel**. | `off` |
+| `ui_density` | Interface density: `minimal`, `balanced`, or `detailed`. Also available under **Görünüm**. | `balanced` |
 | `quick_controls_timeout` | Inactivity before Quick Controls closes: `5`, `8`, `15`, `30`, or `60` seconds; `0` keeps it open. Also available under **Genel**. | `8` |
 | `autostart` | `on` starts Islora with Windows. A new copy turns it on by itself until you turn it off on the Genel page. | `on` |
 
