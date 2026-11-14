@@ -261,6 +261,8 @@ struct App {
     _bluetooth: Option<BluetoothWatch>,
     started: Instant,
     shown: Presentation,
+    /// Whether the compact pill currently displays the clock.
+    shown_clock: bool,
     window_visible: bool,
     pointer_inside: bool,
     open_view: OpenView,
@@ -468,6 +470,7 @@ pub fn run() -> Result<()> {
         _bluetooth: bluetooth,
         started,
         shown: Presentation::Hidden,
+        shown_clock: false,
         window_visible: false,
         pointer_inside: false,
         open_view: OpenView::Other,
@@ -649,6 +652,10 @@ impl App {
     }
 
     fn arm_media_tick(&mut self, frame: &Frame) {
+        self.shown_clock = frame.presentation == Presentation::Compact
+            && frame.activity.is_none()
+            && frame.home.is_none()
+            && frame.panel.is_none();
         let media = frame
             .activity
             .as_ref()
@@ -998,6 +1005,10 @@ impl App {
         }
         if let Err(error) = self.renderer.press() {
             eprintln!("press failed: {error}");
+        }
+        if self.shown_clock {
+            self.open_quick_controls(now);
+            return;
         }
         self.island.click(now);
         self.refresh();
