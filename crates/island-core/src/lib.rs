@@ -19,6 +19,7 @@ pub mod layout;
 pub mod media;
 pub mod media_kind;
 pub mod notifications;
+pub mod presentation;
 pub mod qr;
 pub mod quick_controls;
 pub mod schedule;

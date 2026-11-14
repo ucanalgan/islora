@@ -1,6 +1,7 @@
 //! Turns a frame into what gets painted. A `Scene` is plain data, so comparing
 //! two of them tells whether the pixels would change at all.
 
+use island_core::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
 use std::sync::Arc;
 
 use island_core::MediaSnapshot;
@@ -16,7 +17,7 @@ use island_core::layout::{
     PRESET_HEIGHT, PRESET_WIDTH, PRESET_Y, PROGRESS_HEIGHT, PROGRESS_WIDTH, PROGRESS_X, PROGRESS_Y,
     QUICK_SHORTCUT, SETTINGS_SHORTCUT_SIZE, SETTINGS_SHORTCUT_X, SETTINGS_SHORTCUT_Y, STRIP_HEIGHT,
     StartMode, TIMER_BUTTON_SIZE, TIMER_PRESETS, TIMER_RING_RADIUS, TIMER_RING_WIDTH, TIMER_RING_X,
-    TIMER_RING_Y, TimerButton, UiDensity, preset_center_x,
+    TIMER_RING_Y, TimerButton, preset_center_x,
 };
 use island_core::media::{RepeatMode, Sides, format_time};
 use island_core::quick_controls::{
@@ -210,7 +211,7 @@ pub enum Companion {
 
 #[derive(Clone, PartialEq)]
 pub struct Scene {
-    pub density: UiDensity,
+    pub preferences: PresentationPreferences,
     pub presentation: Presentation,
     pub wave_visible: bool,
     pub clock: Option<String>,
@@ -319,7 +320,7 @@ impl Scene {
         let Some(activity) = &frame.activity else {
             let home = frame.home.as_ref().map(|home| HomeScene::new(home, clock));
             return Self {
-                density: UiDensity::default(),
+                preferences: PresentationPreferences::default(),
                 presentation,
                 wave_visible,
                 clock: (home.is_none() && frame.panel.is_none()).then(|| clock.time.clone()),
@@ -386,13 +387,21 @@ impl Scene {
                 _ => None,
             });
         Self {
-            density: UiDensity::default(),
+            preferences: PresentationPreferences::default(),
             presentation,
             wave_visible,
             clock: None,
-            leading: activity.leading.clone(),
+            leading: if media.is_some() && activity.leading.trim().is_empty() {
+                "Media".to_owned()
+            } else {
+                activity.leading.clone()
+            },
             trailing: activity.trailing.clone(),
-            title: activity.title.clone(),
+            title: if media.is_some() && activity.title.trim().is_empty() {
+                "Media".to_owned()
+            } else {
+                activity.title.clone()
+            },
             detail: activity.indicator_percent.map_or_else(
                 || activity.detail.clone(),
                 |value| format!("%{}", value.min(100)),
@@ -438,8 +447,8 @@ impl Scene {
             self.clock.as_deref().map(all_zeros).unwrap_or_default(),
             self.leading,
             all_zeros(&self.trailing),
-            self.density,
-            if self.density == UiDensity::Detailed && self.media.is_some() {
+            self.preferences.media_layout.setting(),
+            if self.preferences.media_layout != MediaLayout::Compact && self.media.is_some() {
                 &self.detail
             } else {
                 ""
@@ -462,7 +471,9 @@ impl Scene {
                 + COMPACT_CLOCK_PADDING * 2.0
         } else if let Some(media) = &self.media {
             let title = text(&self.leading, true);
-            let artist = if self.density == UiDensity::Detailed && !self.detail.is_empty() {
+            let artist = if self.preferences.media_layout != MediaLayout::Compact
+                && !self.detail.is_empty()
+            {
                 measure(&self.detail, 10.0, false).ceil() + MEASURE_SPARE
             } else {
                 0.0
@@ -579,7 +590,6 @@ impl Scene {
             height: pill.height / scale,
             corner,
             notch,
-            density: self.density,
         };
         if let Some(clock) = &self.clock {
             let mut painting = Painting::default();
@@ -692,7 +702,7 @@ impl Scene {
         let width = canvas.width
             - COMPACT_ART_TEXT_X
             - compact_media_end(media, self.companion.as_ref(), self.wave_visible);
-        if self.density == UiDensity::Detailed && !self.detail.is_empty() {
+        if self.preferences.media_layout != MediaLayout::Compact && !self.detail.is_empty() {
             painting.texts.push(canvas.text(
                 &self.leading,
                 canvas.bounds(COMPACT_ART_TEXT_X, 2.0, width, 17.0),
@@ -733,9 +743,9 @@ impl Scene {
 
     fn level_bar(&self, canvas: &Canvas) -> Painting<'_> {
         let mut painting = Painting::default();
-        let layout = self.density.level_layout();
+        let layout = self.preferences.indicator_style.level_layout();
         let icon_bounds = canvas.rect(layout.icon);
-        if self.density != UiDensity::Minimal {
+        if self.preferences.indicator_style != IndicatorStyle::Ring {
             painting.shapes.push(ShapeRun {
                 bounds: icon_bounds,
                 radius: 11.0 * canvas.scale,
@@ -757,7 +767,7 @@ impl Scene {
             1.0,
             Align::Center,
         ));
-        if self.density == UiDensity::Minimal {
+        if self.preferences.indicator_style == IndicatorStyle::Ring && self.level.is_some() {
             let ring = layout.progress;
             painting.rings.push(RingRun {
                 center_x: (ring.x + ring.width / 2.0) * canvas.scale,
@@ -768,7 +778,7 @@ impl Scene {
                 opacity: 1.0,
                 track_color: Some(super::tokens::INDICATOR_TRACK),
             });
-        } else {
+        } else if self.preferences.indicator_style != IndicatorStyle::Ring {
             let label = if self.title.is_empty() {
                 &self.leading
             } else {
@@ -791,14 +801,11 @@ impl Scene {
                 Some(Icon::BatteryLow) => "Pil seviyesi düşük",
                 _ => "",
             };
-            let context = if self.density == UiDensity::Detailed {
-                self.indicator_context
-                    .as_ref()
-                    .and_then(|context| context.subtitle.as_deref())
-                    .unwrap_or(fallback)
-            } else {
-                fallback
-            };
+            let context = self
+                .indicator_context
+                .as_ref()
+                .and_then(|context| context.subtitle.as_deref())
+                .unwrap_or(fallback);
             painting.texts.push(canvas.text(
                 context,
                 canvas.rect(layout.detail),
@@ -823,7 +830,7 @@ impl Scene {
                     border: None,
                 });
             }
-            if self.density == UiDensity::Detailed {
+            if self.preferences.indicator_style == IndicatorStyle::Context {
                 let chips = self
                     .indicator_context
                     .as_ref()
@@ -855,11 +862,7 @@ impl Scene {
 
     fn alert(&self, canvas: &Canvas) -> Painting<'_> {
         let mut painting = Painting::default();
-        let art = if self.density == UiDensity::Detailed {
-            36.0
-        } else {
-            ALERT_ART
-        };
+        let art = ALERT_ART;
         let inset = (canvas.height - art) / 2.0;
         let left = match (&self.preview, self.icon) {
             (Some(_), _) => inset + art + ALERT_ART_TEXT_GAP,
@@ -1352,7 +1355,7 @@ impl Scene {
         } else {
             "Timer"
         };
-        if self.density != UiDensity::Minimal {
+        {
             painting.texts.push(canvas.icon(
                 glyph(header_icon),
                 canvas.bounds(18.0, 14.0, 20.0, 20.0),
@@ -1365,14 +1368,6 @@ impl Scene {
                 true,
                 1.0,
                 Align::Leading,
-            ));
-        }
-        if self.density == UiDensity::Detailed
-            && let Some(left) = timer.left
-        {
-            painting.owned_labels.push((
-                format!("{}%", left / 10),
-                canvas.bounds(36.0, 130.0, 44.0, 20.0),
             ));
         }
         painting.rings.push(RingRun {
@@ -1473,11 +1468,9 @@ impl Scene {
         const MARGIN: f32 = 30.0;
         let inner = canvas.width - MARGIN * 2.0;
         let label = canvas.bounds(MARGIN, 14.0, inner, 16.0);
-        if self.density != UiDensity::Minimal {
-            painting
-                .texts
-                .push(canvas.text(&home.today, label, 11.5, false, 0.6, Align::Trailing));
-        }
+        painting
+            .texts
+            .push(canvas.text(&home.today, label, 11.5, false, 0.6, Align::Trailing));
         match home.events.as_slice() {
             [] => {
                 let (title, detail) = match home.calendar {
@@ -1654,14 +1647,26 @@ impl Scene {
             1.0,
             Align::Leading,
         ));
-        painting.texts.push(canvas.text(
-            &self.detail,
-            canvas.bounds(text_x, 53.0, text_width, 22.0),
-            13.0,
-            false,
-            0.7,
-            Align::Leading,
-        ));
+        if self.preferences.media_layout != MediaLayout::Compact && !self.detail.is_empty() {
+            painting.texts.push(canvas.text(
+                &self.detail,
+                canvas.bounds(text_x, 53.0, text_width, 22.0),
+                13.0,
+                false,
+                0.7,
+                Align::Leading,
+            ));
+        }
+        if self.preferences.media_layout == MediaLayout::Informative {
+            painting.texts.push(canvas.text(
+                if media.playing { "Playing" } else { "Paused" },
+                canvas.bounds(text_x, 76.0, text_width, 16.0),
+                10.0,
+                false,
+                0.65,
+                Align::Leading,
+            ));
+        }
 
         if let Some(timing) = &media.timing {
             // Thicker with a handle while dragging, so it is clear what moves.
@@ -1857,7 +1862,6 @@ pub fn bubble_painting(bubble: &Bubble, size: f32, scale: f32) -> Painting<'_> {
         height: size / scale,
         corner: size / scale / 2.0,
         notch: false,
-        density: UiDensity::Balanced,
     };
     let middle = canvas.width / 2.0;
     let mut painting = Painting::default();
@@ -2013,11 +2017,10 @@ fn quick_controls_panel<'a>(view: &'a QuickControlsView, canvas: &Canvas) -> Pai
                     0.7,
                     Align::Trailing,
                 ));
-                if canvas.density == UiDensity::Detailed
-                    && let Some(location) = event
-                        .location
-                        .as_deref()
-                        .filter(|location| !location.is_empty())
+                if let Some(location) = event
+                    .location
+                    .as_deref()
+                    .filter(|location| !location.is_empty())
                 {
                     painting.texts.push(canvas.text(
                         location,
@@ -2194,24 +2197,22 @@ fn quick_controls_panel<'a>(view: &'a QuickControlsView, canvas: &Canvas) -> Pai
                 Align::Center,
             ));
         }
-        if canvas.density == UiDensity::Detailed {
-            let value = match control {
-                QuickControl::Volume => view.volume.map(|(level, muted)| {
-                    if muted {
-                        "Muted".to_owned()
-                    } else {
-                        format!("{level}%")
-                    }
-                }),
-                QuickControl::Brightness => view.brightness.map(|level| format!("{level}%")),
-                _ => None,
-            };
-            if let Some(value) = value {
-                painting.owned_labels.push((
-                    value,
-                    canvas.bounds(area.x, area.y + area.height + 22.0, area.width, 14.0),
-                ));
-            }
+        let value = match control {
+            QuickControl::Volume => view.volume.map(|(level, muted)| {
+                if muted {
+                    "Muted".to_owned()
+                } else {
+                    format!("{level}%")
+                }
+            }),
+            QuickControl::Brightness => view.brightness.map(|level| format!("{level}%")),
+            _ => None,
+        };
+        if let Some(value) = value {
+            painting.owned_labels.push((
+                value,
+                canvas.bounds(area.x, area.y + area.height + 22.0, area.width, 14.0),
+            ));
         }
         if view.focused == Some(QuickTarget::Control(control)) {
             painting.outlines.push(OutlineRun {
@@ -2465,7 +2466,6 @@ struct Canvas {
     height: f32,
     corner: f32,
     notch: bool,
-    density: UiDensity,
 }
 
 impl Canvas {
@@ -2629,7 +2629,6 @@ mod tests {
                 height: 170.0,
                 corner: 42.0,
                 notch: false,
-                density: UiDensity::Balanced,
             };
             let painting = quick_controls_panel(&view, &canvas);
             assert_eq!(painting.shapes.len(), 7);
@@ -2654,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn detailed_quick_controls_add_known_levels_without_removing_controls() {
+    fn quick_controls_keep_confirmed_levels_at_each_scale() {
         let view = QuickControlsView {
             page: QuickPage::Main,
             focused: Some(QuickTarget::Control(QuickControl::Volume)),
@@ -2671,33 +2670,26 @@ mod tests {
             bluetooth: RadioState::Unknown,
         };
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            for density in UiDensity::ALL {
-                let canvas = Canvas {
-                    scale,
-                    width: 400.0,
-                    height: 170.0,
-                    corner: 42.0,
-                    notch: false,
-                    density,
-                };
-                let painting = quick_controls_panel(&view, &canvas);
-                assert_eq!(painting.shapes.len(), 7);
-                assert_eq!(painting.outlines.len(), 1);
-                assert_eq!(
-                    painting.owned_labels.len(),
-                    if density == UiDensity::Detailed { 2 } else { 0 }
-                );
-                for (_, bounds) in &painting.owned_labels {
-                    assert!(bounds.x >= 0.0 && bounds.x + bounds.width <= canvas.width * scale);
-                    assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= canvas.height * scale);
-                }
+            let canvas = Canvas {
+                scale,
+                width: 400.0,
+                height: 170.0,
+                corner: 42.0,
+                notch: false,
+            };
+            let painting = quick_controls_panel(&view, &canvas);
+            assert_eq!(painting.outlines.len(), 1);
+            assert_eq!(painting.owned_labels.len(), 2);
+            for (_, bounds) in &painting.owned_labels {
+                assert!(bounds.x >= 0.0 && bounds.x + bounds.width <= canvas.width * scale);
+                assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= canvas.height * scale);
             }
         }
     }
 
     fn playing_music(wave_visible: bool) -> Scene {
         Scene {
-            density: UiDensity::default(),
+            preferences: PresentationPreferences::default(),
             presentation: Presentation::Compact,
             wave_visible,
             clock: None,
@@ -2732,13 +2724,202 @@ mod tests {
         }
     }
 
+    fn text_geometry(scene: &Scene, pill: Pill) -> Vec<(String, u32, u32, u32, u32)> {
+        scene
+            .painting(pill, 1.0, pill.radius, false)
+            .texts
+            .iter()
+            .map(|run| {
+                (
+                    run.text.to_owned(),
+                    run.bounds.x.to_bits(),
+                    run.bounds.y.to_bits(),
+                    run.bounds.width.to_bits(),
+                    run.bounds.height.to_bits(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn feature_preferences_do_not_change_other_feature_paintings() {
+        let mut scene = playing_music(true);
+        scene.detail = "Artist".into();
+        let media = text_geometry(&scene, Pill::COMPACT);
+        for style in IndicatorStyle::ALL {
+            scene.preferences.indicator_style = style;
+            assert_eq!(text_geometry(&scene, Pill::COMPACT), media);
+        }
+        scene.presentation = Presentation::Level;
+        scene.media = None;
+        scene.level = Some(42);
+        scene.preferences.indicator_style = IndicatorStyle::Edge;
+        let pill = IndicatorStyle::Edge.level_layout().pill;
+        let indicator = text_geometry(&scene, pill);
+        for layout in MediaLayout::ALL {
+            scene.preferences.media_layout = layout;
+            assert_eq!(text_geometry(&scene, pill), indicator);
+        }
+        scene.presentation = Presentation::Expanded;
+        scene.timer = Some(TimerView {
+            running: true,
+            has_controls: true,
+            left: Some(500),
+        });
+        scene.title = "05:00".into();
+        let timer = text_geometry(&scene, Pill::EXPANDED);
+        scene.timer = None;
+        scene.home = Some(HomeScene {
+            today: "Today".into(),
+            events: Vec::new(),
+            calendar: CalendarState::NotSet,
+            mode: StartMode::Timer,
+            modes_offered: true,
+            presets: TIMER_PRESETS,
+        });
+        let home = text_geometry(&scene, Pill::EXPANDED);
+        for style in IndicatorStyle::ALL {
+            for layout in MediaLayout::ALL {
+                scene.preferences = PresentationPreferences {
+                    indicator_style: style,
+                    media_layout: layout,
+                };
+                assert_eq!(text_geometry(&scene, Pill::EXPANDED), home);
+                scene.home = None;
+                scene.timer = Some(TimerView {
+                    running: true,
+                    has_controls: true,
+                    left: Some(500),
+                });
+                assert_eq!(text_geometry(&scene, Pill::EXPANDED), timer);
+                scene.timer = None;
+                scene.home = Some(HomeScene {
+                    today: "Today".into(),
+                    events: Vec::new(),
+                    calendar: CalendarState::NotSet,
+                    mode: StartMode::Timer,
+                    modes_offered: true,
+                    presets: TIMER_PRESETS,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn media_layouts_show_only_known_information_and_keep_controls() {
+        for layout in MediaLayout::ALL {
+            for playing in [false, true] {
+                let mut scene = playing_music(true);
+                scene.preferences.media_layout = layout;
+                scene.title = "Track".into();
+                scene.detail = "Artist".into();
+                scene.media.as_mut().unwrap().playing = playing;
+                let compact = scene.painting(Pill::COMPACT, 1.0, Pill::COMPACT.radius, false);
+                assert_eq!(
+                    compact.texts.iter().any(|run| run.text == "Artist"),
+                    layout != MediaLayout::Compact
+                );
+                assert!(compact.images.is_empty()); // Missing art uses the existing music glyph.
+                assert_eq!(scene.shows_wave(), playing);
+                scene.presentation = Presentation::Expanded;
+                let expanded = scene.painting(Pill::EXPANDED, 1.0, Pill::EXPANDED.radius, false);
+                assert_eq!(
+                    expanded.texts.iter().any(|run| run.text == "Artist"),
+                    layout != MediaLayout::Compact
+                );
+                assert_eq!(
+                    expanded
+                        .texts
+                        .iter()
+                        .any(|run| run.text == if playing { "Playing" } else { "Paused" }),
+                    layout == MediaLayout::Informative
+                );
+                assert!(
+                    expanded
+                        .texts
+                        .iter()
+                        .any(|run| run.text == if playing { ICON_PAUSE } else { ICON_PLAY })
+                );
+                scene.detail.clear();
+                let expanded = scene.painting(Pill::EXPANDED, 1.0, Pill::EXPANDED.radius, false);
+                assert!(!expanded.texts.iter().any(|run| run.text == "Artist"));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_media_metadata_uses_a_safe_label_in_both_island_states() {
+        let snapshot = MediaSnapshot {
+            new_position: false,
+            shuffle: None,
+            repeat: None,
+            title: String::new(),
+            artist: String::new(),
+            playing: true,
+            position_ms: 0,
+            duration_ms: 0,
+            rate: 1.0,
+            sampled_at: 0,
+            can_seek: false,
+            is_music: true,
+            can_previous: false,
+            can_next: false,
+            artwork: None,
+        };
+        let clock = ClockText {
+            time: String::new(),
+            date: String::new(),
+        };
+        for presentation in [Presentation::Compact, Presentation::Expanded] {
+            let frame = Frame {
+                presentation,
+                activity: Some(snapshot.clone().into_activity(0)),
+                secondary: None,
+                companion: None,
+                home: None,
+                panel: None,
+                chime: false,
+                wake_at: None,
+            };
+            let mut scene = Scene::new(&frame, &clock, 0, None, true);
+            for layout in MediaLayout::ALL {
+                scene.preferences.media_layout = layout;
+                let pill = if presentation == Presentation::Compact {
+                    Pill::COMPACT
+                } else {
+                    Pill::EXPANDED
+                };
+                let painting = scene.painting(pill, 1.0, pill.radius, false);
+                assert!(painting.texts.iter().any(|run| run.text == "Media"));
+                assert!(painting.images.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_indicator_percentage_does_not_draw_a_filled_ring() {
+        let mut scene = playing_music(false);
+        scene.presentation = Presentation::Level;
+        scene.media = None;
+        scene.level = None;
+        scene.detail.clear();
+        for style in IndicatorStyle::ALL {
+            scene.preferences.indicator_style = style;
+            let pill = style.level_layout().pill;
+            let painting = scene.painting(pill, 1.0, pill.radius, false);
+            assert!(painting.rings.is_empty());
+            assert!(!painting.texts.iter().any(|run| run.text.contains('%')));
+        }
+    }
+
     #[test]
     fn detailed_music_and_timer_expose_existing_information() {
         let mut music = playing_music(false);
         music.detail = "Artist".into();
-        let balanced = music.painting(Pill::COMPACT, 1.0, Pill::COMPACT.radius, false);
-        assert!(!balanced.texts.iter().any(|text| text.text == "Artist"));
-        music.density = UiDensity::Detailed;
+        music.preferences.media_layout = MediaLayout::Compact;
+        let compact = music.painting(Pill::COMPACT, 1.0, Pill::COMPACT.radius, false);
+        assert!(!compact.texts.iter().any(|text| text.text == "Artist"));
+        music.preferences.media_layout = MediaLayout::Informative;
         let detailed = music.painting(Pill::COMPACT, 1.0, Pill::COMPACT.radius, false);
         assert!(detailed.texts.iter().any(|text| text.text == "Artist"));
 
@@ -2752,25 +2933,20 @@ mod tests {
         music.title = "05:00".into();
         music.icon = Some(Icon::Timer);
         let painting = music.painting(Pill::EXPANDED, 1.0, Pill::EXPANDED.radius, false);
-        assert!(
-            painting
-                .owned_labels
-                .iter()
-                .any(|(label, _)| label == "50%")
-        );
+        assert!(painting.texts.iter().any(|text| text.text == "Timer"));
         assert!(painting.texts.iter().any(|text| text.text == "Pause"));
     }
 
     #[test]
     fn compact_media_reserves_space_for_the_wave_or_its_companion_at_each_scale() {
-        for density in UiDensity::ALL {
+        for density in MediaLayout::ALL {
             for title in [
                 "Song",
                 "A very long track title that must be clipped safely inside the island",
             ] {
                 for scale in [1.0, 1.25, 1.5, 2.0] {
                     let mut scene = playing_music(true);
-                    scene.density = density;
+                    scene.preferences.media_layout = density;
                     scene.leading = title.into();
                     scene.detail = "A much longer artist name".into();
                     scene.fit =
@@ -2815,7 +2991,7 @@ mod tests {
     #[test]
     fn detailed_artist_participates_in_compact_width_and_cache_key() {
         let mut scene = playing_music(false);
-        scene.density = UiDensity::Detailed;
+        scene.preferences.media_layout = MediaLayout::Informative;
         scene.leading = "A".into();
         let measure = |text: &str, size: f32, _: bool| text.len() as f32 * size * 0.5;
         let before = scene.fit(measure);
@@ -2856,22 +3032,26 @@ mod tests {
         scene.leading = "Volume".into();
         scene.detail = "42%".into();
         scene.level = Some(42);
-        for density in UiDensity::ALL {
-            scene.density = density;
+        for density in IndicatorStyle::ALL {
+            scene.preferences.indicator_style = density;
             let pill = density.level_layout().pill;
             let painting = scene.painting(pill, 1.0, pill.radius, false);
             assert!(painting.texts.iter().any(|text| text.text == "42%"));
             assert_eq!(
                 painting.texts.iter().any(|text| text.text == "Volume"),
-                density != UiDensity::Minimal
+                density != IndicatorStyle::Ring
             );
             assert_eq!(
                 painting.rings.len(),
-                usize::from(density == UiDensity::Minimal)
+                usize::from(density == IndicatorStyle::Ring)
             );
             assert_eq!(
                 painting.shapes.len(),
-                if density == UiDensity::Minimal { 0 } else { 3 }
+                if density == IndicatorStyle::Ring {
+                    0
+                } else {
+                    3
+                }
             );
         }
     }
@@ -2888,15 +3068,15 @@ mod tests {
             subtitle: None,
             chips: vec!["Ses açık".into()],
         });
-        for density in UiDensity::ALL {
-            scene.density = density;
+        for density in IndicatorStyle::ALL {
+            scene.preferences.indicator_style = density;
             for value in [0, 1, 25, 50, 75, 99, 100, 255] {
                 scene.level = Some(value);
                 for scale in [1.0, 1.25, 1.5, 2.0] {
                     let layout = density.level_layout();
                     let pill = layout.pill.scaled(scale);
                     let painting = scene.painting(pill, scale, layout.pill.radius, false);
-                    if density == UiDensity::Minimal {
+                    if density == IndicatorStyle::Ring {
                         assert_eq!(painting.rings.len(), 1);
                         assert_eq!(
                             painting.rings[0].fraction,
@@ -2908,7 +3088,7 @@ mod tests {
                             assert!(shape.bounds.x + shape.bounds.width <= pill.width + 0.01);
                             assert!(shape.bounds.y + shape.bounds.height <= pill.height + 0.01);
                         }
-                        let chip = usize::from(density == UiDensity::Detailed);
+                        let chip = usize::from(density == IndicatorStyle::Context);
                         assert_eq!(
                             painting.shapes.len(),
                             if value == 0 { 2 + chip } else { 3 + chip }
@@ -2930,7 +3110,7 @@ mod tests {
         let mut scene = playing_music(false);
         scene.presentation = Presentation::Level;
         scene.media = None;
-        scene.density = UiDensity::Detailed;
+        scene.preferences.indicator_style = IndicatorStyle::Context;
         scene.title = "Ses".into();
         scene.detail = "%42".into();
         scene.level = Some(42);
@@ -2943,7 +3123,7 @@ mod tests {
                 "not displayed".into(),
             ],
         });
-        let layout = UiDensity::Detailed.level_layout();
+        let layout = IndicatorStyle::Context.level_layout();
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let pill = layout.pill.scaled(scale);
             let painting = scene.painting(pill, scale, layout.pill.radius, false);

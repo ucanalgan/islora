@@ -1,33 +1,5 @@
+use crate::presentation::IndicatorStyle;
 use crate::scheduler::Presentation;
-
-/// Visual density changes presentation only; task scheduling remains independent.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum UiDensity {
-    Minimal,
-    #[default]
-    Balanced,
-    Detailed,
-}
-
-impl UiDensity {
-    pub const ALL: [Self; 3] = [Self::Minimal, Self::Balanced, Self::Detailed];
-
-    pub fn setting(self) -> &'static str {
-        match self {
-            Self::Minimal => "minimal",
-            Self::Balanced => "balanced",
-            Self::Detailed => "detailed",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Minimal => "Minimal",
-            Self::Balanced => "Dengeli",
-            Self::Detailed => "Ayrıntılı",
-        }
-    }
-}
 
 /// Up to two compact chips within the Detailed panel's inner width.
 pub fn indicator_chip_bounds(labels: &[String]) -> Vec<crate::geometry::Rect> {
@@ -37,7 +9,7 @@ pub fn indicator_chip_bounds(labels: &[String]) -> Vec<crate::geometry::Rect> {
         return Vec::new();
     }
     let left = 20.0;
-    let available = UiDensity::Detailed.level_layout().pill.width - left * 2.0;
+    let available = IndicatorStyle::Context.level_layout().pill.width - left * 2.0;
     let gap = 8.0;
     let limit = (available - gap * (count - 1) as f32) / count as f32;
     let mut x = left;
@@ -70,7 +42,7 @@ pub struct LevelLayout {
     pub progress: crate::geometry::Rect,
 }
 
-impl UiDensity {
+impl IndicatorStyle {
     pub fn level_layout(self) -> LevelLayout {
         use crate::geometry::Rect;
         let rect = |x, y, width, height| Rect {
@@ -80,7 +52,7 @@ impl UiDensity {
             height,
         };
         match self {
-            Self::Minimal => LevelLayout {
+            Self::Ring => LevelLayout {
                 pill: Pill {
                     width: 168.0,
                     height: 44.0,
@@ -92,7 +64,7 @@ impl UiDensity {
                 value: rect(50.0, 8.0, 60.0, 28.0),
                 progress: rect(126.0, 11.0, 22.0, 22.0),
             },
-            Self::Balanced => LevelLayout {
+            Self::Edge => LevelLayout {
                 pill: Pill {
                     width: 296.0,
                     height: 70.0,
@@ -104,7 +76,7 @@ impl UiDensity {
                 value: rect(212.0, 12.0, 64.0, 32.0),
                 progress: rect(20.0, 57.0, 256.0, 3.0),
             },
-            Self::Detailed => LevelLayout {
+            Self::Context => LevelLayout {
                 pill: Pill {
                     width: 320.0,
                     height: 96.0,
@@ -644,7 +616,7 @@ mod tests {
             let labels = vec!["Long context label to be clipped".to_owned(); count];
             let chips = indicator_chip_bounds(&labels);
             assert_eq!(chips.len(), count.min(2));
-            let panel = UiDensity::Detailed.level_layout();
+            let panel = IndicatorStyle::Context.level_layout();
             for scale in [1.0, 1.25, 1.5, 2.0] {
                 for chip in &chips {
                     assert!(chip.x >= 0.0 && chip.y >= panel.progress.y + panel.progress.height);
@@ -660,8 +632,8 @@ mod tests {
 
     #[test]
     fn indicator_layouts_fit_and_keep_content_separate_at_common_scales() {
-        assert_eq!(UiDensity::default(), UiDensity::Balanced);
-        for density in UiDensity::ALL {
+        assert_eq!(IndicatorStyle::default(), IndicatorStyle::Edge);
+        for density in IndicatorStyle::ALL {
             let layout = density.level_layout();
             for scale in [1.0, 1.25, 1.5, 2.0] {
                 for r in [
@@ -679,7 +651,7 @@ mod tests {
                 assert!((layout.pill.height * 1.1 + TOP_MARGIN) <= WINDOW_HEIGHT);
             }
             assert!(layout.icon.x + layout.icon.width <= layout.value.x);
-            if density != UiDensity::Minimal {
+            if density != IndicatorStyle::Ring {
                 assert!(layout.title.x + layout.title.width <= layout.value.x);
                 assert!(layout.detail.x + layout.detail.width <= layout.value.x);
                 assert!(layout.progress.y >= layout.detail.y + layout.detail.height);

@@ -212,7 +212,7 @@ struct App {
     settings: Option<SettingsWindow>,
     /// What the user chose, which Energy Saver can overrule for a while.
     material: Material,
-    ui_density: island_core::layout::UiDensity,
+    preferences: island_core::presentation::PresentationPreferences,
     sound_wave: bool,
     reduced_motion: bool,
     quick_timeout: u64,
@@ -362,8 +362,8 @@ pub fn run() -> Result<()> {
         wave_motion,
         wave_style,
     )?;
-    let ui_density = stored_ui_density();
-    renderer.set_density(ui_density);
+    let preferences = stored_preferences();
+    renderer.set_preferences(preferences);
 
     if !hotkey::register(island_window) {
         eprintln!("no global shortcut available, only the top edge will open the island");
@@ -425,7 +425,7 @@ pub fn run() -> Result<()> {
         out_for_fullscreen: fullscreen_watch.active(),
         settings: None,
         material: stored_material(),
-        ui_density,
+        preferences,
         sound_wave,
         reduced_motion,
         quick_timeout,
@@ -1643,8 +1643,8 @@ impl App {
 
     fn reload(&mut self) {
         apply_settings(&mut self.island);
-        self.ui_density = stored_ui_density();
-        self.renderer.set_density(self.ui_density);
+        self.preferences = stored_preferences();
+        self.renderer.set_preferences(self.preferences);
         let monitor = stored_monitor();
         if monitor != self.selected_monitor {
             self.selected_monitor = monitor;
@@ -1731,7 +1731,7 @@ impl App {
         SettingsState {
             page,
             material: self.material,
-            density: self.ui_density,
+            preferences: self.preferences,
             style: self.placement.style,
             layout: self.task_layout,
             progress: self.progress_style,
@@ -1792,10 +1792,16 @@ impl App {
         match action {
             Action::Open(chosen) => page = chosen,
             Action::Material(material) => self.choose_material(material),
-            Action::Density(density) => {
-                self.ui_density = density;
-                settings::remember("ui_density", density.setting());
-                self.renderer.set_density(density);
+            Action::IndicatorStyle(style) => {
+                self.preferences.indicator_style = style;
+                settings::remember("indicator_style", style.setting());
+                self.renderer.set_preferences(self.preferences);
+                self.refresh();
+            }
+            Action::MediaLayout(layout) => {
+                self.preferences.media_layout = layout;
+                settings::remember("media_layout", layout.setting());
+                self.renderer.set_preferences(self.preferences);
                 self.refresh();
             }
             Action::Style(style) => self.choose_style(style),
@@ -3264,9 +3270,9 @@ fn stored_material() -> Material {
         .unwrap_or_default()
 }
 
-fn stored_ui_density() -> island_core::layout::UiDensity {
-    settings::read().map_or(island_core::layout::UiDensity::default(), |text| {
-        config::read_ui_density(&text)
+fn stored_preferences() -> island_core::presentation::PresentationPreferences {
+    settings::read().map_or_else(Default::default, |text| {
+        config::read_presentation_preferences(&text)
     })
 }
 

@@ -1,9 +1,9 @@
 //! The settings file: one `key = "value"` per line, `#` for comments.
 
 use crate::layout::{
-    IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout, UiDensity,
-    WaveStyle,
+    IslandStyle, Material, ProgressStyle, StartMode, TIMER_PRESETS, TaskLayout, WaveStyle,
 };
+use crate::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
 
 const LONGEST_PRESET_MINUTES: u64 = 720;
 
@@ -91,12 +91,31 @@ pub fn read_reduced_motion(text: &str) -> bool {
     read_value(text, "reduced_motion").as_deref() == Some("on")
 }
 
-pub fn read_ui_density(text: &str) -> UiDensity {
-    let value = read_value(text, "ui_density");
-    UiDensity::ALL
-        .into_iter()
-        .find(|density| value.as_deref() == Some(density.setting()))
-        .unwrap_or_default()
+/// Temporary compatibility only; Step 3 will migrate legacy settings explicitly.
+pub fn read_presentation_preferences(text: &str) -> PresentationPreferences {
+    let legacy = match read_value(text, "ui_density").as_deref() {
+        Some("minimal") => PresentationPreferences {
+            indicator_style: IndicatorStyle::Ring,
+            media_layout: MediaLayout::Compact,
+        },
+        Some("detailed") => PresentationPreferences {
+            indicator_style: IndicatorStyle::Context,
+            media_layout: MediaLayout::Informative,
+        },
+        _ => PresentationPreferences::default(),
+    };
+    let indicator = read_value(text, "indicator_style");
+    let media = read_value(text, "media_layout");
+    PresentationPreferences {
+        indicator_style: IndicatorStyle::ALL
+            .into_iter()
+            .find(|v| indicator.as_deref() == Some(v.setting()))
+            .unwrap_or(legacy.indicator_style),
+        media_layout: MediaLayout::ALL
+            .into_iter()
+            .find(|v| media.as_deref() == Some(v.setting()))
+            .unwrap_or(legacy.media_layout),
+    }
 }
 
 pub fn read_wave_style(text: &str) -> WaveStyle {
@@ -164,18 +183,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn density_defaults_and_round_trips_without_changing_existing_settings() {
+    fn presentation_preferences_preserve_legacy_and_unrelated_settings() {
         let old = "task_layout = \"shared\"\ntimer_presets = \"3, 7, 20, 30\"\n";
-        assert_eq!(read_ui_density(old), UiDensity::Balanced);
-        assert_eq!(
-            read_ui_density("ui_density = \"invalid\""),
-            UiDensity::Balanced
-        );
-        for density in UiDensity::ALL {
-            let updated = write_value(old, "ui_density", density.setting());
-            assert_eq!(read_ui_density(&updated), density);
+        for (value, indicator_style, media_layout) in [
+            ("minimal", IndicatorStyle::Ring, MediaLayout::Compact),
+            ("balanced", IndicatorStyle::Edge, MediaLayout::Standard),
+            (
+                "detailed",
+                IndicatorStyle::Context,
+                MediaLayout::Informative,
+            ),
+            ("invalid", IndicatorStyle::Edge, MediaLayout::Standard),
+        ] {
+            let updated = write_value(old, "ui_density", value);
+            assert_eq!(
+                read_presentation_preferences(&updated),
+                PresentationPreferences {
+                    indicator_style,
+                    media_layout
+                }
+            );
             assert_eq!(read_task_layout(&updated), TaskLayout::Shared);
             assert_eq!(read_presets(&updated), Some([3, 7, 20, 30]));
+        }
+        assert_eq!(
+            read_presentation_preferences(old),
+            PresentationPreferences::default()
+        );
+        assert_eq!(
+            read_presentation_preferences(
+                "ui_density = \"detailed\"\nindicator_style = \"ring\"\nmedia_layout = \"invalid\""
+            ),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Informative
+            }
+        );
+        assert_eq!(
+            read_presentation_preferences("ui_density = \"minimal\"\nmedia_layout = \"standard\""),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Standard
+            }
+        );
+        for style in IndicatorStyle::ALL {
+            for layout in MediaLayout::ALL {
+                let text = format!(
+                    "ui_density = \"minimal\"\nindicator_style = \"{}\"\nmedia_layout = \"{}\"",
+                    style.setting(),
+                    layout.setting()
+                );
+                assert_eq!(
+                    read_presentation_preferences(&text),
+                    PresentationPreferences {
+                        indicator_style: style,
+                        media_layout: layout
+                    }
+                );
+            }
         }
     }
 

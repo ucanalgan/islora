@@ -2,9 +2,9 @@
 //! layout and what each click means can be tested without a window.
 
 pub use island_core::geometry::Rect;
-use island_core::layout::{
-    IslandStyle, Material, ProgressStyle, StartMode, TaskLayout, UiDensity, WaveStyle,
-};
+use island_core::layout::{IslandStyle, Material, ProgressStyle, StartMode, TaskLayout, WaveStyle};
+
+use island_core::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
 
 pub const WINDOW_WIDTH: f32 = 760.0;
 pub const WINDOW_HEIGHT: f32 = 540.0;
@@ -103,7 +103,8 @@ impl Page {
 pub enum Action {
     Open(Page),
     Material(Material),
-    Density(UiDensity),
+    IndicatorStyle(IndicatorStyle),
+    MediaLayout(MediaLayout),
     Style(IslandStyle),
     Layout(TaskLayout),
     Progress(ProgressStyle),
@@ -137,7 +138,6 @@ pub enum Focus {
 pub enum Look {
     Tab { selected: bool },
     Choice { selected: bool },
-    DensityCard { selected: bool },
     Switch { on: bool },
     Button,
     Step,
@@ -166,7 +166,7 @@ pub struct Label {
 pub struct SettingsState {
     pub page: Page,
     pub material: Material,
-    pub density: UiDensity,
+    pub preferences: PresentationPreferences,
     pub style: IslandStyle,
     pub layout: TaskLayout,
     pub progress: ProgressStyle,
@@ -400,24 +400,17 @@ fn appearance(view: &mut View, state: &SettingsState) {
             )
         }),
     );
-    view.caption("Arayüz yoğunluğu", 470.0);
-    let width = (WIDTH - GAP * 2.0) / 3.0;
-    for (index, density) in UiDensity::ALL.into_iter().enumerate() {
-        let bounds = Rect {
-            x: LEFT + index as f32 * (width + GAP),
-            y: 492.0,
-            width,
-            height: 40.0,
-        };
-        view.control(
-            Action::Density(density),
-            Look::DensityCard {
-                selected: state.density == density,
-            },
-            bounds,
-            density.label(),
-        );
-    }
+    view.caption("Sistem göstergesi görünümü", 470.0);
+    view.choices(
+        492.0,
+        IndicatorStyle::ALL.map(|style| {
+            (
+                Action::IndicatorStyle(style),
+                state.preferences.indicator_style == style,
+                style.label(),
+            )
+        }),
+    );
 }
 
 /// How a short task shares the island with music, and how a send shows.
@@ -490,6 +483,17 @@ fn layout(view: &mut View, state: &SettingsState) {
         opacity: 1.0,
         centered: true,
     });
+    view.caption("Müzik görünümü", 475.0);
+    view.choices(
+        495.0,
+        MediaLayout::ALL.map(|layout| {
+            (
+                Action::MediaLayout(layout),
+                state.preferences.media_layout == layout,
+                layout.label(),
+            )
+        }),
+    );
 }
 
 /// One line on what the chosen layout does.
@@ -799,7 +803,7 @@ mod tests {
         SettingsState {
             page,
             material: Material::Black,
-            density: UiDensity::Balanced,
+            preferences: PresentationPreferences::default(),
             style: IslandStyle::Island,
             layout: TaskLayout::Bubble,
             progress: ProgressStyle::Ring,
@@ -954,32 +958,31 @@ mod tests {
     }
 
     #[test]
-    fn density_cards_are_selectable_and_keyboard_reachable() {
-        let mut current = state(Page::Appearance);
-        current.density = UiDensity::Detailed;
-        let view = view(&current);
-        let order = view.focus_order(Page::Appearance);
-        for density in UiDensity::ALL {
-            let action = Action::Density(density);
-            let control = view
-                .controls
-                .iter()
-                .find(|control| control.action == action)
-                .unwrap();
-            assert_eq!(
-                control.look,
-                Look::DensityCard {
-                    selected: density == UiDensity::Detailed
-                }
-            );
-            assert_eq!(
-                view.action_at(
-                    control.bounds.x + control.bounds.width / 2.0,
-                    control.bounds.y + control.bounds.height / 2.0
-                ),
-                Some(action)
-            );
-            assert!(order.contains(&Focus::Control(action)));
+    fn feature_appearance_choices_are_selectable_and_keyboard_reachable() {
+        for page in [Page::Appearance, Page::Layout] {
+            let current = state(page);
+            let view = view(&current);
+            let actions: Vec<Action> = match page {
+                Page::Appearance => IndicatorStyle::ALL
+                    .into_iter()
+                    .map(Action::IndicatorStyle)
+                    .collect(),
+                _ => MediaLayout::ALL
+                    .into_iter()
+                    .map(Action::MediaLayout)
+                    .collect(),
+            };
+            for action in actions {
+                let bounds = view.bounds_of(action).unwrap();
+                assert_eq!(
+                    view.action_at(
+                        bounds.x + bounds.width / 2.0,
+                        bounds.y + bounds.height / 2.0
+                    ),
+                    Some(action)
+                );
+                assert!(view.focus_order(page).contains(&Focus::Control(action)));
+            }
         }
     }
 

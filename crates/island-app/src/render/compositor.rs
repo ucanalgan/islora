@@ -587,7 +587,7 @@ struct Surfaces {
 }
 
 pub struct Renderer {
-    density: island_core::layout::UiDensity,
+    preferences: island_core::presentation::PresentationPreferences,
     indicator_alert: bool,
     compositor: Compositor,
     _target: DesktopWindowTarget,
@@ -746,7 +746,7 @@ impl Renderer {
 
         let painter = Painter::new(&compositor)?;
         let mut renderer = Self {
-            density: island_core::layout::UiDensity::default(),
+            preferences: island_core::presentation::PresentationPreferences::default(),
             indicator_alert: false,
             compositor,
             _target: target,
@@ -992,8 +992,10 @@ impl Renderer {
                 width: self.compact_width,
                 ..Pill::COMPACT
             },
-            Presentation::Level => self.density.level_layout().pill,
-            Presentation::Alert if self.indicator_alert => self.density.level_layout().pill,
+            Presentation::Level => self.preferences.indicator_style.level_layout().pill,
+            Presentation::Alert if self.indicator_alert => {
+                self.preferences.indicator_style.level_layout().pill
+            }
             Presentation::Expanded if self.strip => Pill::EXPANDED_WITH_STRIP,
             other => Pill::for_presentation(other),
         };
@@ -1132,7 +1134,12 @@ impl Renderer {
             scrub,
             self.wave_motion != WaveMotion::Hidden,
         );
-        scene.density = self.density;
+        if frame.presentation == Presentation::Level || scene.indicator_alert {
+            scene.preferences.indicator_style = self.preferences.indicator_style;
+        }
+        if scene.media.is_some() {
+            scene.preferences.media_layout = self.preferences.media_layout;
+        }
         self.indicator_alert = scene.indicator_alert;
         if frame.presentation == Presentation::Compact {
             self.fit_compact(&mut scene);
@@ -1237,8 +1244,11 @@ impl Renderer {
         Ok(resized)
     }
 
-    pub fn set_density(&mut self, density: island_core::layout::UiDensity) {
-        self.density = density;
+    pub fn set_preferences(
+        &mut self,
+        preferences: island_core::presentation::PresentationPreferences,
+    ) {
+        self.preferences = preferences;
     }
 
     fn update_wave(&mut self, scene: &Scene) -> Result<()> {

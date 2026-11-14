@@ -619,58 +619,6 @@ impl SettingsWindow {
                     .texts
                     .push(text(bounds, 14.0, true, 1.0, Align::Center));
             }
-            Look::DensityCard { selected } => {
-                let border = if selected {
-                    (WHITE, 2.0 * self.scale)
-                } else {
-                    (HAIRLINE, self.scale)
-                };
-                painting.shapes.push(ShapeRun {
-                    bounds,
-                    radius,
-                    fill: self.surface(hovered),
-                    border: Some(border),
-                });
-                let miniature = Bounds {
-                    x: bounds.x + 8.0 * self.scale,
-                    y: bounds.y + 10.0 * self.scale,
-                    width: 35.0 * self.scale,
-                    height: 20.0 * self.scale,
-                };
-                painting.shapes.push(ShapeRun {
-                    bounds: miniature,
-                    radius: 8.0 * self.scale,
-                    fill: [0.02, 0.02, 0.02, 1.0],
-                    border: None,
-                });
-                let count = match control.action {
-                    Action::Density(island_core::layout::UiDensity::Minimal) => 1,
-                    Action::Density(island_core::layout::UiDensity::Detailed) => 3,
-                    _ => 2,
-                };
-                for index in 0..count {
-                    let mark = Bounds {
-                        x: miniature.x + 7.0 * self.scale,
-                        y: miniature.y + (5.0 + index as f32 * 4.0) * self.scale,
-                        width: (20.0 - index as f32 * 4.0) * self.scale,
-                        height: 1.5 * self.scale,
-                    };
-                    painting.shapes.push(ShapeRun {
-                        bounds: mark,
-                        radius: self.scale,
-                        fill: WHITE,
-                        border: None,
-                    });
-                }
-                let label = Bounds {
-                    x: bounds.x + 45.0 * self.scale,
-                    width: bounds.width - 49.0 * self.scale,
-                    ..bounds
-                };
-                painting
-                    .texts
-                    .push(text(label, 12.0, true, 1.0, Align::Center));
-            }
             Look::Switch { on } => {
                 painting.shapes.push(ShapeRun {
                     bounds,
