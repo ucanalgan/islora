@@ -451,7 +451,12 @@ pub fn run() -> Result<()> {
         muted_apps: stored_muted_apps(),
         notification_queue: NotificationQueue::default(),
         notification_source: windows_notifications
-            .then(|| NotificationSource::start(island_window)),
+            .then(|| NotificationSource::start(island_window))
+            .and_then(|result| {
+                result
+                    .map_err(|error| eprintln!("notification thread failed: {error}"))
+                    .ok()
+            }),
         active_notification: None,
         shown_notification: false,
         network_quiet_until: 0,
@@ -942,10 +947,7 @@ impl App {
                         return;
                     }
                     if let Some(mode) = StartMode::at(pill_x, pill_y) {
-                        if self.island.set_start_mode(mode) {
-                            settings::remember("start_mode", mode.setting());
-                            self.refresh();
-                        }
+                        self.choose_start_mode(mode);
                         return;
                     }
                 }
@@ -1112,10 +1114,8 @@ impl App {
                     self.start_preset(index, now);
                     return;
                 }
-                if let Some(mode) = StartMode::at(x, y)
-                    && self.island.set_start_mode(mode)
-                {
-                    settings::remember("start_mode", mode.setting());
+                if let Some(mode) = StartMode::at(x, y) {
+                    self.choose_start_mode(mode);
                 }
             }
             QuickPage::Calendar => {
@@ -1547,17 +1547,28 @@ impl App {
         if !self.shown_notification {
             return;
         }
-        let Some((notice, _)) = self.active_notification.take() else {
+        let Some((notice, until)) = self.active_notification.take() else {
             return;
         };
         if !self.muted_apps.contains(&notice.app_id) {
-            self.muted_apps.push(notice.app_id);
-            settings::remember("muted_apps", &self.muted_apps.join(","));
+            let previous = self.muted_apps.clone();
+            let previous_queue = self.notification_queue.clone();
+            self.muted_apps.push(notice.app_id.clone());
             self.notification_queue.set_muted(self.muted_apps.clone());
+            if !settings::persist_or_rollback("muted_apps", &self.muted_apps.join(","), || {
+                self.muted_apps = previous;
+                self.notification_queue = previous_queue;
+                true
+            }) {
+                self.active_notification = Some((notice, until));
+                self.refresh();
+                return;
+            }
         }
         self.island.remove(Kind::ExternalNotification);
         self.show_next_notification(self.now());
         self.refresh();
+        self.sync_settings_window();
     }
 
     fn on_time_changed(&mut self) {
@@ -1666,8 +1677,13 @@ impl App {
         let wanted_notifications = stored_windows_notifications() && !self.quiet;
         if wanted_notifications != self.windows_notifications {
             self.windows_notifications = wanted_notifications;
-            self.notification_source =
-                wanted_notifications.then(|| NotificationSource::start(self.island_window));
+            self.notification_source = wanted_notifications
+                .then(|| NotificationSource::start(self.island_window))
+                .and_then(|result| {
+                    result
+                        .map_err(|error| eprintln!("notification thread failed: {error}"))
+                        .ok()
+                });
             if !wanted_notifications {
                 self.notification_queue.clear();
                 self.active_notification = None;
@@ -1793,75 +1809,105 @@ impl App {
             Action::Open(chosen) => page = chosen,
             Action::Material(material) => self.choose_material(material),
             Action::IndicatorStyle(style) => {
+                let previous = self.preferences;
                 self.preferences.indicator_style = style;
                 self.renderer.set_preferences(self.preferences);
-                settings::remember("indicator_style", style.setting());
+                settings::persist_or_rollback("indicator_style", style.setting(), || {
+                    self.preferences = previous;
+                    self.renderer.set_preferences(previous);
+                    true
+                });
                 self.refresh();
             }
             Action::MediaLayout(layout) => {
+                let previous = self.preferences;
                 self.preferences.media_layout = layout;
                 self.renderer.set_preferences(self.preferences);
-                settings::remember("media_layout", layout.setting());
+                settings::persist_or_rollback("media_layout", layout.setting(), || {
+                    self.preferences = previous;
+                    self.renderer.set_preferences(previous);
+                    true
+                });
                 self.refresh();
             }
             Action::Style(style) => self.choose_style(style),
             Action::Layout(layout) => {
+                let previous = self.task_layout;
                 self.task_layout = layout;
                 self.island.set_task_layout(layout);
-                settings::remember("task_layout", layout.setting());
+                settings::persist_or_rollback("task_layout", layout.setting(), || {
+                    self.task_layout = previous;
+                    self.island.set_task_layout(previous);
+                    true
+                });
                 self.refresh();
             }
             Action::Progress(style) => {
+                let previous = self.progress_style;
                 self.progress_style = style;
                 self.island.set_progress_style(style);
-                settings::remember("progress_style", style.setting());
+                settings::persist_or_rollback("progress_style", style.setting(), || {
+                    self.progress_style = previous;
+                    self.island.set_progress_style(previous);
+                    true
+                });
                 self.refresh();
             }
             Action::MonitorStep { next } => self.choose_monitor(next),
             Action::SoundWave => {
                 self.sound_wave = !self.sound_wave;
                 if self.apply_wave() {
-                    if let Err(error) = settings::try_remember(
+                    settings::persist_or_rollback(
                         "sound_wave",
                         if self.sound_wave { "on" } else { "off" },
-                    ) {
-                        eprintln!("sound wave could not be saved: {error}");
-                        self.sound_wave = !self.sound_wave;
-                        if !self.apply_wave() {
+                        || {
                             self.sound_wave = !self.sound_wave;
-                        }
-                        settings::report_error(
-                            "Sound wave could not be saved. Check access to config.toml and try again.",
-                        );
-                    }
+                            if self.apply_wave() {
+                                true
+                            } else {
+                                self.sound_wave = !self.sound_wave;
+                                false
+                            }
+                        },
+                    );
                 } else {
                     self.sound_wave = !self.sound_wave;
-                    settings::report_error("The sound wave could not be updated. Try again.");
+                    let restored = self.apply_wave();
+                    settings::report_error(if restored {
+                        "Ses dalgası uygulanamadı; önceki durum geri yüklendi."
+                    } else {
+                        "Ses dalgası uygulanamadı ve önceki görünüm geri yüklenemedi. Ayarı kontrol edin."
+                    });
                 }
             }
             Action::ReducedMotion => {
                 self.reduced_motion = !self.reduced_motion;
                 render::set_reduced_motion(self.reduced_motion);
                 if self.apply_wave() {
-                    if let Err(error) = settings::try_remember(
+                    settings::persist_or_rollback(
                         "reduced_motion",
                         if self.reduced_motion { "on" } else { "off" },
-                    ) {
-                        eprintln!("reduced motion could not be saved: {error}");
-                        self.reduced_motion = !self.reduced_motion;
-                        render::set_reduced_motion(self.reduced_motion);
-                        if !self.apply_wave() {
+                        || {
                             self.reduced_motion = !self.reduced_motion;
                             render::set_reduced_motion(self.reduced_motion);
-                        }
-                        settings::report_error(
-                            "Reduced motion could not be saved. Check access to config.toml and try again.",
-                        );
-                    }
+                            if self.apply_wave() {
+                                true
+                            } else {
+                                self.reduced_motion = !self.reduced_motion;
+                                render::set_reduced_motion(self.reduced_motion);
+                                false
+                            }
+                        },
+                    );
                 } else {
                     self.reduced_motion = !self.reduced_motion;
                     render::set_reduced_motion(self.reduced_motion);
-                    settings::report_error("Reduced motion could not be applied. Try again.");
+                    let restored = self.apply_wave();
+                    settings::report_error(if restored {
+                        "Hareket ayarı uygulanamadı; önceki durum geri yüklendi."
+                    } else {
+                        "Hareket ayarı uygulanamadı ve önceki görünüm geri yüklenemedi. Ayarı kontrol edin."
+                    });
                 }
             }
             Action::QuickTimeout { next } => {
@@ -1875,33 +1921,53 @@ impl App {
                 } else {
                     (current + choices.len() - 1) % choices.len()
                 };
+                let previous = self.quick_timeout;
                 self.quick_timeout = choices[index];
-                settings::remember("quick_controls_timeout", &self.quick_timeout.to_string());
+                settings::persist_or_rollback(
+                    "quick_controls_timeout",
+                    &self.quick_timeout.to_string(),
+                    || {
+                        self.quick_timeout = previous;
+                        true
+                    },
+                );
             }
             Action::WaveStyle(style) => match self.renderer.set_wave_style(style) {
                 Ok(()) => {
-                    if let Err(error) = settings::try_remember("wave_style", style.setting()) {
-                        eprintln!("wave style could not be saved: {error}");
-                        if let Err(rollback) = self.renderer.set_wave_style(self.wave_style) {
-                            eprintln!("wave style rollback failed: {rollback}");
-                            self.wave_style = style;
+                    let previous = self.wave_style;
+                    self.wave_style = style;
+                    settings::persist_or_rollback("wave_style", style.setting(), || {
+                        if self.renderer.set_wave_style(previous).is_ok() {
+                            self.wave_style = previous;
+                            true
+                        } else {
+                            false
                         }
-                        settings::report_error(
-                            "Wave style could not be saved. Check access to config.toml and try again.",
-                        );
-                    } else {
-                        self.wave_style = style;
-                    }
+                    });
                 }
                 Err(error) => {
                     eprintln!("wave style failed: {error}");
-                    settings::report_error("Wave style could not be applied. Try again.");
+                    let restored = self.renderer.set_wave_style(self.wave_style).is_ok();
+                    settings::report_error(if restored {
+                        "Dalga stili uygulanamadı; önceki stil geri yüklendi."
+                    } else {
+                        "Dalga stili uygulanamadı ve önceki stil geri yüklenemedi. Ayarı kontrol edin."
+                    });
                 }
             },
             Action::Notice(index) => self.toggle_notice(NOTICES[index].0),
             Action::WindowsNotifications => {
                 if !self.windows_notifications {
-                    let source = NotificationSource::start(self.island_window);
+                    let source = match NotificationSource::start(self.island_window) {
+                        Ok(source) => source,
+                        Err(error) => {
+                            eprintln!("notification thread failed: {error}");
+                            settings::report_error(
+                                "Bildirim kaynağı başlatılamadı. Yeniden deneyin.",
+                            );
+                            return;
+                        }
+                    };
                     if let Err(error) = source.request_access() {
                         eprintln!("notification access request failed: {error}");
                         settings::report_error(
@@ -1910,19 +1976,30 @@ impl App {
                     } else {
                         self.notification_source = Some(source);
                         self.windows_notifications = true;
-                        settings::remember("windows_notifications", "on");
+                        settings::persist_or_rollback("windows_notifications", "on", || {
+                            self.notification_source = None;
+                            self.windows_notifications = false;
+                            // A Windows consent request cannot be cancelled here.
+                            false
+                        });
                     }
                 } else {
-                    self.notification_source = None;
+                    let previous_source = self.notification_source.take();
                     self.windows_notifications = false;
-                    self.notification_queue.clear();
-                    self.active_notification = None;
-                    self.island.remove(Kind::ExternalNotification);
-                    self.refresh();
-                    settings::remember("windows_notifications", "off");
+                    if settings::persist_or_rollback("windows_notifications", "off", || {
+                        self.notification_source = previous_source;
+                        self.windows_notifications = true;
+                        true
+                    }) {
+                        self.notification_queue.clear();
+                        self.active_notification = None;
+                        self.island.remove(Kind::ExternalNotification);
+                        self.refresh();
+                    }
                 }
             }
             Action::FocusHidesNotifications => {
+                let previous_queue = self.notification_queue.clone();
                 self.focus_hides_notifications = !self.focus_hides_notifications;
                 self.notification_queue.set_focus(
                     self.focus_hides_notifications
@@ -1931,45 +2008,75 @@ impl App {
                             FocusStatus::Running { .. } | FocusStatus::Open
                         ),
                 );
-                settings::remember(
+                settings::persist_or_rollback(
                     "focus_hides_notifications",
                     if self.focus_hides_notifications {
                         "on"
                     } else {
                         "off"
                     },
+                    || {
+                        self.focus_hides_notifications = !self.focus_hides_notifications;
+                        self.notification_queue = previous_queue;
+                        true
+                    },
                 );
             }
             Action::ClearMutedApps => {
+                let previous = self.muted_apps.clone();
+                let previous_queue = self.notification_queue.clone();
                 self.muted_apps.clear();
                 self.notification_queue.set_muted(Vec::new());
-                settings::remember("muted_apps", "");
+                settings::persist_or_rollback("muted_apps", "", || {
+                    self.muted_apps = previous;
+                    self.notification_queue = previous_queue;
+                    true
+                });
             }
             Action::Preset { index, longer } => {
                 let mut presets = self.island.presets();
+                let previous = presets;
                 presets[index] = stepped_preset(presets[index], longer);
                 self.island.set_presets(presets);
-                settings::remember(
+                settings::persist_or_rollback(
                     "timer_presets",
                     &presets.map(|minutes| minutes.to_string()).join(", "),
+                    || {
+                        self.island.set_presets(previous);
+                        true
+                    },
                 );
                 self.refresh();
             }
             Action::Mode(mode) => {
-                if self.island.set_start_mode(mode) {
-                    settings::remember("start_mode", mode.setting());
-                    self.refresh();
-                }
+                self.choose_start_mode(mode);
             }
             Action::SaveCalendar => calendar_note = self.save_calendar(),
             Action::Autostart => {
+                let previous = match autostart::snapshot() {
+                    Ok(previous) => previous,
+                    Err(error) => {
+                        eprintln!("could not read Windows startup setting: {error}");
+                        settings::report_error(
+                            "Windows başlangıç ayarı okunamadı; değişiklik yapılmadı.",
+                        );
+                        return;
+                    }
+                };
                 let on = !autostart::is_on();
                 if autostart::set(on) {
-                    settings::remember("autostart", if on { "on" } else { "off" });
-                } else {
-                    settings::report_error(
-                        "Windows startup could not be changed. Check Windows permissions and try again.",
+                    settings::persist_or_rollback(
+                        "autostart",
+                        if on { "on" } else { "off" },
+                        || autostart::restore(previous.as_deref()),
                     );
+                } else {
+                    let restored = autostart::restore(previous.as_deref());
+                    settings::report_error(if restored {
+                        "Windows başlangıç ayarı uygulanamadı; önceki kayıt geri yüklendi."
+                    } else {
+                        "Windows başlangıç ayarı uygulanamadı ve önceki kayıt doğrulanamadı. Windows başlangıç ayarlarını kontrol edin."
+                    });
                 }
             }
             Action::Demo => self.toggle_demo(),
@@ -1991,6 +2098,28 @@ impl App {
         }
     }
 
+    fn choose_start_mode(&mut self, mode: StartMode) {
+        let Some(result) = change_start_mode(&mut self.island, mode, |value| {
+            settings::try_remember("start_mode", value)
+        }) else {
+            return;
+        };
+        if let Err(restored) = result {
+            settings::report_persistence_failure(restored);
+        }
+        self.refresh();
+        self.sync_settings_window();
+    }
+
+    fn sync_settings_window(&mut self) {
+        if let Some(page) = self.settings.as_ref().map(|window| window.state().page) {
+            let state = self.settings_state(page);
+            if let Some(window) = &mut self.settings {
+                window.update(state);
+            }
+        }
+    }
+
     fn choose_material(&mut self, material: Material) {
         if material == self.material {
             return;
@@ -1998,24 +2127,31 @@ impl App {
         let effective = material.in_effect(tray::transparency_is_on(), self.battery_saver);
         if let Err(error) = self.renderer.set_material(effective) {
             eprintln!("material failed: {error}");
-            settings::report_error("The material could not be applied. Try again.");
-            return;
-        }
-        if let Err(error) = settings::try_remember("material", material.setting()) {
-            eprintln!("material could not be saved: {error}");
-            let previous = self
+            let old = self
                 .material
                 .in_effect(tray::transparency_is_on(), self.battery_saver);
-            if let Err(rollback) = self.renderer.set_material(previous) {
-                eprintln!("material rollback failed: {rollback}");
-                self.material = material;
-            }
-            settings::report_error(
-                "Material could not be saved. Check access to config.toml and try again.",
-            );
+            let restored = self.renderer.set_material(old).is_ok();
+            settings::report_error(if restored {
+                "Malzeme uygulanamadı; önceki görünüm geri yüklendi."
+            } else {
+                "Malzeme uygulanamadı ve önceki görünüm geri yüklenemedi. Ayarı kontrol edin."
+            });
             return;
         }
+        let previous = self.material;
         self.material = material;
+        if !settings::persist_or_rollback("material", material.setting(), || {
+            let effective = previous.in_effect(tray::transparency_is_on(), self.battery_saver);
+            if self.renderer.set_material(effective).is_ok() {
+                self.material = previous;
+                true
+            } else {
+                false
+            }
+        }) {
+            self.refresh();
+            return;
+        }
         // Otherwise a change made with nothing on screen would not show.
         self.island.peek(self.now());
         self.refresh();
@@ -2027,17 +2163,18 @@ impl App {
         }
         let previous = self.placement.style;
         if !self.set_style(style) {
-            settings::report_error("The island style could not be applied. Try again.");
+            let restored = self.renderer.set_style(previous).is_ok();
+            settings::report_error(if restored {
+                "Ada biçimi uygulanamadı; önceki biçim geri yüklendi."
+            } else {
+                "Ada biçimi uygulanamadı ve önceki biçim geri yüklenemedi. Ayarı kontrol edin."
+            });
             return;
         }
-        if let Err(error) = settings::try_remember("island_style", style.setting()) {
-            eprintln!("island style could not be saved: {error}");
-            if !self.set_style(previous) {
-                eprintln!("island style rollback failed");
-            }
-            settings::report_error(
-                "Island style could not be saved. Check access to config.toml and try again.",
-            );
+        if !settings::persist_or_rollback("island_style", style.setting(), || {
+            self.set_style(previous)
+        }) {
+            self.refresh();
             return;
         }
         // Otherwise a change made with nothing on screen would not show.
@@ -2062,10 +2199,18 @@ impl App {
     }
 
     fn toggle_notice(&mut self, name: &str) {
+        let previous = self.notices_off.clone();
         self.notices_off = toggled_notice(&self.notices_off, name);
         self.update_native_osd();
-        settings::remember("notices_off", &self.notices_off.join(", "));
-        apply_settings(&mut self.island);
+        self.island
+            .set_track_notices(!self.is_turned_off("track_change"));
+        settings::persist_or_rollback("notices_off", &self.notices_off.join(", "), || {
+            self.notices_off = previous;
+            self.update_native_osd();
+            self.island
+                .set_track_notices(!self.is_turned_off("track_change"));
+            true
+        });
         self.on_camera();
     }
 
@@ -2136,9 +2281,22 @@ impl App {
         else {
             return;
         };
+        let previous = self.selected_monitor.clone();
         self.selected_monitor = Some(monitor.device.clone());
-        self.on_display_changed();
-        settings::remember("monitor", &monitor.device);
+        if !self.on_display_changed() {
+            self.selected_monitor = previous;
+            let restored = self.on_display_changed();
+            settings::report_error(if restored {
+                "Ekran değiştirilemedi; önceki ekran geri yüklendi."
+            } else {
+                "Ekran değiştirilemedi ve önceki yerleşim geri yüklenemedi. Ekranları kontrol edin."
+            });
+            return;
+        }
+        settings::persist_or_rollback("monitor", &monitor.device, || {
+            self.selected_monitor = previous;
+            self.on_display_changed()
+        });
         self.island.peek(self.now());
         self.refresh();
     }
@@ -2970,7 +3128,7 @@ impl App {
         self.refresh();
     }
 
-    fn on_display_changed(&mut self) {
+    fn on_display_changed(&mut self) -> bool {
         match window::place(
             self.island_window,
             self.edge_window,
@@ -2981,6 +3139,7 @@ impl App {
                 self.placement = placement;
                 if let Err(error) = self.renderer.set_metrics(placement.scale, placement.width) {
                     eprintln!("metrics failed: {error}");
+                    return false;
                 }
                 self.reappear();
                 if let Some(indicator) = self.tracker.monitors_changed(monitor_count()) {
@@ -2992,8 +3151,12 @@ impl App {
                         window.update(state);
                     }
                 }
+                true
             }
-            Err(error) => eprintln!("placement failed: {error}"),
+            Err(error) => {
+                eprintln!("placement failed: {error}");
+                false
+            }
         }
     }
 
@@ -3436,6 +3599,24 @@ fn stored_progress_style() -> ProgressStyle {
         .unwrap_or_default()
 }
 
+fn change_start_mode(
+    island: &mut Island,
+    mode: StartMode,
+    save: impl FnOnce(&str) -> std::io::Result<()>,
+) -> Option<std::result::Result<(), bool>> {
+    let previous = island.start_mode();
+    if !island.set_start_mode(mode) {
+        return None;
+    }
+    Some(settings::save_with_rollback(
+        || save(mode.setting()),
+        || {
+            island.set_start_mode(previous);
+            island.start_mode() == previous
+        },
+    ))
+}
+
 /// Islora starts with Windows unless the user said otherwise once. Copies run
 /// by tests and for pictures never touch the real list.
 fn start_with_windows_by_default() {
@@ -3444,8 +3625,25 @@ fn start_with_windows_by_default() {
     if testing || config::read_autostart(&text).is_some() {
         return;
     }
+    let previous = match autostart::snapshot() {
+        Ok(previous) => previous,
+        Err(error) => {
+            eprintln!("could not read Windows startup setting: {error}");
+            settings::report_error("Windows başlangıç ayarı okunamadı; değişiklik yapılmadı.");
+            return;
+        }
+    };
     if autostart::set(true) {
-        settings::remember("autostart", "on");
+        settings::persist_or_rollback("autostart", "on", || {
+            autostart::restore(previous.as_deref())
+        });
+    } else {
+        let restored = autostart::restore(previous.as_deref());
+        settings::report_error(if restored {
+            "Windows başlangıç ayarı uygulanamadı; önceki kayıt geri yüklendi."
+        } else {
+            "Windows başlangıç ayarı uygulanamadı ve önceki kayıt doğrulanamadı. Windows başlangıç ayarlarını kontrol edin."
+        });
     }
 }
 
@@ -3897,6 +4095,38 @@ unsafe extern "system" fn edge_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_start_mode_change_restores_state_when_saving_fails() {
+        let mut island = Island::new();
+        let previous = island.start_mode();
+        let requested = if previous == StartMode::Focus {
+            StartMode::Timer
+        } else {
+            StartMode::Focus
+        };
+        assert_eq!(
+            change_start_mode(&mut island, requested, |_| Err(std::io::Error::other(
+                "save failed"
+            ))),
+            Some(Err(true))
+        );
+        assert_eq!(island.start_mode(), previous);
+        assert_eq!(
+            change_start_mode(&mut island, requested, |value| {
+                assert_eq!(value, requested.setting());
+                Ok(())
+            }),
+            Some(Ok(()))
+        );
+        assert_eq!(island.start_mode(), requested);
+        assert_eq!(
+            change_start_mode(&mut island, requested, |_| panic!(
+                "unchanged mode should not be saved"
+            )),
+            None
+        );
+    }
 
     #[test]
     fn wave_switch_and_energy_saver_hide_bars_without_losing_the_choice() {

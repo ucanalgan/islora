@@ -242,18 +242,18 @@ pub struct RuntimeContext {
 }
 impl Settings {
     pub fn wave(&self, context: RuntimeContext) -> Effective<WaveBehavior> {
-        if context.force_wave_still
+        if !self.music.sound_wave.unwrap_or(true) {
+            Effective {
+                value: WaveBehavior::Hidden,
+                constraint: Some(Constraint::WaveDisabled),
+            }
+        } else if context.force_wave_still
             || context.reduced_motion
             || self.appearance.reduced_motion.unwrap_or(false)
         {
             Effective {
                 value: WaveBehavior::Still,
                 constraint: Some(Constraint::ReducedMotion),
-            }
-        } else if !self.music.sound_wave.unwrap_or(true) {
-            Effective {
-                value: WaveBehavior::Hidden,
-                constraint: Some(Constraint::WaveDisabled),
             }
         } else if context.energy_saver {
             Effective {
@@ -345,6 +345,32 @@ pub fn reset_all(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disabled_wave_stays_hidden_under_all_motion_constraints() {
+        let settings = Settings::read("sound_wave = \"off\"\nwave_style = \"lively\"");
+        for context in [
+            RuntimeContext::default(),
+            RuntimeContext {
+                reduced_motion: true,
+                energy_saver: true,
+                ..Default::default()
+            },
+            RuntimeContext {
+                force_wave_still: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(settings.wave(context).value, WaveBehavior::Hidden);
+        }
+        assert_eq!(settings.music.wave_style(), WaveStyle::Lively);
+        let mut enabled = settings.clone();
+        enabled.music.sound_wave = Some(true);
+        assert_eq!(
+            enabled.wave(RuntimeContext::default()).value,
+            WaveBehavior::Animated
+        );
+        assert_eq!(settings.music.sound_wave, Some(false));
+    }
     #[test]
     fn disabled_wave_retains_its_independent_style() {
         let settings = Settings::read(

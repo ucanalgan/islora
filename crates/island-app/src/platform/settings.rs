@@ -121,14 +121,37 @@ pub fn try_remember(key: &str, value: &str) -> io::Result<()> {
     replace(&path, &write_value(&text, key, value))
 }
 
-/// Report failure visibly; the running choice remains active for this session.
-pub fn remember(key: &str, value: &str) {
-    if let Err(error) = try_remember(key, value) {
-        eprintln!("settings could not be saved: {error}");
-        report_error(
-            "Ayar kaydedilemedi. Seciminiz bu oturumda etkin kalabilir. config.toml dosyasinin erisimini kontrol edip tekrar deneyin.",
-        );
+/// Complete a change already applied at runtime. The rollback must report
+/// whether it actually restored the previous state.
+pub(crate) fn save_with_rollback(
+    save: impl FnOnce() -> io::Result<()>,
+    rollback: impl FnOnce() -> bool,
+) -> Result<(), bool> {
+    match save() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            eprintln!("settings could not be saved: {error}");
+            Err(rollback())
+        }
     }
+}
+
+pub fn persist_or_rollback(key: &str, value: &str, rollback: impl FnOnce() -> bool) -> bool {
+    match save_with_rollback(|| try_remember(key, value), rollback) {
+        Ok(()) => true,
+        Err(restored) => {
+            report_persistence_failure(restored);
+            false
+        }
+    }
+}
+
+pub(crate) fn report_persistence_failure(restored: bool) {
+    report_error(if restored {
+        "Ayar kaydedilemedi. Önceki seçim geri yüklendi. config.toml erişimini kontrol edin."
+    } else {
+        "Ayar kaydedilemedi ve önceki durum geri yüklenemedi. Değişiklik bu oturumda veya Windows'ta etkin kalmış olabilir. Ayarları kontrol edin."
+    });
 }
 
 pub fn report_error(message: &str) {
@@ -192,6 +215,104 @@ pub fn open_in_editor() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_success_and_failure_restore_runtime_and_renderer() {
+        use std::cell::Cell;
+        let runtime = Cell::new("new");
+        let renderer = Cell::new("new");
+        let unrelated = Cell::new("untouched");
+        assert_eq!(
+            save_with_rollback(
+                || Ok(()),
+                || { panic!("successful save must not roll back") }
+            ),
+            Ok(())
+        );
+        let result = save_with_rollback(
+            || Err(io::Error::other("save failed")),
+            || {
+                runtime.set("old");
+                renderer.set("old");
+                true
+            },
+        );
+        assert_eq!(result, Err(true));
+        assert_eq!(
+            (runtime.get(), renderer.get(), unrelated.get()),
+            ("old", "old", "untouched")
+        );
+        assert_eq!(
+            save_with_rollback(|| Err(io::Error::other("save failed")), || false),
+            Err(false)
+        );
+    }
+
+    #[test]
+    fn draft_and_backup_failures_preserve_the_primary_file() {
+        let folder = std::env::temp_dir().join(format!(
+            "islora-write-stages-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        let original =
+            "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\"\n";
+        std::fs::write(&path, original).unwrap();
+        let draft = path.with_extension("toml.new");
+        std::fs::create_dir(&draft).unwrap();
+        assert!(replace(&path, "new").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        std::fs::remove_dir(&draft).unwrap();
+        let backup_draft = path.with_extension("toml.bak.new");
+        std::fs::create_dir(&backup_draft).unwrap();
+        assert!(replace(&path, "new").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        std::fs::remove_file(draft).unwrap();
+        std::fs::remove_dir(backup_draft).unwrap();
+        let blocked_backup = path.with_extension("toml.bak");
+        std::fs::create_dir(&blocked_backup).unwrap();
+        assert!(replace(&path, "new").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        std::fs::remove_file(path.with_extension("toml.new")).unwrap();
+        std::fs::remove_file(path.with_extension("toml.bak.new")).unwrap();
+        std::fs::remove_dir(blocked_backup).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn saved_update_keeps_unrelated_comments_and_calendar_secret() {
+        let folder = std::env::temp_dir().join(format!(
+            "islora-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        let original = "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\"\nmedia_layout = \"standard\"\n";
+        std::fs::write(&path, original).unwrap();
+        let updated = write_value(original, "media_layout", "informative");
+        replace(&path, &updated).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
+        assert!(updated.contains(
+            "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\""
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+            original
+        );
+        std::fs::remove_file(path.with_extension("toml.bak")).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
 
     #[test]
     fn failed_write_returns_an_error() {

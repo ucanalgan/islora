@@ -2,7 +2,7 @@
 
 use std::iter::once;
 
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
@@ -16,7 +16,7 @@ fn this_copy() -> Option<String> {
     Some(format!("\"{}\"", std::env::current_exe().ok()?.display()))
 }
 
-fn stored() -> Option<String> {
+pub fn snapshot() -> std::io::Result<Option<String>> {
     let mut text = [0_u16; LONGEST_COMMAND];
     let mut size = size_of_val(&text) as u32;
     let status = unsafe {
@@ -30,21 +30,39 @@ fn stored() -> Option<String> {
             Some(&mut size),
         )
     };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != ERROR_SUCCESS {
+        return Err(std::io::Error::from_raw_os_error(status.0 as i32));
+    }
     let units = (size as usize / size_of::<u16>()).saturating_sub(1);
-    (status == ERROR_SUCCESS).then(|| String::from_utf16_lossy(&text[..units]))
+    Ok(Some(String::from_utf16_lossy(&text[..units])))
 }
 
 /// Only true for this copy, as an entry for one that moved would start nothing.
 pub fn is_on() -> bool {
-    stored().is_some_and(|stored| Some(stored) == this_copy())
+    snapshot()
+        .ok()
+        .flatten()
+        .is_some_and(|stored| Some(stored) == this_copy())
 }
 
 pub fn set(on: bool) -> bool {
+    if on {
+        let Some(command) = this_copy() else {
+            return false;
+        };
+        restore(Some(&command))
+    } else {
+        restore(None)
+    }
+}
+
+/// Restore the exact previous entry, including an entry for another copy.
+pub fn restore(command: Option<&str>) -> bool {
     let status = unsafe {
-        if on {
-            let Some(command) = this_copy() else {
-                return false;
-            };
+        if let Some(command) = command {
             let text: Vec<u16> = command.encode_utf16().chain(once(0)).collect();
             let size = size_of_val(text.as_slice()) as u32;
             RegSetKeyValueW(
@@ -62,5 +80,6 @@ pub fn set(on: bool) -> bool {
     if status != ERROR_SUCCESS {
         eprintln!("starting with Windows could not be changed");
     }
-    status == ERROR_SUCCESS
+    (status == ERROR_SUCCESS || (command.is_none() && status == ERROR_FILE_NOT_FOUND))
+        && snapshot().is_ok_and(|stored| stored.as_deref() == command)
 }

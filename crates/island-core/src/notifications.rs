@@ -35,7 +35,7 @@ impl Notice {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct NotificationQueue {
     pending: VecDeque<Notice>,
     known: HashSet<u32>,

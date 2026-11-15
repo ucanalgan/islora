@@ -42,22 +42,19 @@ pub struct NotificationSource {
 }
 
 impl NotificationSource {
-    pub fn start(hwnd: HWND) -> Self {
+    pub fn start(hwnd: HWND) -> std::io::Result<Self> {
         let (signals, inbox) = mpsc::channel();
         let (publish, updates) = mpsc::channel();
         let worker_signals = signals.clone();
         let window = hwnd.0 as isize;
-        let spawned = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("notifications".into())
             .spawn(move || {
                 if let Err(error) = run(window, inbox, worker_signals, publish) {
                     eprintln!("notification source stopped: {error}");
                 }
-            });
-        if let Err(error) = spawned {
-            eprintln!("notification thread failed to start: {error}");
-        }
-        Self { signals, updates }
+            })?;
+        Ok(Self { signals, updates })
     }
 
     pub fn updates(&self) -> impl Iterator<Item = Update> + '_ {
