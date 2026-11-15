@@ -8,7 +8,7 @@ use crate::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
 const LONGEST_PRESET_MINUTES: u64 = 720;
 
 fn is_setting(line: &str, key: &str) -> bool {
-    let line = line.trim();
+    let line = line.trim().trim_start_matches('\u{feff}').trim_start();
     !line.starts_with('#')
         && line
             .split_once('=')
@@ -41,6 +41,9 @@ pub fn remove_settings(text: &str, keys: &[&str]) -> String {
     let mut result = String::new();
     for line in text.split_inclusive('\n') {
         if keys.iter().any(|key| is_setting(line, key)) {
+            if line.starts_with('\u{feff}') {
+                result.push('\u{feff}');
+            }
             if let Some((_, value)) = line.split_once('=')
                 && let Some(index) = comment_at(value)
             {
@@ -70,6 +73,9 @@ pub fn write_value(text: &str, key: &str, value: &str) -> String {
     for line in text.split_inclusive('\n') {
         if !replaced && is_setting(line, key) {
             replaced = true;
+            if line.starts_with('\u{feff}') {
+                result.push('\u{feff}');
+            }
             result.push_str(&setting);
             let (_, old) = line.split_once('=').unwrap();
             if let Some(index) = comment_at(old) {

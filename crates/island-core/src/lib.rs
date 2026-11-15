@@ -18,6 +18,7 @@ pub mod indicator;
 pub mod layout;
 pub mod media;
 pub mod media_kind;
+pub mod migration;
 pub mod notifications;
 pub mod presentation;
 pub mod qr;
