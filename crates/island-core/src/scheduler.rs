@@ -259,6 +259,24 @@ impl Island {
         self.quick_controls = Some(QuickControls::new(now, inactivity));
     }
 
+    /// Return to the existing controllable countdown instead of offering a new
+    /// one. A paused session remains active; a finished session does not.
+    pub fn open_active_countdown(&mut self, now: Millis) -> bool {
+        let kind = if self.focus_open || self.focus.is_some_and(|timer| !timer.is_finished(now)) {
+            Some(Kind::Focus)
+        } else if self.timer.is_some_and(|timer| !timer.is_finished(now)) {
+            Some(Kind::TimerRunning)
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            self.open_kind(kind);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn quick_controls(&self) -> Option<&QuickControls> {
         self.quick_controls.as_ref()
     }
@@ -1342,6 +1360,65 @@ mod tests {
         island.open_home();
         assert!(island.quick_controls().is_none());
         assert!(island.frame(1).home.is_some());
+    }
+
+    #[test]
+    fn quick_timer_returns_to_the_running_or_paused_focus_session() {
+        for focus in [
+            FocusView::Running {
+                ends_at: 60_000,
+                total: 60_000,
+                on_break: false,
+            },
+            FocusView::Paused {
+                remaining: 30_000,
+                total: 60_000,
+                on_break: false,
+            },
+        ] {
+            let mut island = Island::new();
+            island.set_focus(focus, 0);
+            island.frame(1_000);
+            island.open_quick_controls(1_000, None);
+            assert!(island.open_active_countdown(1_000));
+            let frame = island.frame(1_000);
+            assert!(island.quick_controls().is_none());
+            assert_eq!(frame.presentation, Presentation::Expanded);
+            let activity = frame.activity.unwrap();
+            assert_eq!(activity.kind, Kind::Focus);
+            let timer = activity.timer.unwrap();
+            assert!(timer.has_controls);
+            assert_eq!(timer.running, matches!(focus, FocusView::Running { .. }));
+        }
+    }
+
+    #[test]
+    fn quick_timer_uses_existing_local_timer_only_while_it_is_active() {
+        let mut island = Island::new();
+        island.open_quick_controls(0, None);
+        assert!(!island.open_active_countdown(0));
+        assert!(island.quick_controls().is_some());
+        island.start_timer(10_000, 0);
+        island.open_quick_controls(1_000, None);
+        assert!(island.open_active_countdown(1_000));
+        let frame = island.frame(1_000);
+        assert_eq!(frame.presentation, Presentation::Expanded);
+        assert_eq!(frame.activity.unwrap().kind, Kind::TimerRunning);
+        island.open_quick_controls(10_000, None);
+        assert!(!island.open_active_countdown(10_000));
+        assert!(island.quick_controls().is_some());
+    }
+
+    #[test]
+    fn quick_timer_returns_to_a_focus_session_with_unknown_duration() {
+        let mut island = Island::new();
+        island.set_focus(FocusView::Open, 0);
+        island.frame(0);
+        island.open_quick_controls(0, None);
+        assert!(island.open_active_countdown(0));
+        let frame = island.frame(0);
+        assert_eq!(frame.presentation, Presentation::Expanded);
+        assert_eq!(frame.activity.unwrap().kind, Kind::Focus);
     }
 
     #[test]

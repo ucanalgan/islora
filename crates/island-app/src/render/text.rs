@@ -176,6 +176,8 @@ pub struct Painting<'a> {
     pub images: Vec<ImageRun<'a>>,
     /// Centred captions whose text is made while painting.
     pub owned_labels: Vec<(String, Bounds)>,
+    /// Centred generated captions with a feature-specific text colour.
+    pub owned_colored_labels: Vec<(String, Bounds, [f32; 3])>,
 }
 
 struct DecodedImage {
@@ -391,7 +393,15 @@ impl Painter {
                 }
             }
         }
-        for (text, bounds) in &painting.owned_labels {
+        let labels = painting
+            .owned_labels
+            .iter()
+            .map(|(text, bounds)| (text, bounds, [1.0; 3]));
+        let colored_labels = painting
+            .owned_colored_labels
+            .iter()
+            .map(|(text, bounds, color)| (text, bounds, *color));
+        for (text, bounds, [r, g, b]) in labels.chain(colored_labels) {
             let run = TextRun {
                 text,
                 bounds: *bounds,
@@ -404,9 +414,9 @@ impl Painter {
             };
             let format = self.format(&run)?;
             let color = D2D1_COLOR_F {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
+                r,
+                g,
+                b,
                 a: run.opacity,
             };
             let utf16: Vec<u16> = run.text.encode_utf16().collect();

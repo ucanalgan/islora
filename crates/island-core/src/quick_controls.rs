@@ -129,6 +129,40 @@ pub const CALENDAR_SETUP_BOUNDS: Rect = Rect {
     height: 34.0,
 };
 
+/// Timer-page controls have their own geometry; Home keeps its existing layout.
+pub fn timer_mode_bounds(mode: crate::layout::StartMode) -> Rect {
+    let x = match mode {
+        crate::layout::StartMode::Focus => 25.0,
+        crate::layout::StartMode::Timer => 200.0,
+    };
+    Rect {
+        x,
+        y: 57.0,
+        width: 175.0,
+        height: 32.0,
+    }
+}
+
+pub fn timer_mode_at(x: f32, y: f32) -> Option<crate::layout::StartMode> {
+    crate::layout::StartMode::ALL
+        .into_iter()
+        .find(|mode| timer_mode_bounds(*mode).contains(x, y))
+}
+
+pub fn timer_preset_bounds(index: usize) -> Option<Rect> {
+    (index < crate::layout::TIMER_PRESETS.len()).then_some(Rect {
+        x: 24.0 + index as f32 * 89.0,
+        y: 106.0,
+        width: 85.0,
+        height: 44.0,
+    })
+}
+
+pub fn timer_preset_at(x: f32, y: f32) -> Option<usize> {
+    (0..crate::layout::TIMER_PRESETS.len())
+        .find(|&index| timer_preset_bounds(index).is_some_and(|bounds| bounds.contains(x, y)))
+}
+
 /// Returns a rounded percentage for a click within the level control.
 pub fn slider_percent(x: f32, y: f32) -> Option<u8> {
     SLIDER_BOUNDS.contains(x, y).then(|| {
@@ -214,6 +248,46 @@ impl QuickControls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_targets_fit_and_map_to_mouse_and_keyboard_centers() {
+        for mode in crate::layout::StartMode::ALL {
+            let bounds = timer_mode_bounds(mode);
+            assert_eq!(
+                timer_mode_at(
+                    bounds.x + bounds.width / 2.0,
+                    bounds.y + bounds.height / 2.0
+                ),
+                Some(mode)
+            );
+            assert!(bounds.x >= 0.0 && bounds.x + bounds.width <= PANEL_WIDTH);
+            assert!(bounds.y >= BACK_BOUNDS.y + BACK_BOUNDS.height);
+        }
+        for index in 0..crate::layout::TIMER_PRESETS.len() {
+            let bounds = timer_preset_bounds(index).unwrap();
+            assert_eq!(
+                timer_preset_at(
+                    bounds.x + bounds.width / 2.0,
+                    bounds.y + bounds.height / 2.0
+                ),
+                Some(index)
+            );
+            assert!(bounds.x >= 0.0 && bounds.x + bounds.width <= PANEL_WIDTH);
+            assert!(bounds.y + bounds.height <= PANEL_HEIGHT);
+            assert!(
+                bounds.y
+                    >= timer_mode_bounds(crate::layout::StartMode::Timer).y
+                        + timer_mode_bounds(crate::layout::StartMode::Timer).height
+            );
+            if index > 0 {
+                let previous = timer_preset_bounds(index - 1).unwrap();
+                assert!(previous.x + previous.width < bounds.x);
+            }
+        }
+        assert_eq!(timer_preset_bounds(4), None);
+        assert_eq!(timer_preset_at(0.0, 0.0), None);
+        assert_eq!(timer_mode_at(BACK_BOUNDS.x, BACK_BOUNDS.y), None);
+    }
 
     #[test]
     fn six_targets_fit_and_keep_the_requested_order() {

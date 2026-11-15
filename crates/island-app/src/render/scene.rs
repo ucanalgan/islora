@@ -145,6 +145,8 @@ const COUNTDOWN_SIZE: f32 = 34.0;
 const LONG_COUNTDOWN_SIZE: f32 = 26.0;
 const LONG_COUNTDOWN: usize = "24:13".len();
 const COUNTDOWN_LABEL_WIDTH: f32 = 96.0;
+const TIMER_BACKGROUND: [f32; 4] = [5.0 / 255.0, 5.0 / 255.0, 5.0 / 255.0, 1.0];
+const TIMER_MUTED: [f32; 3] = [155.0 / 255.0, 157.0 / 255.0, 164.0 / 255.0];
 
 /// Digits differ in width, so a countdown is measured as if all were zeros, or
 /// the pill would twitch every second.
@@ -1347,6 +1349,35 @@ impl Scene {
 
     fn expanded_timer(&self, timer: TimerView, canvas: &Canvas) -> Painting<'_> {
         let mut painting = Painting::default();
+        painting.shapes.push(ShapeRun {
+            bounds: canvas.bounds(0.0, 0.0, canvas.width, canvas.height),
+            radius: canvas.corner * canvas.scale,
+            fill: TIMER_BACKGROUND,
+            border: None,
+        });
+        let disc_radius = TIMER_RING_RADIUS - TIMER_RING_WIDTH / 2.0 - 5.0;
+        painting.shapes.push(ShapeRun {
+            bounds: canvas.bounds(
+                TIMER_RING_X - disc_radius,
+                TIMER_RING_Y - disc_radius,
+                disc_radius * 2.0,
+                disc_radius * 2.0,
+            ),
+            radius: disc_radius * canvas.scale,
+            fill: [0.055, 0.055, 0.06, 1.0],
+            border: None,
+        });
+        painting.shapes.push(ShapeRun {
+            bounds: canvas.bounds(
+                HOME_SHORTCUT_X - HOME_SHORTCUT_SIZE / 2.0,
+                HOME_SHORTCUT_Y - HOME_SHORTCUT_SIZE / 2.0,
+                HOME_SHORTCUT_SIZE,
+                HOME_SHORTCUT_SIZE,
+            ),
+            radius: 12.0 * canvas.scale,
+            fill: with_alpha(super::tokens::SURFACE, 1.0),
+            border: None,
+        });
         canvas.home_shortcut(&mut painting);
         let opacity = 1.0;
         let header_icon = self.icon.unwrap_or(Icon::Timer);
@@ -1361,13 +1392,16 @@ impl Scene {
                 canvas.bounds(18.0, 14.0, 20.0, 20.0),
                 15.0,
             ));
-            painting.texts.push(canvas.text(
-                header,
-                canvas.bounds(42.0, 14.0, 74.0, 20.0),
-                13.0,
-                true,
-                1.0,
-                Align::Leading,
+            painting.colored.push((
+                canvas.text(
+                    header,
+                    canvas.bounds(42.0, 14.0, 74.0, 20.0),
+                    13.0,
+                    true,
+                    1.0,
+                    Align::Leading,
+                ),
+                super::tokens::PRIMARY,
             ));
         }
         painting.rings.push(RingRun {
@@ -1377,10 +1411,12 @@ impl Scene {
             width: TIMER_RING_WIDTH * canvas.scale,
             fraction: timer.left.map_or(0.0, |left| left as f32 / 1000.0),
             opacity,
-            track_color: None,
+            track_color: Some(super::tokens::SURFACE),
         });
 
-        let size = if self.title.len() > LONG_COUNTDOWN {
+        let size = if self.title.len() > 8 {
+            21.0
+        } else if self.title.len() > LONG_COUNTDOWN {
             LONG_COUNTDOWN_SIZE
         } else {
             COUNTDOWN_SIZE
@@ -1392,10 +1428,13 @@ impl Scene {
             inside,
             44.0,
         );
-        painting.texts.push(TextRun {
-            even_digits: true,
-            ..canvas.text(&self.title, countdown, size, true, opacity, Align::Center)
-        });
+        painting.colored.push((
+            TextRun {
+                even_digits: true,
+                ..canvas.text(&self.title, countdown, size, true, opacity, Align::Center)
+            },
+            super::tokens::PRIMARY,
+        ));
         let label = canvas.bounds(
             TIMER_RING_X - COUNTDOWN_LABEL_WIDTH / 2.0,
             TIMER_RING_Y + 18.0,
@@ -1407,9 +1446,10 @@ impl Scene {
         } else {
             &self.detail
         };
-        painting
-            .texts
-            .push(canvas.text(state, label, 11.5, false, 0.6, Align::Center));
+        painting.colored.push((
+            canvas.text(state, label, 11.5, false, 1.0, Align::Center),
+            TIMER_MUTED,
+        ));
 
         let buttons: &[TimerButton] = if timer.has_controls {
             &TimerButton::ALL
@@ -1431,8 +1471,12 @@ impl Scene {
             );
             painting.shapes.push(ShapeRun {
                 bounds,
-                radius: 12.0 * canvas.scale,
-                fill: with_alpha(super::tokens::SURFACE, 1.0),
+                radius: 18.0 * canvas.scale,
+                fill: if button == TimerButton::Toggle {
+                    [0.23, 0.235, 0.26, 1.0]
+                } else {
+                    with_alpha(super::tokens::SURFACE, 1.0)
+                },
                 border: None,
             });
             let top = TIMER_RING_Y - half;
@@ -1446,18 +1490,21 @@ impl Scene {
                 TimerButton::Toggle => "Resume",
                 TimerButton::Cancel => "Stop",
             };
-            painting.texts.push(canvas.text(
-                label,
-                canvas.bounds(
-                    button.center_x() - half,
-                    top + 28.0,
-                    TIMER_BUTTON_SIZE,
-                    16.0,
+            painting.colored.push((
+                canvas.text(
+                    label,
+                    canvas.bounds(
+                        button.center_x() - half,
+                        top + 28.0,
+                        TIMER_BUTTON_SIZE,
+                        16.0,
+                    ),
+                    10.0,
+                    false,
+                    1.0,
+                    Align::Center,
                 ),
-                10.0,
-                false,
-                1.0,
-                Align::Center,
+                super::tokens::PRIMARY,
             ));
         }
         painting
@@ -1920,7 +1967,11 @@ fn quick_controls_panel<'a>(view: &'a QuickControlsView, canvas: &Canvas) -> Pai
     painting.shapes.push(ShapeRun {
         bounds: canvas.bounds(0.0, 0.0, canvas.width, canvas.height),
         radius: canvas.corner * canvas.scale,
-        fill: [0.0, 0.0, 0.0, 1.0],
+        fill: if view.page == QuickPage::Timer {
+            TIMER_BACKGROUND
+        } else {
+            [0.0, 0.0, 0.0, 1.0]
+        },
         border: None,
     });
     let title = match view.page {
@@ -2036,48 +2087,71 @@ fn quick_controls_panel<'a>(view: &'a QuickControlsView, canvas: &Canvas) -> Pai
         return painting;
     }
     if view.page == QuickPage::Timer {
-        for mode in StartMode::ALL {
-            let (left, width) = mode.tab();
-            let bounds = canvas.bounds(
-                left,
-                MODE_TAB_Y - MODE_TAB_HEIGHT / 2.0,
-                width,
-                MODE_TAB_HEIGHT,
-            );
-            if view.modes_offered {
-                if view.mode == mode {
-                    painting.bars.push(BarRun {
-                        bounds,
-                        opacity: 0.16,
+        if view.modes_offered {
+            painting.shapes.push(ShapeRun {
+                bounds: canvas.bounds(24.0, 56.0, 352.0, 34.0),
+                radius: 12.0 * canvas.scale,
+                fill: with_alpha(super::tokens::SURFACE, 1.0),
+                border: None,
+            });
+            for mode in StartMode::ALL {
+                let area = island_core::quick_controls::timer_mode_bounds(mode);
+                let bounds = canvas.rect(area);
+                let chosen = view.mode == mode;
+                if chosen {
+                    painting.shapes.push(ShapeRun {
+                        bounds: canvas.bounds(
+                            area.x + 3.0,
+                            area.y + 3.0,
+                            area.width - 6.0,
+                            area.height - 6.0,
+                        ),
+                        radius: 9.0 * canvas.scale,
+                        fill: [0.29, 0.30, 0.32, 1.0],
+                        border: None,
                     });
                 }
-                painting.texts.push(canvas.text(
-                    mode.label(),
-                    bounds,
-                    11.5,
-                    view.mode == mode,
-                    1.0,
-                    Align::Center,
+                painting.colored.push((
+                    canvas.text(mode.label(), bounds, 12.5, chosen, 1.0, Align::Center),
+                    if chosen {
+                        super::tokens::PRIMARY
+                    } else {
+                        TIMER_MUTED
+                    },
                 ));
                 if view.focused == Some(QuickTarget::TimerMode(mode)) {
                     quick_focus(&mut painting, canvas, bounds);
                 }
             }
+        } else {
+            painting.colored.push((
+                canvas.text(
+                    "Zamanlayıcı",
+                    canvas.bounds(24.0, 58.0, 352.0, 30.0),
+                    12.5,
+                    false,
+                    1.0,
+                    Align::Leading,
+                ),
+                TIMER_MUTED,
+            ));
         }
         for (index, minutes) in view.presets.iter().enumerate() {
-            let bounds = canvas.bounds(
-                preset_center_x(index) - PRESET_WIDTH / 2.0,
-                PRESET_Y - PRESET_HEIGHT / 2.0,
-                PRESET_WIDTH,
-                PRESET_HEIGHT,
-            );
-            painting.bars.push(BarRun {
+            let Some(area) = island_core::quick_controls::timer_preset_bounds(index) else {
+                continue;
+            };
+            let bounds = canvas.rect(area);
+            painting.shapes.push(ShapeRun {
                 bounds,
-                opacity: 0.14,
+                radius: 14.0 * canvas.scale,
+                fill: with_alpha(super::tokens::SURFACE, 1.0),
+                border: None,
             });
-            painting
-                .owned_labels
-                .push((format!("{minutes} dk"), bounds));
+            painting.owned_colored_labels.push((
+                format!("{minutes} dk"),
+                bounds,
+                super::tokens::PRIMARY,
+            ));
             if view.focused == Some(QuickTarget::TimerPreset(index as u8)) {
                 quick_focus(&mut painting, canvas, bounds);
             }
@@ -2606,6 +2680,127 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quick_timer_controls_fit_at_supported_scales_and_keep_focus() {
+        let mut view = QuickControlsView {
+            page: QuickPage::Timer,
+            focused: Some(QuickTarget::TimerPreset(3)),
+            calendar: island_core::scheduler::QuickCalendarView {
+                state: CalendarState::NotSet,
+                coming: Vec::new(),
+            },
+            presets: [5, 10, 15, 720],
+            mode: StartMode::Timer,
+            modes_offered: true,
+            volume: None,
+            brightness: None,
+            wifi: RadioState::Unknown,
+            bluetooth: RadioState::Unknown,
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let canvas = Canvas {
+                scale,
+                width: 400.0,
+                height: 170.0,
+                corner: 42.0,
+                notch: false,
+            };
+            let painting = quick_controls_panel(&view, &canvas);
+            assert_eq!(painting.owned_colored_labels.len(), 4);
+            assert_eq!(painting.owned_colored_labels[3].0, "720 dk");
+            assert_eq!(painting.outlines.len(), 1);
+            assert!(
+                painting
+                    .colored
+                    .iter()
+                    .any(|(text, color)| text.text == StartMode::Timer.label()
+                        && *color == super::super::tokens::PRIMARY)
+            );
+            for (_, bounds, _) in &painting.owned_colored_labels {
+                assert!(bounds.x >= 0.0 && bounds.x + bounds.width <= canvas.width * scale);
+                assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= canvas.height * scale);
+            }
+            for shape in &painting.shapes {
+                assert!(
+                    shape.bounds.x >= 0.0
+                        && shape.bounds.x + shape.bounds.width <= canvas.width * scale + 0.01
+                );
+                assert!(
+                    shape.bounds.y >= 0.0
+                        && shape.bounds.y + shape.bounds.height <= canvas.height * scale + 0.01
+                );
+            }
+        }
+        view.modes_offered = false;
+        let canvas = Canvas {
+            scale: 1.0,
+            width: 400.0,
+            height: 170.0,
+            corner: 42.0,
+            notch: false,
+        };
+        let painting = quick_controls_panel(&view, &canvas);
+        assert_eq!(painting.owned_colored_labels.len(), 4);
+        assert!(
+            !painting
+                .colored
+                .iter()
+                .any(|(run, _)| run.text == StartMode::Focus.label())
+        );
+    }
+
+    #[test]
+    fn expanded_timer_paints_readable_states_and_targets_at_supported_scales() {
+        let mut scene = playing_music(false);
+        scene.presentation = Presentation::Expanded;
+        scene.media = None;
+        scene.icon = Some(Icon::Timer);
+        for running in [true, false] {
+            scene.timer = Some(TimerView {
+                running,
+                has_controls: true,
+                left: Some(500),
+            });
+            for title in ["05:00", "12:00:00"] {
+                scene.title = title.into();
+                for scale in [1.0, 1.25, 1.5, 2.0] {
+                    let painting = scene.painting(
+                        Pill::EXPANDED.scaled(scale),
+                        scale,
+                        Pill::EXPANDED.radius,
+                        false,
+                    );
+                    assert_eq!(painting.rings.len(), 1);
+                    assert!(
+                        painting
+                            .colored
+                            .iter()
+                            .any(|(run, _)| run.text == title && run.even_digits)
+                    );
+                    assert!(
+                        painting
+                            .colored
+                            .iter()
+                            .any(|(run, _)| run.text == if running { "Pause" } else { "Resume" })
+                    );
+                    assert!(painting.colored.iter().any(|(run, _)| run.text == "Stop"));
+                    for (run, _) in &painting.colored {
+                        assert!(
+                            run.bounds.x >= 0.0
+                                && run.bounds.x + run.bounds.width
+                                    <= Pill::EXPANDED.width * scale + 0.01
+                        );
+                        assert!(
+                            run.bounds.y >= 0.0
+                                && run.bounds.y + run.bounds.height
+                                    <= Pill::EXPANDED.height * scale + 0.01
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn quick_controls_paint_six_buttons_inside_the_panel_at_supported_scales() {
         let view = island_core::scheduler::QuickControlsView {
             page: QuickPage::Main,
@@ -2933,8 +3128,18 @@ mod tests {
         music.title = "05:00".into();
         music.icon = Some(Icon::Timer);
         let painting = music.painting(Pill::EXPANDED, 1.0, Pill::EXPANDED.radius, false);
-        assert!(painting.texts.iter().any(|text| text.text == "Timer"));
-        assert!(painting.texts.iter().any(|text| text.text == "Pause"));
+        assert!(
+            painting
+                .colored
+                .iter()
+                .any(|(text, _)| text.text == "Timer")
+        );
+        assert!(
+            painting
+                .colored
+                .iter()
+                .any(|(text, _)| text.text == "Pause")
+        );
     }
 
     #[test]

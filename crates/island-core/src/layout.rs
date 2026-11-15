@@ -412,8 +412,8 @@ pub fn preset_at(x: f32, y: f32) -> Option<usize> {
 /// The ring of the expanded timer view, around the countdown.
 pub const TIMER_RING_X: f32 = Pill::EXPANDED.width / 2.0;
 pub const TIMER_RING_Y: f32 = Pill::EXPANDED.height / 2.0;
-pub const TIMER_RING_RADIUS: f32 = 62.0;
-pub const TIMER_RING_WIDTH: f32 = 6.0;
+pub const TIMER_RING_RADIUS: f32 = 60.0;
+pub const TIMER_RING_WIDTH: f32 = 5.0;
 
 /// Round buttons on either side of the ring, level with its centre.
 pub const TIMER_BUTTON_SIZE: f32 = 52.0;

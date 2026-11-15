@@ -1091,6 +1091,10 @@ impl App {
                     shell::open("ms-settings:bluetooth")
                 }
                 Some(QuickTarget::Control(control)) => {
+                    if control == QuickControl::Timer && self.island.open_active_countdown(now) {
+                        self.refresh();
+                        return;
+                    }
                     let page = match control {
                         QuickControl::Volume => QuickPage::Volume,
                         QuickControl::Brightness => QuickPage::Brightness,
@@ -1109,12 +1113,12 @@ impl App {
                 _ => {}
             },
             QuickPage::Timer => {
-                if let Some(index) = preset_at(x, y) {
+                if let Some(index) = quick_controls::timer_preset_at(x, y) {
                     self.island.close_views();
                     self.start_preset(index, now);
                     return;
                 }
-                if let Some(mode) = StartMode::at(x, y) {
+                if let Some(mode) = quick_controls::timer_mode_at(x, y) {
                     self.choose_start_mode(mode);
                 }
             }
@@ -1275,13 +1279,20 @@ impl App {
                 quick_controls::CALENDAR_SETUP_BOUNDS.y + 10.0,
             )),
             Some(QuickTarget::TimerMode(mode)) => {
-                let (left, width) = mode.tab();
-                Some((left + width / 2.0, island_core::layout::MODE_TAB_Y))
+                let bounds = quick_controls::timer_mode_bounds(mode);
+                Some((
+                    bounds.x + bounds.width / 2.0,
+                    bounds.y + bounds.height / 2.0,
+                ))
             }
-            Some(QuickTarget::TimerPreset(index)) if index < 4 => Some((
-                island_core::layout::preset_center_x(index as usize),
-                island_core::layout::PRESET_Y,
-            )),
+            Some(QuickTarget::TimerPreset(index)) => {
+                quick_controls::timer_preset_bounds(index as usize).map(|bounds| {
+                    (
+                        bounds.x + bounds.width / 2.0,
+                        bounds.y + bounds.height / 2.0,
+                    )
+                })
+            }
             Some(QuickTarget::Slider)
                 if (page == QuickPage::Brightness && self.island.quick_brightness().is_none())
                     || (page == QuickPage::Volume && self.island.quick_volume().is_none()) =>
