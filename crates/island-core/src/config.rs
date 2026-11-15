@@ -15,10 +15,49 @@ fn is_setting(line: &str, key: &str) -> bool {
             .is_some_and(|(name, _)| name.trim() == key)
 }
 
+/// Find an unquoted comment without treating URL fragments as comments.
+fn comment_at(value: &str) -> Option<usize> {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if ch == '"' && !escaped {
+            quoted = !quoted;
+        }
+        if ch == '#' && !quoted && (index == 0 || value[..index].ends_with(char::is_whitespace)) {
+            return Some(index);
+        }
+        escaped = ch == '\\' && !escaped;
+    }
+    None
+}
+
+/// Whether the file contains a key, including an explicitly empty value.
+pub fn contains_setting(text: &str, key: &str) -> bool {
+    text.lines().any(|line| is_setting(line, key))
+}
+
+/// Remove every occurrence, retaining any inline comment.
+pub fn remove_settings(text: &str, keys: &[&str]) -> String {
+    let mut result = String::new();
+    for line in text.split_inclusive('\n') {
+        if keys.iter().any(|key| is_setting(line, key)) {
+            if let Some((_, value)) = line.split_once('=')
+                && let Some(index) = comment_at(value)
+            {
+                result.push_str(&value[index..]);
+            }
+        } else {
+            result.push_str(line);
+        }
+    }
+    result
+}
+
 /// Finds a setting. Blank values count as missing.
 pub fn read_value(text: &str, key: &str) -> Option<String> {
     let line = text.lines().find(|line| is_setting(line, key))?;
     let (_, value) = line.split_once('=')?;
+    let value = &value[..comment_at(value).unwrap_or(value.len())];
     let value = value.trim().trim_matches('"').trim();
     (!value.is_empty()).then(|| value.to_owned())
 }
@@ -32,7 +71,16 @@ pub fn write_value(text: &str, key: &str, value: &str) -> String {
         if !replaced && is_setting(line, key) {
             replaced = true;
             result.push_str(&setting);
-            result.push_str(if line.ends_with("\r\n") { "\r\n" } else { "\n" });
+            let (_, old) = line.split_once('=').unwrap();
+            if let Some(index) = comment_at(old) {
+                result.push(' ');
+                result.push_str(old[index..].trim_end_matches(['\r', '\n']));
+            }
+            if line.ends_with("\r\n") {
+                result.push_str("\r\n");
+            } else if line.ends_with('\n') {
+                result.push('\n');
+            }
         } else {
             result.push_str(line);
         }

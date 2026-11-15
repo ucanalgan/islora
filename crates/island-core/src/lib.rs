@@ -24,6 +24,7 @@ pub mod qr;
 pub mod quick_controls;
 pub mod schedule;
 pub mod scheduler;
+pub mod settings;
 pub mod shelf;
 pub mod timer;
 pub mod transfer;

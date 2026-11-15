@@ -39,10 +39,12 @@ pub fn is_on() -> bool {
     stored().is_some_and(|stored| Some(stored) == this_copy())
 }
 
-pub fn set(on: bool) {
+pub fn set(on: bool) -> bool {
     let status = unsafe {
         if on {
-            let Some(command) = this_copy() else { return };
+            let Some(command) = this_copy() else {
+                return false;
+            };
             let text: Vec<u16> = command.encode_utf16().chain(once(0)).collect();
             let size = size_of_val(text.as_slice()) as u32;
             RegSetKeyValueW(
@@ -60,4 +62,5 @@ pub fn set(on: bool) {
     if status != ERROR_SUCCESS {
         eprintln!("starting with Windows could not be changed");
     }
+    status == ERROR_SUCCESS
 }

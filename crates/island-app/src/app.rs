@@ -1794,43 +1794,75 @@ impl App {
             Action::Material(material) => self.choose_material(material),
             Action::IndicatorStyle(style) => {
                 self.preferences.indicator_style = style;
-                settings::remember("indicator_style", style.setting());
                 self.renderer.set_preferences(self.preferences);
+                settings::remember("indicator_style", style.setting());
                 self.refresh();
             }
             Action::MediaLayout(layout) => {
                 self.preferences.media_layout = layout;
-                settings::remember("media_layout", layout.setting());
                 self.renderer.set_preferences(self.preferences);
+                settings::remember("media_layout", layout.setting());
                 self.refresh();
             }
             Action::Style(style) => self.choose_style(style),
             Action::Layout(layout) => {
                 self.task_layout = layout;
-                settings::remember("task_layout", layout.setting());
                 self.island.set_task_layout(layout);
+                settings::remember("task_layout", layout.setting());
                 self.refresh();
             }
             Action::Progress(style) => {
                 self.progress_style = style;
-                settings::remember("progress_style", style.setting());
                 self.island.set_progress_style(style);
+                settings::remember("progress_style", style.setting());
                 self.refresh();
             }
             Action::MonitorStep { next } => self.choose_monitor(next),
             Action::SoundWave => {
                 self.sound_wave = !self.sound_wave;
-                settings::remember("sound_wave", if self.sound_wave { "on" } else { "off" });
-                self.apply_wave();
+                if self.apply_wave() {
+                    if let Err(error) = settings::try_remember(
+                        "sound_wave",
+                        if self.sound_wave { "on" } else { "off" },
+                    ) {
+                        eprintln!("sound wave could not be saved: {error}");
+                        self.sound_wave = !self.sound_wave;
+                        if !self.apply_wave() {
+                            self.sound_wave = !self.sound_wave;
+                        }
+                        settings::report_error(
+                            "Sound wave could not be saved. Check access to config.toml and try again.",
+                        );
+                    }
+                } else {
+                    self.sound_wave = !self.sound_wave;
+                    settings::report_error("The sound wave could not be updated. Try again.");
+                }
             }
             Action::ReducedMotion => {
                 self.reduced_motion = !self.reduced_motion;
-                settings::remember(
-                    "reduced_motion",
-                    if self.reduced_motion { "on" } else { "off" },
-                );
                 render::set_reduced_motion(self.reduced_motion);
-                self.apply_wave();
+                if self.apply_wave() {
+                    if let Err(error) = settings::try_remember(
+                        "reduced_motion",
+                        if self.reduced_motion { "on" } else { "off" },
+                    ) {
+                        eprintln!("reduced motion could not be saved: {error}");
+                        self.reduced_motion = !self.reduced_motion;
+                        render::set_reduced_motion(self.reduced_motion);
+                        if !self.apply_wave() {
+                            self.reduced_motion = !self.reduced_motion;
+                            render::set_reduced_motion(self.reduced_motion);
+                        }
+                        settings::report_error(
+                            "Reduced motion could not be saved. Check access to config.toml and try again.",
+                        );
+                    }
+                } else {
+                    self.reduced_motion = !self.reduced_motion;
+                    render::set_reduced_motion(self.reduced_motion);
+                    settings::report_error("Reduced motion could not be applied. Try again.");
+                }
             }
             Action::QuickTimeout { next } => {
                 let choices = config::QUICK_TIMEOUTS;
@@ -1846,40 +1878,59 @@ impl App {
                 self.quick_timeout = choices[index];
                 settings::remember("quick_controls_timeout", &self.quick_timeout.to_string());
             }
-            Action::WaveStyle(style) => {
-                self.wave_style = style;
-                settings::remember("wave_style", style.setting());
-                if let Err(error) = self.renderer.set_wave_style(style) {
-                    eprintln!("wave style failed: {error}");
+            Action::WaveStyle(style) => match self.renderer.set_wave_style(style) {
+                Ok(()) => {
+                    if let Err(error) = settings::try_remember("wave_style", style.setting()) {
+                        eprintln!("wave style could not be saved: {error}");
+                        if let Err(rollback) = self.renderer.set_wave_style(self.wave_style) {
+                            eprintln!("wave style rollback failed: {rollback}");
+                            self.wave_style = style;
+                        }
+                        settings::report_error(
+                            "Wave style could not be saved. Check access to config.toml and try again.",
+                        );
+                    } else {
+                        self.wave_style = style;
+                    }
                 }
-            }
+                Err(error) => {
+                    eprintln!("wave style failed: {error}");
+                    settings::report_error("Wave style could not be applied. Try again.");
+                }
+            },
             Action::Notice(index) => self.toggle_notice(NOTICES[index].0),
             Action::WindowsNotifications => {
-                self.windows_notifications = !self.windows_notifications;
-                settings::remember(
-                    "windows_notifications",
-                    if self.windows_notifications {
-                        "on"
-                    } else {
-                        "off"
-                    },
-                );
-                if self.windows_notifications {
+                if !self.windows_notifications {
                     let source = NotificationSource::start(self.island_window);
                     if let Err(error) = source.request_access() {
                         eprintln!("notification access request failed: {error}");
+                        settings::report_error(
+                            "Windows notification access could not be requested. Check Windows settings and try again.",
+                        );
+                    } else {
+                        self.notification_source = Some(source);
+                        self.windows_notifications = true;
+                        settings::remember("windows_notifications", "on");
                     }
-                    self.notification_source = Some(source);
                 } else {
                     self.notification_source = None;
+                    self.windows_notifications = false;
                     self.notification_queue.clear();
                     self.active_notification = None;
                     self.island.remove(Kind::ExternalNotification);
                     self.refresh();
+                    settings::remember("windows_notifications", "off");
                 }
             }
             Action::FocusHidesNotifications => {
                 self.focus_hides_notifications = !self.focus_hides_notifications;
+                self.notification_queue.set_focus(
+                    self.focus_hides_notifications
+                        && matches!(
+                            self.focus_state.status(),
+                            FocusStatus::Running { .. } | FocusStatus::Open
+                        ),
+                );
                 settings::remember(
                     "focus_hides_notifications",
                     if self.focus_hides_notifications {
@@ -1888,27 +1939,20 @@ impl App {
                         "off"
                     },
                 );
-                self.notification_queue.set_focus(
-                    self.focus_hides_notifications
-                        && matches!(
-                            self.focus_state.status(),
-                            FocusStatus::Running { .. } | FocusStatus::Open
-                        ),
-                );
             }
             Action::ClearMutedApps => {
                 self.muted_apps.clear();
-                settings::remember("muted_apps", "");
                 self.notification_queue.set_muted(Vec::new());
+                settings::remember("muted_apps", "");
             }
             Action::Preset { index, longer } => {
                 let mut presets = self.island.presets();
                 presets[index] = stepped_preset(presets[index], longer);
+                self.island.set_presets(presets);
                 settings::remember(
                     "timer_presets",
                     &presets.map(|minutes| minutes.to_string()).join(", "),
                 );
-                self.island.set_presets(presets);
                 self.refresh();
             }
             Action::Mode(mode) => {
@@ -1920,9 +1964,13 @@ impl App {
             Action::SaveCalendar => calendar_note = self.save_calendar(),
             Action::Autostart => {
                 let on = !autostart::is_on();
-                autostart::set(on);
-                // Once chosen, the choice stands, and a new copy no longer turns it on.
-                settings::remember("autostart", if on { "on" } else { "off" });
+                if autostart::set(on) {
+                    settings::remember("autostart", if on { "on" } else { "off" });
+                } else {
+                    settings::report_error(
+                        "Windows startup could not be changed. Check Windows permissions and try again.",
+                    );
+                }
             }
             Action::Demo => self.toggle_demo(),
             Action::Reload => self.reload(),
@@ -1947,9 +1995,27 @@ impl App {
         if material == self.material {
             return;
         }
+        let effective = material.in_effect(tray::transparency_is_on(), self.battery_saver);
+        if let Err(error) = self.renderer.set_material(effective) {
+            eprintln!("material failed: {error}");
+            settings::report_error("The material could not be applied. Try again.");
+            return;
+        }
+        if let Err(error) = settings::try_remember("material", material.setting()) {
+            eprintln!("material could not be saved: {error}");
+            let previous = self
+                .material
+                .in_effect(tray::transparency_is_on(), self.battery_saver);
+            if let Err(rollback) = self.renderer.set_material(previous) {
+                eprintln!("material rollback failed: {rollback}");
+                self.material = material;
+            }
+            settings::report_error(
+                "Material could not be saved. Check access to config.toml and try again.",
+            );
+            return;
+        }
         self.material = material;
-        settings::remember("material", material.setting());
-        self.apply_material();
         // Otherwise a change made with nothing on screen would not show.
         self.island.peek(self.now());
         self.refresh();
@@ -1959,8 +2025,21 @@ impl App {
         if style == self.placement.style {
             return;
         }
-        settings::remember("island_style", style.setting());
-        self.set_style(style);
+        let previous = self.placement.style;
+        if !self.set_style(style) {
+            settings::report_error("The island style could not be applied. Try again.");
+            return;
+        }
+        if let Err(error) = settings::try_remember("island_style", style.setting()) {
+            eprintln!("island style could not be saved: {error}");
+            if !self.set_style(previous) {
+                eprintln!("island style rollback failed");
+            }
+            settings::report_error(
+                "Island style could not be saved. Check access to config.toml and try again.",
+            );
+            return;
+        }
         // Otherwise a change made with nothing on screen would not show.
         self.island.peek(self.now());
         self.refresh();
@@ -1968,7 +2047,7 @@ impl App {
 
     /// Both the user's off switch and Energy Saver remove the wave. The stored
     /// choice returns when Energy Saver ends.
-    fn apply_wave(&mut self) {
+    fn apply_wave(&mut self) -> bool {
         let motion = selected_wave_motion(
             self.sound_wave,
             self.battery_saver,
@@ -1976,8 +2055,10 @@ impl App {
         );
         if let Err(error) = self.renderer.set_wave_motion(motion) {
             eprintln!("wave failed: {error}");
+            return false;
         }
         self.refresh();
+        true
     }
 
     fn toggle_notice(&mut self, name: &str) {
@@ -1999,7 +2080,10 @@ impl App {
         if !is_calendar_address(&address) {
             return Some("Bu bir takvim adresi değil, https:// ile başlamalı");
         }
-        settings::remember("calendar_ics_url", &address);
+        if let Err(error) = settings::try_remember("calendar_ics_url", &address) {
+            eprintln!("calendar settings could not be saved: {error}");
+            return Some("Takvim adresi kaydedilemedi; dosya erisimini kontrol edin");
+        }
         self.calendar.refresh();
         Some(if address.is_empty() {
             "Takvim adresi kaldırıldı"
@@ -2008,15 +2092,17 @@ impl App {
         })
     }
 
-    fn set_style(&mut self, style: IslandStyle) {
+    fn set_style(&mut self, style: IslandStyle) -> bool {
         if style == self.placement.style {
-            return;
+            return true;
         }
-        self.placement.style = style;
         if let Err(error) = self.renderer.set_style(style) {
             eprintln!("style failed: {error}");
+            return false;
         }
+        self.placement.style = style;
         self.reappear();
+        true
     }
 
     fn monitor_label(&self) -> String {
@@ -2051,8 +2137,8 @@ impl App {
             return;
         };
         self.selected_monitor = Some(monitor.device.clone());
-        settings::remember("monitor", &monitor.device);
         self.on_display_changed();
+        settings::remember("monitor", &monitor.device);
         self.island.peek(self.now());
         self.refresh();
     }
@@ -3272,33 +3358,57 @@ fn stored_material() -> Material {
 
 fn stored_preferences() -> island_core::presentation::PresentationPreferences {
     settings::read().map_or_else(Default::default, |text| {
-        config::read_presentation_preferences(&text)
+        island_core::settings::Settings::read(&text).presentation()
     })
 }
 
 fn stored_sound_wave() -> bool {
-    settings::read().is_none_or(|text| config::read_sound_wave(&text))
+    settings::read().is_none_or(|text| {
+        island_core::settings::Settings::read(&text)
+            .music
+            .sound_wave()
+    })
 }
 
 fn stored_reduced_motion() -> bool {
-    settings::read().is_some_and(|text| config::read_reduced_motion(&text))
+    settings::read().is_some_and(|text| {
+        island_core::settings::Settings::read(&text)
+            .appearance
+            .reduced_motion()
+    })
 }
 
 fn stored_quick_timeout() -> u64 {
-    settings::read().map_or(8, |text| config::read_quick_timeout(&text))
+    settings::read().map_or(8, |text| {
+        island_core::settings::Settings::read(&text)
+            .quick_controls
+            .timeout_seconds()
+    })
 }
 
 fn stored_wave_style() -> WaveStyle {
-    settings::read().map_or(WaveStyle::Normal, |text| config::read_wave_style(&text))
+    settings::read().map_or(WaveStyle::Normal, |text| {
+        island_core::settings::Settings::read(&text)
+            .music
+            .wave_style()
+    })
 }
 
 fn selected_wave_motion(enabled: bool, saver: bool, force_still: bool) -> WaveMotion {
-    if force_still {
-        WaveMotion::Still
-    } else if enabled && !saver {
-        WaveMotion::Always
-    } else {
-        WaveMotion::Hidden
+    use island_core::settings::{RuntimeContext, Settings, WaveBehavior};
+    let mut settings = Settings::default();
+    settings.music.sound_wave = Some(enabled);
+    match settings
+        .wave(RuntimeContext {
+            energy_saver: saver,
+            force_wave_still: force_still,
+            ..Default::default()
+        })
+        .value
+    {
+        WaveBehavior::Still => WaveMotion::Still,
+        WaveBehavior::Animated => WaveMotion::Always,
+        WaveBehavior::Hidden => WaveMotion::Hidden,
     }
 }
 
@@ -3334,8 +3444,9 @@ fn start_with_windows_by_default() {
     if testing || config::read_autostart(&text).is_some() {
         return;
     }
-    autostart::set(true);
-    settings::remember("autostart", "on");
+    if autostart::set(true) {
+        settings::remember("autostart", "on");
+    }
 }
 
 fn stored_task_layout() -> TaskLayout {

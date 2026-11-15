@@ -43,12 +43,6 @@ const NOTICE_SETTINGS: &str = "
 notices_off = \"\"
 ";
 
-/// Tells files from before these notices that they can be turned off too.
-const LATER_NOTICES: &str = "
-# notices_off için ek seçenekler: screenshot, clipboard, track_change,
-# battery_saver, keyboard_language
-";
-
 const LEVEL_NOTICES: &str = "
 # notices_off için ek seçenekler: volume, brightness. Windows'un kendi ses ve
 # parlaklık göstergesi de görünür kalır.
@@ -105,47 +99,43 @@ pub fn read() -> Option<String> {
     }
     if !path.exists() {
         std::fs::create_dir_all(path.parent()?).ok()?;
-        let text = format!(
+        let template = format!(
             "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
         );
+        // Keep the editable guidance, but leave resettable preferences absent
+        // until the user chooses them. The calendar entry is integration data.
+        let text = island_core::settings::reset_all(&template);
         if let Err(error) = replace(&path, &text) {
             eprintln!("settings could not be created: {error}");
             return None;
         }
     }
-    let mut text = std::fs::read_to_string(&path).ok()?;
-    let mut added = false;
-    let sections = [
-        ("timer_presets", START_SETTINGS),
-        ("notices_off", NOTICE_SETTINGS),
-        ("keyboard_language", LATER_NOTICES),
-        (
-            "# notices_off için ek seçenekler: volume, brightness",
-            LEVEL_NOTICES,
-        ),
-        ("sound_wave", WAVE_SETTINGS),
-        ("wave_style", WAVE_STYLE_SETTINGS),
-        ("material", MATERIAL_SETTINGS),
-        ("progress_style", PROGRESS_SETTINGS),
-    ];
-    for (setting, section) in sections {
-        if !text.contains(setting) {
-            text.push_str(section);
-            added = true;
-        }
-    }
-    if added && let Err(error) = replace(&path, &text) {
-        eprintln!("settings could not be saved: {error}");
-    }
-    Some(text)
+    std::fs::read_to_string(&path).ok()
 }
 
-/// Stores a choice made in the island. Every other line stays as it was.
+/// Applies a complete update through the same backup and recovery path.
+pub fn try_remember(key: &str, value: &str) -> io::Result<()> {
+    let path =
+        path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))?;
+    let text = read().ok_or_else(|| io::Error::other("could not read config.toml"))?;
+    replace(&path, &write_value(&text, key, value))
+}
+
+/// Report failure visibly; the running choice remains active for this session.
 pub fn remember(key: &str, value: &str) {
-    if let (Some(path), Some(text)) = (path(), read())
-        && let Err(error) = replace(&path, &write_value(&text, key, value))
-    {
+    if let Err(error) = try_remember(key, value) {
         eprintln!("settings could not be saved: {error}");
+        report_error(
+            "Ayar kaydedilemedi. Seciminiz bu oturumda etkin kalabilir. config.toml dosyasinin erisimini kontrol edip tekrar deneyin.",
+        );
+    }
+}
+
+pub fn report_error(message: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    unsafe {
+        let message = HSTRING::from(message);
+        MessageBoxW(None, &message, w!("Islora"), MB_OK | MB_ICONERROR);
     }
 }
 
@@ -202,6 +192,20 @@ pub fn open_in_editor() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_write_returns_an_error() {
+        let folder = std::env::temp_dir().join(format!(
+            "islora-missing-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(replace(&folder.join("config.toml"), "new value").is_err());
+        assert!(!folder.exists());
+    }
 
     #[test]
     fn interrupted_update_recovers_last_complete_settings() {
