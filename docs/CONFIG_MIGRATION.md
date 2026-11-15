@@ -19,3 +19,9 @@ Existing unrelated lines, comments, sensitive values, ordering, UTF-8 BOM, and i
 Existing runtime readers keep their legacy fallback until platform orchestration is implemented. In particular, `AlreadyCurrent` classification follows modern schema semantics, while today's unmodified startup reader may still interpret an obsolete density key. A small BOM compatibility fix lets existing readers and writers recognize a first key following the marker without discarding it. Phase 1 does not start migration, modify files, create backups, acquire locks, or change application startup.
 
 Phase 2 owns bounded filesystem reads, locking and Windows file security, protected backup and atomic persistence, post-write verification, startup orchestration, fallback/recovery behavior, and failures. Phase 3 owns any later user-facing migration or recovery workflow. No automatic migration is active yet.
+
+## Phase 2 work in progress
+
+The existing application settings read now checks the opened file size and limits the number of bytes read to 1 MiB plus one, then requires valid UTF-8. This applies to the existing settings reader and callers including the calendar. A failed read does not normalize or truncate the active file. Settings writes now receive the underlying read error rather than a generic read failure.
+
+This is **not** the Phase 2 migration or a secure recovery implementation. The existing read path still performs first-run creation and rolling-backup recovery before opening the active file, and the existing recovery path has not yet gained protected-backup selection, handle-based reparse checks, or validated backup reads. No runtime migration, lock, protected backup, schema-specific read-only mode, security-descriptor verification, controlled retry, or live recovery has been enabled. Those guarantees must be implemented and tested before automatic migration is activated.

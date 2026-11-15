@@ -1,6 +1,6 @@
 //! The settings file, which the user edits by hand and may hold a secret.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use island_core::config::write_value;
@@ -93,31 +93,73 @@ fn path() -> Option<PathBuf> {
 /// Creates the file on first run, so there is something to fill in.
 pub fn read() -> Option<String> {
     let path = path()?;
-    if let Err(error) = recover(&path) {
-        eprintln!("settings recovery failed: {error}");
-        return None;
+    match try_read_path(&path) {
+        Ok(text) => Some(text),
+        Err(error) => {
+            eprintln!("settings could not be read: {error}");
+            None
+        }
     }
+}
+
+/// Existing recovery and first-run creation remain explicit side effects.
+fn try_read_path(path: &Path) -> io::Result<String> {
+    recover(path)?;
     if !path.exists() {
-        std::fs::create_dir_all(path.parent()?).ok()?;
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "configuration has no parent directory",
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
         let template = format!(
             "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
         );
         // Keep the editable guidance, but leave resettable preferences absent
         // until the user chooses them. The calendar entry is integration data.
         let text = island_core::settings::reset_all(&template);
-        if let Err(error) = replace(&path, &text) {
-            eprintln!("settings could not be created: {error}");
-            return None;
-        }
+        replace(path, &text)?;
     }
-    std::fs::read_to_string(&path).ok()
+    read_bounded(path)
+}
+
+/// Refuse oversized or non-UTF-8 settings without replacing or truncating
+/// the file. Recheck while reading because it may grow after metadata lookup.
+fn read_bounded(path: &Path) -> io::Result<String> {
+    let file = std::fs::File::open(path)?;
+    let limit = island_core::migration::MAX_CONFIG_BYTES;
+    if file.metadata()?.len() > limit as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "configuration exceeds the size limit",
+        ));
+    }
+    read_bounded_content(file, limit)
+}
+
+fn read_bounded_content(reader: impl Read, limit: usize) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "configuration exceeds the size limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "configuration is not valid UTF-8",
+        )
+    })
 }
 
 /// Applies a complete update through the same backup and recovery path.
 pub fn try_remember(key: &str, value: &str) -> io::Result<()> {
     let path =
         path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))?;
-    let text = read().ok_or_else(|| io::Error::other("could not read config.toml"))?;
+    let text = try_read_path(&path)?;
     replace(&path, &write_value(&text, key, value))
 }
 
@@ -215,6 +257,52 @@ pub fn open_in_editor() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_read_rejects_invalid_utf8_and_oversized_files_without_changes() {
+        let folder = std::env::temp_dir().join(format!(
+            "islora-bounded-read-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        let original =
+            b"\xef\xbb\xbf# heading\r\ncalendar_ics_url = \"https://example.invalid/\"\r\n";
+        std::fs::write(&path, original).unwrap();
+        assert_eq!(read_bounded(&path).unwrap().as_bytes(), original);
+        let invalid = b"# invalid UTF-8\n\xff";
+        std::fs::write(&path, invalid).unwrap();
+        assert_eq!(
+            read_bounded(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), invalid);
+        let max = island_core::migration::MAX_CONFIG_BYTES;
+        std::fs::write(&path, vec![b'x'; max]).unwrap();
+        assert_eq!(read_bounded(&path).unwrap().len(), max);
+        std::fs::write(&path, vec![b'x'; max + 1]).unwrap();
+        assert_eq!(
+            read_bounded(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), (max + 1) as u64);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn bounded_content_read_detects_growth_after_metadata_check() {
+        let mut growing = std::io::Cursor::new(b"12345".to_vec());
+        assert_eq!(
+            read_bounded_content(&mut growing, 4).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(growing.position(), 5);
+    }
 
     #[test]
     fn save_success_and_failure_restore_runtime_and_renderer() {
