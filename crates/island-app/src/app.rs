@@ -322,7 +322,10 @@ pub fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let first_run = settings::is_first_run();
+    let first_run = settings::prepare_storage().unwrap_or_else(|error| {
+        eprintln!("settings storage could not be prepared: {error}");
+        false
+    });
 
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)? };
     TASKBAR_CREATED.store(
@@ -433,7 +436,11 @@ pub fn run() -> Result<()> {
         wave_style,
         battery_saver: false,
         media: MediaSource::start(island_window, started, argument_after("--only-session")),
-        calendar: CalendarSource::start(island_window, argument_after("--calendar-file")),
+        calendar: CalendarSource::start(
+            island_window,
+            argument_after("--calendar-file"),
+            calendar_address(),
+        ),
         events: Vec::new(),
         focus_watch: FocusWatch::start(island_window),
         focus_state: FocusTracker::default(),
@@ -1701,7 +1708,7 @@ impl App {
             }
         }
         self.update_native_osd();
-        self.calendar.refresh();
+        self.calendar.set_address(calendar_address());
         self.sound_wave = stored_sound_wave();
         self.reduced_motion = stored_reduced_motion();
         self.quick_timeout = stored_quick_timeout();
@@ -2063,31 +2070,17 @@ impl App {
             }
             Action::SaveCalendar => calendar_note = self.save_calendar(),
             Action::Autostart => {
-                let previous = match autostart::snapshot() {
-                    Ok(previous) => previous,
-                    Err(error) => {
-                        eprintln!("could not read Windows startup setting: {error}");
-                        settings::report_error(
-                            "Windows başlangıç ayarı okunamadı; değişiklik yapılmadı.",
-                        );
-                        return;
-                    }
-                };
-                let on = !autostart::is_on();
-                if autostart::set(on) {
-                    settings::persist_or_rollback(
-                        "autostart",
-                        if on { "on" } else { "off" },
-                        || autostart::restore(previous.as_deref()),
-                    );
-                } else {
-                    let restored = autostart::restore(previous.as_deref());
-                    settings::report_error(if restored {
-                        "Windows başlangıç ayarı uygulanamadı; önceki kayıt geri yüklendi."
-                    } else {
-                        "Windows başlangıç ayarı uygulanamadı ve önceki kayıt doğrulanamadı. Windows başlangıç ayarlarını kontrol edin."
-                    });
-                }
+                report_autostart_result(settings::locked_update(|text, save| {
+                    autostart_transaction(
+                        text,
+                        save,
+                        false,
+                        autostart::snapshot,
+                        autostart::is_on,
+                        autostart::set,
+                        autostart::restore,
+                    )
+                }));
             }
             Action::Demo => self.toggle_demo(),
             Action::Reload => self.reload(),
@@ -2239,7 +2232,7 @@ impl App {
             eprintln!("calendar settings could not be saved: {error}");
             return Some("Takvim adresi kaydedilemedi; dosya erisimini kontrol edin");
         }
-        self.calendar.refresh();
+        self.calendar.set_address(Some(address.clone()));
         Some(if address.is_empty() {
             "Takvim adresi kaldırıldı"
         } else {
@@ -3687,29 +3680,90 @@ fn change_start_mode(
 /// by tests and for pictures never touch the real list.
 fn start_with_windows_by_default() {
     let testing = std::env::args().any(|a| a == "--only-session" || a == "--second-copy");
-    let Some(text) = settings::read() else { return };
-    if testing || !applies_default_autostart(&text) {
+    if testing {
         return;
     }
-    let previous = match autostart::snapshot() {
+    let result = settings::locked_update(|text, save| {
+        autostart_transaction(
+            text,
+            save,
+            true,
+            autostart::snapshot,
+            autostart::is_on,
+            autostart::set,
+            autostart::restore,
+        )
+    });
+    if let Err(error) = &result
+        && matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::NotFound
+        )
+    {
+        eprintln!("default Windows startup setting skipped: {error}");
+        return;
+    }
+    report_autostart_result(result);
+}
+
+#[derive(Debug, PartialEq)]
+enum AutostartOutcome {
+    NoChange,
+    SnapshotFailed,
+    ApplyFailed(bool),
+    SaveFailed(bool),
+}
+
+fn autostart_transaction(
+    text: &str,
+    save: &mut dyn FnMut(&str, &str) -> std::io::Result<()>,
+    default_only: bool,
+    snapshot: impl FnOnce() -> std::io::Result<Option<String>>,
+    is_on: impl FnOnce() -> bool,
+    set: impl FnOnce(bool) -> bool,
+    restore: impl FnOnce(Option<&str>) -> bool,
+) -> std::io::Result<AutostartOutcome> {
+    if default_only && !applies_default_autostart(text) {
+        return Ok(AutostartOutcome::NoChange);
+    }
+    let previous = match snapshot() {
         Ok(previous) => previous,
         Err(error) => {
             eprintln!("could not read Windows startup setting: {error}");
-            settings::report_error("Windows başlangıç ayarı okunamadı; değişiklik yapılmadı.");
-            return;
+            return Ok(AutostartOutcome::SnapshotFailed);
         }
     };
-    if autostart::set(true) {
-        settings::persist_or_rollback("autostart", "on", || {
-            autostart::restore(previous.as_deref())
-        });
-    } else {
-        let restored = autostart::restore(previous.as_deref());
-        settings::report_error(if restored {
+    let on = default_only || !is_on();
+    if !set(on) {
+        return Ok(AutostartOutcome::ApplyFailed(restore(previous.as_deref())));
+    }
+    if let Err(error) = save("autostart", if on { "on" } else { "off" }) {
+        eprintln!("settings could not be saved: {error}");
+        return Ok(AutostartOutcome::SaveFailed(restore(previous.as_deref())));
+    }
+    Ok(AutostartOutcome::NoChange)
+}
+
+fn report_autostart_result(result: std::io::Result<AutostartOutcome>) {
+    match result {
+        Ok(AutostartOutcome::NoChange) => {}
+        Ok(AutostartOutcome::SnapshotFailed) => {
+            settings::report_error("Windows başlangıç ayarı okunamadı; değişiklik yapılmadı.")
+        }
+        Ok(AutostartOutcome::ApplyFailed(restored)) => settings::report_error(if restored {
             "Windows başlangıç ayarı uygulanamadı; önceki kayıt geri yüklendi."
         } else {
             "Windows başlangıç ayarı uygulanamadı ve önceki kayıt doğrulanamadı. Windows başlangıç ayarlarını kontrol edin."
-        });
+        }),
+        Ok(AutostartOutcome::SaveFailed(restored)) => {
+            settings::report_persistence_failure(restored)
+        }
+        Err(error) => {
+            eprintln!("could not lock Windows startup setting: {error}");
+            settings::report_persistence_failure(true);
+        }
     }
 }
 
@@ -4166,9 +4220,60 @@ unsafe extern "system" fn edge_proc(
     }
 }
 
+fn calendar_address() -> Option<String> {
+    settings::read().and_then(|text| config::read_value(&text, "calendar_ics_url"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autostart_rollback_holds_writer_lock() {
+        let _serial = crate::platform::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!(
+            "islora-autostart-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&base).unwrap();
+        let path = base.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let contender = base.clone();
+        let outcome = settings::locked_update_at(&path, |text, _| {
+            autostart_transaction(
+                text,
+                &mut |_, _| Err(std::io::Error::other("injected")),
+                false,
+                || Ok(Some("previous".into())),
+                || false,
+                |_| true,
+                |previous| {
+                    assert_eq!(previous, Some("previous"));
+                    let error = std::thread::spawn(move || {
+                        crate::platform::config_fs::WriterLock::acquire(&contender)
+                            .err()
+                            .unwrap()
+                    })
+                    .join()
+                    .unwrap();
+                    assert!(matches!(
+                        error,
+                        crate::platform::config_fs::ConfigFsError::Locked
+                    ));
+                    true
+                },
+            )
+        })
+        .unwrap();
+        assert_eq!(outcome, AutostartOutcome::SaveFailed(true));
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn presentation_fallback_is_scoped_to_validated_legacy_input() {

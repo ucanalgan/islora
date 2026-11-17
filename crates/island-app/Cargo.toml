@@ -20,6 +20,8 @@ embed-resource = "3"
 [dependencies.windows]
 version = "0.62"
 features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "ApplicationModel_AppService",
     "ApplicationModel",
     "Devices_Bluetooth",
@@ -67,6 +69,7 @@ features = [
     "Win32_Networking_NetworkListManager",
     "Win32_Networking_WinSock",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",

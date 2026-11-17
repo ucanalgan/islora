@@ -150,6 +150,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | Formatting fix for CI | done | `7114fc9` |
 | Pre-2A | done: gate and presentation reader share one classifier that ignores only unrelated unsupported lines; 459 tests | see `git log` |
 | 2A-1 | done: `config_fs.rs` with `ConfigDir`, `FileIdentity`, `VerifiedFile`; settings reads go through it; 471 tests | see `git log` |
+| 2A-2 | done: writer lock, side-effect-free reads, `prepare_storage`, locked autostart transactions, calendar address by channel, every file operation bound to the held directory handle; 483 tests | see `git log` |
 
 ## Resume here
 
@@ -167,12 +168,33 @@ directory, extra hard links, containment by parent identity, strict names and
 a final-name check against 8.3 aliases, bounded reads). Handles deny delete
 sharing on purpose. Carried into 2A-2: open the file relative to the directory
 handle (`NtCreateFile` with `RootDirectory`, marked `TODO(2A-2)`), and the
-path-based replace and recovery races. Next: 2A-2.
+path-based replace and recovery races.
 
-Worker routing that worked: Codex implements from a spec file
-(`codex exec -s workspace-write ... < /dev/null`), the lead runs the gate as
-plain commands, one Sonnet reviewer is resumed for each re-review. The global
-skills `codex-cli` and `agent-orchestration` hold the generic rules.
+2A-2 is committed. `WriterLock` (a `Global\` mutex named from the user SID
+with an owner-only ACL, plus `config.lock` with share mode 0 and
+delete-on-close, about 100 ms bounded retry, `!Send`) guards every writer.
+Reads have no side effects; `prepare_storage()` runs once at startup (legacy
+rename, first run, backup recovery) and a transient lock there is retried on
+the first write. Both autostart paths run as one locked transaction and show
+dialogs only after unlock. The calendar thread gets its address through its
+channel. Files are opened, enumerated and renamed relative to the held
+directory handle (`NtCreateFile`, `FILE_RENAME_INFO` with `RootDirectory`), so
+a redirected path cannot move a write outside it. After a runtime deletion of
+the config file, saves fail instead of recreating it.
+
+Open minors from the 2A-2 review, for a small cleanup before 2A-3: a startup
+"save failed" dialog on every launch when the config is unreadable
+(`InvalidData`), pointer provenance when filling `FILE_RENAME_INFO`, no test
+for invalid rename targets or the rename fallback chain, `temp_base()` in the
+settings tests without a counter, `save()` allowed only once per transaction
+(document or chain), a misnamed locked-update test, and the first-run flag lost
+when startup preparation met a busy lock. Next: that cleanup, then 2A-3.
+
+Budget record for 2A-2: Claude 5-hour window 40 → 56, Codex 22 → 39 (three
+implementation runs, three Codex reviews, two Sonnet reviews, four correction
+rounds). The closing workflow alone used about 7 Claude points (Haiku runners
+plus Sonnet reviews) and 5 Codex points. Codex should get the first try with
+a narrower spec; rename and Win32 struct work needed a second round.
 
 Budget note: one Claude implementer, gate and reviewer per round used about
 40 points of the 5-hour Claude window in half an hour, while three Codex
