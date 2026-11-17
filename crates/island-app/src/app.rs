@@ -3545,9 +3545,19 @@ fn stored_material() -> Material {
 }
 
 fn stored_preferences() -> island_core::presentation::PresentationPreferences {
-    settings::read().map_or_else(Default::default, |text| {
-        island_core::settings::Settings::read(&text).presentation()
-    })
+    settings::read().map_or_else(Default::default, |text| presentation_for_config(&text))
+}
+
+fn presentation_for_config(text: &str) -> island_core::presentation::PresentationPreferences {
+    use island_core::migration::{MigrationOutcome, prepare};
+    use island_core::settings::Settings;
+    match prepare(text) {
+        Ok(MigrationOutcome::Prepared { .. }) => Settings::read(text).presentation(),
+        Ok(MigrationOutcome::AlreadyCurrent | MigrationOutcome::Future { .. }) => {
+            Settings::read(&config::remove_settings(text, &["ui_density"])).presentation()
+        }
+        Err(_) => Default::default(),
+    }
 }
 
 fn stored_sound_wave() -> bool {
@@ -4120,6 +4130,48 @@ unsafe extern "system" fn edge_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_fallback_is_scoped_to_validated_legacy_input() {
+        use island_core::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
+        let legacy = "ui_density = \"minimal\"";
+        assert_eq!(
+            presentation_for_config(legacy),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Compact
+            }
+        );
+        for version in ["2", "3"] {
+            let text = format!(
+                "config_version = \"{version}\"\nui_density = \"detailed\"\nindicator_style = \"ring\"\n"
+            );
+            assert_eq!(
+                presentation_for_config(&text),
+                PresentationPreferences {
+                    indicator_style: IndicatorStyle::Ring,
+                    media_layout: MediaLayout::Standard
+                }
+            );
+        }
+        let invalid = "ui_density = \"minimal\"\nui_density = \"detailed\"";
+        assert_eq!(
+            presentation_for_config(invalid),
+            PresentationPreferences::default()
+        );
+        let current = "config_version = \"2\"\nui_density = \"detailed\"\nindicator_style = \"ring\"\nmedia_layout = \"compact\"\n";
+        let reset = island_core::settings::reset_feature(
+            current,
+            island_core::settings::Feature::MusicPlayer,
+        );
+        assert_eq!(
+            presentation_for_config(&reset),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Standard
+            }
+        );
+    }
 
     #[test]
     fn shared_start_mode_change_restores_state_when_saving_fails() {
