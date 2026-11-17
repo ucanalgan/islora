@@ -151,6 +151,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | Pre-2A | done: gate and presentation reader share one classifier that ignores only unrelated unsupported lines; 459 tests | see `git log` |
 | 2A-1 | done: `config_fs.rs` with `ConfigDir`, `FileIdentity`, `VerifiedFile`; settings reads go through it; 471 tests | see `git log` |
 | 2A-2 | done (plus review cleanup): writer lock, side-effect-free reads, `prepare_storage`, locked autostart transactions, calendar address by channel, every file operation bound to the held directory handle; 483 tests | see `git log` |
+| 2A-3 | done: owner and DACL kept across replacement through exclusive drafts and pre-rename checks; 502 tests | see `git log` |
 
 ## Resume here
 
@@ -187,7 +188,26 @@ an unreadable config (only a failed save shows one), the rename name pointer
 taken from the base allocation, tests for invalid rename targets and the rename
 fallback order, collision-free test directories, chained saves inside one
 locked transaction, and a first-run flag that survives a busy preparation
-(sharing errors 32 and 33 are retried too). Next: 2A-3.
+(sharing errors 32 and 33 are retried too).
+
+2A-3 is committed. Every file that replaces the primary is a uniquely named
+draft created exclusively, relative to the held directory, with the primary's
+descriptor (owner, group, DACL, protected bit). Its DACL and protected bit are
+checked before any data is written and again before the rename. The source
+(the primary, or in recovery the backup, read and captured from one held
+handle) is re-checked for identity and security just before the rename and
+then released, so the non-POSIX fallback rename keeps working. The owner is
+kept when it is the current user (required); the group is best effort. First
+run inherits from the folder, and first-run and recovery renames never
+replace an existing file. Leftover drafts are swept at startup. Threat model,
+documented in `config_fs.rs`: a process of the same user that races between
+the final check and the rename is out of scope, because it could rewrite the
+config directly. Accepted minor: a DACL mismatch right after draft creation
+aborts the save (fails closed). Next: core state (`island-core::config_state`).
+
+Budget record for 2A-3: Claude 5-hour window 59 → about 75, Codex 40 → 56.
+Large specs made Codex stop halfway; three narrow steps of one concern each
+finished in one pass. Prefer narrow Codex steps from the start.
 
 Budget record for 2A-2: Claude 5-hour window 40 → 56, Codex 22 → 39 (three
 implementation runs, three Codex reviews, two Sonnet reviews, four correction

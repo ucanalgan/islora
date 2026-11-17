@@ -1,3 +1,10 @@
+//! The config folder is owned by the current user under %APPDATA%. A process
+//! running as that user can rewrite it directly, so a race by that user between
+//! the last check and rename is out of scope. We never apply weaker security than
+//! the primary had at our last check, write into a file we did not create, or act
+//! outside the held directory, and fail closed on any detected change. The window
+//! between final revalidation and rename is accepted.
+
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::windows::fs::OpenOptionsExt;
@@ -283,39 +290,11 @@ impl WriterMutex {
             GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
         };
         use windows::Win32::Security::{
-            EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-            SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+            EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
         };
-        use windows::Win32::System::Threading::{
-            CreateMutexW, GetCurrentProcess, OpenProcessToken, WaitForSingleObject,
-        };
-        let mut token = HANDLE::default();
-        // SAFETY: the process pseudo-handle is valid and token is an output handle.
-        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
-            .map_err(io::Error::from)?;
-        let mut size = 0;
-        // SAFETY: the first call obtains the required buffer size.
-        unsafe {
-            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut size);
-        }
-        let mut buffer = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
-        // SAFETY: buffer is aligned and large enough for TOKEN_USER and its SID.
-        let result = unsafe {
-            GetTokenInformation(
-                token,
-                TokenUser,
-                Some(buffer.as_mut_ptr().cast()),
-                size,
-                &mut size,
-            )
-        };
-        // SAFETY: token is owned and is no longer needed.
-        unsafe {
-            let _ = CloseHandle(token);
-        }
-        result.map_err(io::Error::from)?;
-        // SAFETY: successful GetTokenInformation initialized TOKEN_USER in the buffer.
-        let sid = unsafe { (*(buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+        let user = CurrentUser::query()?;
+        let sid = user.sid();
         let mut sid_string = windows::core::PWSTR::null();
         // SAFETY: sid remains valid in buffer and sid_string receives a LocalAlloc pointer.
         unsafe { ConvertSidToStringSidW(sid, &mut sid_string) }.map_err(io::Error::from)?;
@@ -511,20 +490,341 @@ impl WriterLock {
     }
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_SECURITY: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+fn fail_security(stage: u8) -> Result<(), ConfigFsError> {
+    if FAIL_SECURITY.with(|value| {
+        if value.get() == stage {
+            value.set(0);
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(io::Error::other("injected security failure").into());
+    }
+    Ok(())
+}
+
+/// Owns the LocalAlloc descriptor and the pointers into it until the last use.
+pub struct FileSecurity {
+    descriptor: windows::Win32::Security::PSECURITY_DESCRIPTOR,
+    owner: windows::Win32::Security::PSID,
+    group: windows::Win32::Security::PSID,
+    dacl: *mut windows::Win32::Security::ACL,
+    protected: bool,
+    set_owner: bool,
+}
+impl Drop for FileSecurity {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        // SAFETY: GetSecurityInfo allocated this descriptor once, and its pointers are no longer used.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(self.descriptor.0)));
+        }
+    }
+}
+impl FileSecurity {
+    fn capture(file: &File) -> Result<Self, ConfigFsError> {
+        #[cfg(test)]
+        fail_security(1)?;
+        use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetSecurityDescriptorControl,
+            OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        };
+        let mut result = Self {
+            descriptor: Default::default(),
+            owner: Default::default(),
+            group: Default::default(),
+            dacl: std::ptr::null_mut(),
+            protected: false,
+            set_owner: false,
+        };
+        // SAFETY: the file is live and all outputs point to writable storage.
+        let status = unsafe {
+            GetSecurityInfo(
+                handle(file),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                Some(&mut result.owner),
+                Some(&mut result.group),
+                Some(&mut result.dacl),
+                None,
+                Some(&mut result.descriptor),
+            )
+        };
+        if status.0 != 0 {
+            return Err(io::Error::from_raw_os_error(status.0 as i32).into());
+        }
+        let mut control = 0;
+        let mut revision = 0;
+        // SAFETY: the descriptor was returned by GetSecurityInfo and outputs are valid.
+        unsafe { GetSecurityDescriptorControl(result.descriptor, &mut control, &mut revision) }
+            .map_err(io::Error::from)?;
+        result.protected = control & SE_DACL_PROTECTED.0 != 0;
+        // An unknown owner might be the current user: abort rather than omit required
+        // owner preservation. Only a verified foreign owner may use the default owner.
+        result.set_owner = CurrentUser::query()?.is(result.owner);
+        Ok(result)
+    }
+    pub fn same_dacl(&self, other: &Self) -> bool {
+        use windows::Win32::Security::{
+            ACL_SIZE_INFORMATION, AclSizeInformation, GetAclInformation,
+        };
+        if self.protected != other.protected {
+            return false;
+        }
+        if self.dacl.is_null() || other.dacl.is_null() {
+            return self.dacl == other.dacl;
+        }
+        let mut a = ACL_SIZE_INFORMATION::default();
+        let mut b = ACL_SIZE_INFORMATION::default();
+        // SAFETY: the ACLs belong to live descriptors and the output structures are writable.
+        let valid = unsafe {
+            GetAclInformation(
+                self.dacl,
+                (&mut a as *mut ACL_SIZE_INFORMATION).cast(),
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+            .is_ok()
+                && GetAclInformation(
+                    other.dacl,
+                    (&mut b as *mut ACL_SIZE_INFORMATION).cast(),
+                    std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                )
+                .is_ok()
+        };
+        if !valid || a.AclBytesInUse != b.AclBytesInUse {
+            return false;
+        }
+        // SAFETY: GetAclInformation reported these bytes inside both live ACLs.
+        unsafe {
+            std::slice::from_raw_parts(self.dacl.cast::<u8>(), a.AclBytesInUse as usize)
+                == std::slice::from_raw_parts(other.dacl.cast::<u8>(), b.AclBytesInUse as usize)
+        }
+    }
+    #[cfg(test)]
+    pub fn restore_dacl(&self, file: &File) {
+        use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+            UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+        // SAFETY: the handle and captured ACL remain live throughout the call.
+        unsafe {
+            let _ = SetSecurityInfo(
+                handle(file),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION
+                    | if self.protected {
+                        PROTECTED_DACL_SECURITY_INFORMATION
+                    } else {
+                        UNPROTECTED_DACL_SECURITY_INFORMATION
+                    },
+                None,
+                None,
+                Some(self.dacl),
+                None,
+            );
+        }
+    }
+    #[cfg(test)]
+    pub fn toggle_dacl_protection(&self, file: &File) {
+        use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+            UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+        // SAFETY: the file handle and descriptor-owned ACL remain live for the call.
+        let status = unsafe {
+            SetSecurityInfo(
+                handle(file),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION
+                    | if self.protected {
+                        UNPROTECTED_DACL_SECURITY_INFORMATION
+                    } else {
+                        PROTECTED_DACL_SECURITY_INFORMATION
+                    },
+                None,
+                None,
+                Some(self.dacl),
+                None,
+            )
+        };
+        assert_eq!(status.0, 0);
+    }
+    #[cfg(test)]
+    pub fn owner_sid_string(&self) -> String {
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+        let mut value = windows::core::PWSTR::null();
+        // SAFETY: owner is a live SID and value receives a system allocation.
+        unsafe { ConvertSidToStringSidW(self.owner, &mut value) }.unwrap();
+        // SAFETY: the returned string is NUL-terminated and remains live.
+        let result = unsafe { value.to_string() }.unwrap();
+        // SAFETY: the allocation is released exactly once after copying the string.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(value.0.cast())));
+        }
+        result
+    }
+    pub fn same_owner(&self, other: &Self) -> bool {
+        // SAFETY: both owner SIDs belong to live security descriptors.
+        unsafe { windows::Win32::Security::EqualSid(self.owner, other.owner) }.is_ok()
+    }
+    fn apply(&self, file: &File) -> Result<(), ConfigFsError> {
+        #[cfg(test)]
+        fail_security(2)?;
+        use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+            PROTECTED_DACL_SECURITY_INFORMATION, UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+        let flags = DACL_SECURITY_INFORMATION
+            | if self.protected {
+                PROTECTED_DACL_SECURITY_INFORMATION
+            } else {
+                UNPROTECTED_DACL_SECURITY_INFORMATION
+            };
+        // SAFETY: the verified file handle and descriptor-owned ACL remain valid.
+        let status = unsafe {
+            SetSecurityInfo(
+                handle(file),
+                SE_FILE_OBJECT,
+                flags,
+                None,
+                None,
+                Some(self.dacl),
+                None,
+            )
+        };
+        if status.0 != 0 {
+            return Err(io::Error::from_raw_os_error(status.0 as i32).into());
+        }
+        // Group preservation needs WRITE_OWNER or privilege. Try it independently;
+        // if unavailable, retain the DACL and protected bit and do not fail the save.
+        // SAFETY: the group SID belongs to the live descriptor and the handle is valid.
+        unsafe {
+            let _ = SetSecurityInfo(
+                handle(file),
+                SE_FILE_OBJECT,
+                GROUP_SECURITY_INFORMATION,
+                None,
+                Some(self.group),
+                None,
+                None,
+            );
+        }
+        // A foreign owner is left at its default; the current user's owner must be preserved.
+        // The creation descriptor may already have assigned the required owner.
+        // Avoid requiring WRITE_OWNER when the owner is already correct.
+        let owner_matches = if self.set_owner {
+            let actual = Self::capture(file)?;
+            // SAFETY: both SIDs belong to live descriptors.
+            unsafe { windows::Win32::Security::EqualSid(self.owner, actual.owner) }.is_ok()
+        } else {
+            true
+        };
+        if !owner_matches {
+            // SAFETY: the owner SID belongs to the live descriptor and the handle is valid.
+            let status = unsafe {
+                SetSecurityInfo(
+                    handle(file),
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION,
+                    Some(self.owner),
+                    None,
+                    None,
+                    None,
+                )
+            };
+            if status.0 != 0 {
+                return Err(io::Error::from_raw_os_error(status.0 as i32).into());
+            }
+        }
+        Ok(())
+    }
+}
+struct CurrentUser(Vec<usize>);
+impl CurrentUser {
+    fn query() -> Result<Self, ConfigFsError> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenUser};
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        struct Token(HANDLE);
+        impl Drop for Token {
+            fn drop(&mut self) {
+                // SAFETY: this guard owns the token handle.
+                unsafe {
+                    let _ = CloseHandle(self.0);
+                }
+            }
+        }
+        let mut handle = HANDLE::default();
+        // SAFETY: the process pseudo-handle and output pointer are valid.
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut handle) }
+            .map_err(io::Error::from)?;
+        let token = Token(handle);
+        let mut size = 0;
+        // SAFETY: the first call queries the required length.
+        unsafe {
+            let _ = GetTokenInformation(token.0, TokenUser, None, 0, &mut size);
+        }
+        let mut buffer = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
+        // SAFETY: the aligned buffer has the requested capacity.
+        unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                Some(buffer.as_mut_ptr().cast()),
+                size,
+                &mut size,
+            )
+        }
+        .map_err(io::Error::from)?;
+        Ok(Self(buffer))
+    }
+    fn sid(&self) -> windows::Win32::Security::PSID {
+        // SAFETY: successful token query initialized TOKEN_USER and its SID in the buffer.
+        unsafe {
+            (*self
+                .0
+                .as_ptr()
+                .cast::<windows::Win32::Security::TOKEN_USER>())
+            .User
+            .Sid
+        }
+    }
+    fn is(&self, owner: windows::Win32::Security::PSID) -> bool {
+        // SAFETY: both SIDs remain live for the comparison.
+        unsafe { windows::Win32::Security::EqualSid(owner, self.sid()) }.is_ok()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn open_relative(
     dir: &ConfigDir,
     name: &[u16],
     write: bool,
     create: bool,
+    security: Option<&FileSecurity>,
+    owner_access: bool,
+    assign_identity: bool,
+    share_delete: bool,
 ) -> Result<File, ConfigFsError> {
     use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows::Wdk::Storage::FileSystem::{
-        FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-        NtCreateFile,
+        FILE_CREATE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
     };
     use windows::Win32::Foundation::{OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING};
     use windows::Win32::Storage::FileSystem::{
-        DELETE, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        DELETE, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
+        WRITE_OWNER,
     };
     use windows::Win32::System::IO::IO_STATUS_BLOCK;
     use windows::core::PWSTR;
@@ -539,7 +839,46 @@ fn open_relative(
         MaximumLength: length,
         Buffer: PWSTR(name.as_ptr() as *mut _),
     };
+    // An absolute descriptor serves as SECURITY_ATTRIBUTES for the relative NtCreateFile.
+    use windows::Win32::Security::{
+        InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SECURITY_DESCRIPTOR,
+        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorGroup,
+        SetSecurityDescriptorOwner,
+    };
+    let mut descriptor = SECURITY_DESCRIPTOR::default();
+    let descriptor_ptr = PSECURITY_DESCRIPTOR((&mut descriptor as *mut SECURITY_DESCRIPTOR).cast());
+    if let Some(security) = security {
+        // SAFETY: descriptor is writable and its SID and ACL pointers outlive NtCreateFile.
+        unsafe {
+            InitializeSecurityDescriptor(descriptor_ptr, 1).map_err(io::Error::from)?;
+            SetSecurityDescriptorDacl(descriptor_ptr, true, Some(security.dacl), false)
+                .map_err(io::Error::from)?;
+            if assign_identity {
+                SetSecurityDescriptorGroup(descriptor_ptr, Some(security.group), false)
+                    .map_err(io::Error::from)?;
+            }
+            if security.set_owner {
+                SetSecurityDescriptorOwner(descriptor_ptr, Some(security.owner), false)
+                    .map_err(io::Error::from)?;
+            }
+            SetSecurityDescriptorControl(
+                descriptor_ptr,
+                SE_DACL_PROTECTED,
+                if security.protected {
+                    SE_DACL_PROTECTED
+                } else {
+                    Default::default()
+                },
+            )
+            .map_err(io::Error::from)?;
+        }
+    }
     let attributes = OBJECT_ATTRIBUTES {
+        SecurityDescriptor: if security.is_some() {
+            &descriptor
+        } else {
+            std::ptr::null()
+        },
         Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
         RootDirectory: handle(&dir._file),
         ObjectName: &object_name,
@@ -553,7 +892,19 @@ fn open_relative(
         NtCreateFile(
             &mut result,
             if write {
-                FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE
+                FILE_GENERIC_READ
+                    | FILE_GENERIC_WRITE
+                    | DELETE
+                    | if security.is_some() {
+                        WRITE_DAC
+                            | if owner_access {
+                                WRITE_OWNER
+                            } else {
+                                Default::default()
+                            }
+                    } else {
+                        Default::default()
+                    }
             } else {
                 FILE_GENERIC_READ
             },
@@ -561,13 +912,48 @@ fn open_relative(
             &mut status_block,
             None,
             FILE_FLAGS_AND_ATTRIBUTES(0),
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            if create { FILE_OPEN_IF } else { FILE_OPEN },
+            FILE_SHARE_READ
+                | FILE_SHARE_WRITE
+                | if share_delete {
+                    windows::Win32::Storage::FileSystem::FILE_SHARE_DELETE
+                } else {
+                    Default::default()
+                },
+            if create { FILE_CREATE } else { FILE_OPEN },
             FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
             None,
             0,
         )
     };
+    // Retry only permission and owner assignment failures, never collisions or I/O errors.
+    let retryable = matches!(status.0 as u32, 0xC0000022 | 0xC0000061 | 0xC000005A);
+    if retryable && security.is_some() && owner_access {
+        // WRITE_OWNER may be unavailable; keep the DACL and retry without it.
+        return open_relative(
+            dir,
+            name,
+            write,
+            create,
+            security,
+            false,
+            assign_identity,
+            share_delete,
+        );
+    }
+    if retryable && security.is_some() && create && assign_identity {
+        // The source group may require unavailable privileges at creation.
+        // Keep the DACL and any required owner while Windows chooses the group.
+        return open_relative(
+            dir,
+            name,
+            write,
+            create,
+            security,
+            false,
+            false,
+            share_delete,
+        );
+    }
     if status.0 < 0 {
         // SAFETY: converting a returned NTSTATUS does not dereference memory.
         return Err(
@@ -601,6 +987,9 @@ fn validate_name(name: &[u16]) -> Result<(), ConfigFsError> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static FORCE_RENAME_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 /// Retries rename variants when a variant is unsupported.
 fn rename_fallback(mut attempt: impl FnMut(usize) -> (i32, u32)) -> Result<(), u32> {
     for stage in 0..3 {
@@ -615,7 +1004,7 @@ fn rename_fallback(mut attempt: impl FnMut(usize) -> (i32, u32)) -> Result<(), u
     unreachable!()
 }
 
-/// Holds a verified file and its directory. Handles deny FILE_SHARE_DELETE, so an
+/// Holds a verified file and its directory. Ordinary handles deny FILE_SHARE_DELETE, so an
 /// editor's rename-over may fail during a short read, and opening fails if DELETE
 /// access is already held. Guarantees last only while handles are held; a hard
 /// link can still be added after verification.
@@ -626,18 +1015,32 @@ pub struct VerifiedFile {
 }
 impl VerifiedFile {
     pub fn open(dir: &ConfigDir, name: &std::ffi::OsStr) -> Result<Self, ConfigFsError> {
-        Self::open_mode(dir, name, false, false)
+        Self::open_mode(dir, name, false, false, None, false)
+    }
+    pub fn open_source(dir: &ConfigDir, name: &std::ffi::OsStr) -> Result<Self, ConfigFsError> {
+        Self::open_mode(dir, name, false, false, None, true)
     }
     fn open_mode(
         dir: &ConfigDir,
         name: &std::ffi::OsStr,
         write: bool,
         create: bool,
+        security: Option<&FileSecurity>,
+        share_delete: bool,
     ) -> Result<Self, ConfigFsError> {
         use std::os::windows::ffi::OsStrExt;
         let name_wide: Vec<u16> = name.encode_wide().collect();
         validate_name(&name_wide)?;
-        let file = open_relative(dir, &name_wide, write, create)?;
+        let file = open_relative(
+            dir,
+            &name_wide,
+            write,
+            create,
+            security,
+            true,
+            true,
+            share_delete,
+        )?;
         let info = information(&file)?;
         if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
             return Err(ConfigFsError::ReparsePoint);
@@ -648,9 +1051,9 @@ impl VerifiedFile {
         if info.nNumberOfLinks != 1 {
             return Err(ConfigFsError::ExtraHardLinks);
         }
-        // The opened file and directory deny delete sharing. Resolve the file's final
+        // Resolve the file's final
         // handle path, reopen its parent without following its final reparse point,
-        // and compare identities; neither object can be renamed during this check.
+        // and compare identities. The directory cannot be renamed during this check.
         fn final_path(file: &File, flags: GETFINALPATHNAMEBYHANDLE_FLAGS) -> io::Result<PathBuf> {
             use std::os::windows::ffi::OsStringExt;
             let mut buffer = vec![0u16; 512];
@@ -692,80 +1095,59 @@ impl VerifiedFile {
         })
     }
 
-    pub fn write_file(
-        dir: &ConfigDir,
-        name: &std::ffi::OsStr,
-        bytes: &[u8],
-    ) -> Result<(), ConfigFsError> {
-        use std::io::Write;
-        let mut file = Self::open_mode(dir, name, true, true)?;
-        file.file.set_len(0)?;
-        file.file.write_all(bytes)?;
-        file.file.sync_all()?;
+    pub fn try_clone(&self) -> Result<Self, ConfigFsError> {
+        Ok(Self {
+            file: self.file.try_clone()?,
+            _directory: self._directory.try_clone()?,
+            _identity: self._identity,
+        })
+    }
+    pub fn delete_verified(dir: &ConfigDir, name: &std::ffi::OsStr) -> Result<(), ConfigFsError> {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+        };
+        let file = Self::open_mode(dir, name, true, false, None, false)?;
+        let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: the verified file handle and disposition structure remain live.
+        unsafe {
+            SetFileInformationByHandle(
+                handle(&file.file),
+                FileDispositionInfo,
+                (&info as *const FILE_DISPOSITION_INFO).cast(),
+                std::mem::size_of_val(&info) as u32,
+            )
+        }
+        .map_err(io::Error::from)?;
         Ok(())
     }
+    pub fn security(&self) -> Result<FileSecurity, ConfigFsError> {
+        FileSecurity::capture(&self.file)
+    }
+    #[cfg(test)]
     pub fn rename(
         dir: &ConfigDir,
         source: &std::ffi::OsStr,
         target: &std::ffi::OsStr,
+        security: Option<&FileSecurity>,
     ) -> Result<(), ConfigFsError> {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Wdk::Storage::FileSystem::{
-            FileRenameInformation, FileRenameInformationEx, NtSetInformationFile,
-        };
-        use windows::Win32::Foundation::RtlNtStatusToDosError;
-        use windows::Win32::Storage::FileSystem::FILE_RENAME_INFO;
-        use windows::Win32::System::IO::IO_STATUS_BLOCK;
-        // Validate the destination as a single component using the same rules as opens.
-        let wide: Vec<u16> = target.encode_wide().collect();
-        validate_name(&wide)?;
-        match Self::open(dir, target) {
-            Ok(target_file) => drop(target_file),
-            Err(ConfigFsError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let file = Self::open_mode(dir, source, true, false)?;
-        let size = std::mem::size_of::<FILE_RENAME_INFO>()
-            .checked_add(wide.len() * 2)
-            .ok_or(ConfigFsError::InvalidName)?;
-        let mut buffer = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
-        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-        const REPLACE_IF_EXISTS: u32 = 1;
-        const POSIX_SEMANTICS: u32 = 2;
-        // SAFETY: the aligned allocation covers the header and name at its field offset; both handles remain live.
-        unsafe {
-            (*info).Anonymous.Flags = REPLACE_IF_EXISTS | POSIX_SEMANTICS;
-            (*info).RootDirectory = handle(&dir._file);
-            (*info).FileNameLength =
-                u32::try_from(wide.len() * 2).map_err(|_| ConfigFsError::InvalidName)?;
-            let name_ptr = buffer
-                .as_mut_ptr()
-                .cast::<u8>()
-                .add(std::mem::offset_of!(FILE_RENAME_INFO, FileName))
-                .cast::<u16>();
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), name_ptr, wide.len());
-            rename_fallback(|stage| {
-                (*info).Anonymous.Flags = if stage == 0 {
-                    REPLACE_IF_EXISTS | POSIX_SEMANTICS
-                } else {
-                    REPLACE_IF_EXISTS
-                };
-                let mut status_block = IO_STATUS_BLOCK::default();
-                let class = if stage < 2 {
-                    FileRenameInformationEx
-                } else {
-                    FileRenameInformation
-                };
-                let status = NtSetInformationFile(
-                    handle(&file.file),
-                    &mut status_block,
-                    info.cast(),
-                    size as u32,
-                    class,
-                );
-                (status.0, RtlNtStatusToDosError(status))
-            })
-            .map_err(|code| ConfigFsError::from(io::Error::from_raw_os_error(code as i32)))?;
+        let file = Self::open_mode(dir, source, true, false, security, false)?;
+        rename_handle(dir, &file.file, target, true)
+    }
+    pub fn revalidate(
+        &self,
+        dir: &ConfigDir,
+        name: &std::ffi::OsStr,
+        expected: &FileSecurity,
+    ) -> Result<(), ConfigFsError> {
+        let current = Self::open_source(dir, name)?;
+        let held_identity = identity(&self.file, &information(&self.file)?)?;
+        let current_security = self.security()?;
+        if held_identity != self._identity
+            || current._identity != self._identity
+            || !expected.same_owner(&current_security)
+            || !expected.same_dacl(&current_security)
+        {
+            return Err(io::Error::other("configuration source changed").into());
         }
         Ok(())
     }
@@ -783,6 +1165,186 @@ impl VerifiedFile {
         }
         Ok(bytes)
     }
+    pub fn rewind(&mut self) -> Result<(), ConfigFsError> {
+        use std::io::Seek;
+        self.file.rewind()?;
+        Ok(())
+    }
+}
+
+/// A draft remains owned by its creation handle until it is renamed or deleted.
+pub struct Draft {
+    file: File,
+    renamed: bool,
+}
+impl Drop for Draft {
+    fn drop(&mut self) {
+        if !self.renamed {
+            use windows::Win32::Storage::FileSystem::{
+                FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+            };
+            let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+            // SAFETY: the handle is owned and live; info is valid for the duration of the call.
+            unsafe {
+                let _ = SetFileInformationByHandle(
+                    handle(&self.file),
+                    FileDispositionInfo,
+                    (&info as *const FILE_DISPOSITION_INFO).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                );
+            }
+        }
+    }
+}
+impl Draft {
+    pub fn create(
+        dir: &ConfigDir,
+        target: &std::ffi::OsStr,
+        security: Option<&FileSecurity>,
+    ) -> Result<Self, ConfigFsError> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let target = target.to_string_lossy();
+        for attempt in 0..16 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let name = format!(
+                "{target}.{}-{}-{nanos}.tmp",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            let wide: Vec<u16> = std::ffi::OsStr::new(&name).encode_wide().collect();
+            validate_name(&wide)?;
+            match open_relative(dir, &wide, true, true, security, true, true, false) {
+                Ok(file) => {
+                    let draft = Self {
+                        file,
+                        renamed: false,
+                    };
+                    if let Some(expected) = security
+                        && !expected.same_dacl(&FileSecurity::capture(&draft.file)?)
+                    {
+                        return Err(io::Error::other("draft DACL differs at creation").into());
+                    }
+                    return Ok(draft);
+                }
+                Err(ConfigFsError::Io(e))
+                    if e.kind() == io::ErrorKind::AlreadyExists && attempt < 15 =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), ConfigFsError> {
+        use std::io::Write;
+        self.file.write_all(bytes)?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+    pub fn read_back(&mut self) -> Result<Vec<u8>, ConfigFsError> {
+        use std::io::{Seek, SeekFrom};
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        self.file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+    pub fn rename(
+        mut self,
+        dir: &ConfigDir,
+        target: &std::ffi::OsStr,
+        security: Option<&FileSecurity>,
+        source: Option<(VerifiedFile, &std::ffi::OsStr)>,
+        replace: bool,
+    ) -> Result<(), ConfigFsError> {
+        if let Some(expected) = security {
+            expected.apply(&self.file)?;
+            if !expected.same_dacl(&FileSecurity::capture(&self.file)?) {
+                return Err(io::Error::other("replacement DACL changed during application").into());
+            }
+        }
+        if let Some((file, name)) = source {
+            file.revalidate(dir, name, security.expect("source security"))?;
+        }
+        rename_handle(dir, &self.file, target, replace)?;
+        self.renamed = true;
+        Ok(())
+    }
+}
+fn rename_handle(
+    dir: &ConfigDir,
+    file: &File,
+    target: &std::ffi::OsStr,
+    replace: bool,
+) -> Result<(), ConfigFsError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Wdk::Storage::FileSystem::{
+        FileRenameInformation, FileRenameInformationEx, NtSetInformationFile,
+    };
+    use windows::Win32::Foundation::RtlNtStatusToDosError;
+    use windows::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+    use windows::Win32::System::IO::IO_STATUS_BLOCK;
+    let wide: Vec<u16> = target.encode_wide().collect();
+    validate_name(&wide)?;
+    match VerifiedFile::open(dir, target) {
+        Ok(target_file) => drop(target_file),
+        Err(ConfigFsError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let size = std::mem::size_of::<FILE_RENAME_INFO>()
+        .checked_add(wide.len() * 2)
+        .ok_or(ConfigFsError::InvalidName)?;
+    let mut buffer = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    const REPLACE_IF_EXISTS: u32 = 1;
+    const POSIX_SEMANTICS: u32 = 2;
+    // SAFETY: the aligned allocation covers the header and name at its field offset; both handles remain live.
+    unsafe {
+        (*info).Anonymous.Flags = REPLACE_IF_EXISTS | POSIX_SEMANTICS;
+        (*info).RootDirectory = handle(&dir._file);
+        (*info).FileNameLength =
+            u32::try_from(wide.len() * 2).map_err(|_| ConfigFsError::InvalidName)?;
+        let name_ptr = buffer
+            .as_mut_ptr()
+            .cast::<u8>()
+            .add(std::mem::offset_of!(FILE_RENAME_INFO, FileName))
+            .cast::<u16>();
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), name_ptr, wide.len());
+        rename_fallback(|stage| {
+            #[cfg(test)]
+            if stage == 0 && FORCE_RENAME_FALLBACK.with(|v| v.replace(false)) {
+                return (-1, 50);
+            }
+            (*info).Anonymous.Flags = if !replace {
+                0
+            } else if stage == 0 {
+                REPLACE_IF_EXISTS | POSIX_SEMANTICS
+            } else {
+                REPLACE_IF_EXISTS
+            };
+            let mut status_block = IO_STATUS_BLOCK::default();
+            let class = if stage < 2 {
+                FileRenameInformationEx
+            } else {
+                FileRenameInformation
+            };
+            let status = NtSetInformationFile(
+                handle(file),
+                &mut status_block,
+                info.cast(),
+                size as u32,
+                class,
+            );
+            (status.0, RtlNtStatusToDosError(status))
+        })
+        .map_err(|code| ConfigFsError::from(io::Error::from_raw_os_error(code as i32)))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -877,7 +1439,7 @@ mod tests {
         for target in [r"a\b", "a/b", "..", "x:y", "CON", ""] {
             assert!(
                 matches!(
-                    VerifiedFile::rename(&dir, "source".as_ref(), target.as_ref()),
+                    VerifiedFile::rename(&dir, "source".as_ref(), target.as_ref(), None),
                     Err(ConfigFsError::InvalidName)
                 ),
                 "{target:?}"

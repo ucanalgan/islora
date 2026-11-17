@@ -5,7 +5,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::config_fs::{ConfigDir, VerifiedFile, WriterLock, WriterMutex};
+use super::config_fs::{ConfigDir, Draft, VerifiedFile, WriterLock, WriterMutex};
 use island_core::config::write_value;
 use island_core::migration::{CriticalKey, MigrationError, MigrationOutcome, prepare};
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -210,6 +210,25 @@ fn prepare_storage_at(base: &Path) -> io::Result<bool> {
     let lock = WriterLock::with_mutex(&folder, mutex).map_err(io::Error::from)?;
     let path = folder.join("config.toml");
     let dir = lock.directory();
+    if let Ok(entries) = dir.entries() {
+        for entry in entries {
+            let value = entry.to_string_lossy();
+            if let Some(unique) = value
+                .strip_prefix("config.toml.")
+                .and_then(|s| s.strip_suffix(".tmp"))
+            {
+                let unique = unique.strip_prefix("bak.").unwrap_or(unique);
+                let parts: Vec<_> = unique.split('-').collect();
+                if parts.len() == 3
+                    && parts
+                        .iter()
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    let _ = VerifiedFile::delete_verified(dir, &entry);
+                }
+            }
+        }
+    }
     let first_run = is_new_install_in(dir);
     if !inspect_in(dir, "config.toml")? && has_ambiguous_recovery_artifacts(dir)? {
         return Err(io::Error::new(
@@ -499,6 +518,7 @@ fn name(path: &Path) -> io::Result<&std::ffi::OsStr> {
     path.file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "configuration has no name"))
 }
+#[cfg(test)]
 fn read_in(dir: &ConfigDir, path: &Path) -> io::Result<String> {
     let mut file = VerifiedFile::open(dir, name(path)?).map_err(io::Error::from)?;
     read_verified(&mut file)
@@ -510,26 +530,72 @@ fn replace(path: &Path, text: &str) -> io::Result<()> {
 }
 /// A crash half way must not cost the user their calendar address.
 fn replace_in(dir: &ConfigDir, path: &Path, text: &str) -> io::Result<()> {
-    let draft = path.with_extension("toml.new");
-    VerifiedFile::write_file(dir, name(&draft)?, text.as_bytes()).map_err(io::Error::from)?;
-    if inspect_in(
+    replace_in_with_hook(
         dir,
-        name(path)?
-            .to_str()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid name"))?,
-    )? {
-        let backup_draft = path.with_extension("toml.bak.new");
-        let original = read_in(dir, path)?;
-        VerifiedFile::write_file(dir, name(&backup_draft)?, original.as_bytes())
+        path,
+        text,
+        #[cfg(test)]
+        || {},
+    )
+}
+fn replace_in_with_hook(
+    dir: &ConfigDir,
+    path: &Path,
+    text: &str,
+    #[cfg(test)] hook: impl FnOnce(),
+) -> io::Result<()> {
+    let target = name(path)?;
+    let mut source = match VerifiedFile::open_source(dir, target) {
+        Ok(file) => Some(file),
+        Err(super::config_fs::ConfigFsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let security = source
+        .as_ref()
+        .map(VerifiedFile::security)
+        .transpose()
+        .map_err(io::Error::from)?;
+    let mut draft = Draft::create(dir, name(path)?, security.as_ref()).map_err(io::Error::from)?;
+    draft.write(text.as_bytes()).map_err(io::Error::from)?;
+    if let Some(source) = source.as_mut() {
+        source.rewind().map_err(io::Error::from)?;
+        let original = read_verified(source)?;
+        let backup = path.with_extension("toml.bak");
+        let mut backup_draft =
+            Draft::create(dir, name(&backup)?, security.as_ref()).map_err(io::Error::from)?;
+        backup_draft
+            .write(original.as_bytes())
             .map_err(io::Error::from)?;
-        VerifiedFile::rename(
+        backup_draft
+            .rename(
+                dir,
+                name(&backup)?,
+                security.as_ref(),
+                Some((source.try_clone().map_err(io::Error::from)?, target)),
+                true,
+            )
+            .map_err(io::Error::from)?;
+    }
+    #[cfg(test)]
+    hook();
+    draft
+        .rename(
             dir,
-            name(&backup_draft)?,
-            name(&path.with_extension("toml.bak"))?,
+            name(path)?,
+            security.as_ref(),
+            source.map(|f| (f, target)),
+            security.is_some(),
         )
         .map_err(io::Error::from)?;
+    #[cfg(test)]
+    if let Some(expected) = security.as_ref() {
+        let actual = VerifiedFile::open(dir, name(path)?)
+            .map_err(io::Error::from)?
+            .security()
+            .map_err(io::Error::from)?;
+        assert!(expected.same_dacl(&actual));
     }
-    VerifiedFile::rename(dir, name(&draft)?, name(path)?).map_err(io::Error::from)
+    Ok(())
 }
 #[cfg(test)]
 fn recover(path: &Path) -> io::Result<()> {
@@ -538,6 +604,18 @@ fn recover(path: &Path) -> io::Result<()> {
 }
 /// An incomplete draft is never promoted: recover the last completed file.
 fn recover_in(dir: &ConfigDir, path: &Path) -> io::Result<()> {
+    recover_in_with_hook(
+        dir,
+        path,
+        #[cfg(test)]
+        || {},
+    )
+}
+fn recover_in_with_hook(
+    dir: &ConfigDir,
+    path: &Path,
+    #[cfg(test)] hook: impl FnOnce(),
+) -> io::Result<()> {
     let backup = path.with_extension("toml.bak");
     let primary = name(path)?
         .to_str()
@@ -546,7 +624,10 @@ fn recover_in(dir: &ConfigDir, path: &Path) -> io::Result<()> {
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid name"))?;
     if !inspect_in(dir, primary)? && inspect_in(dir, backup_name)? {
-        let candidate = read_in(dir, &backup)?;
+        let mut source = VerifiedFile::open_source(dir, name(&backup)?).map_err(io::Error::from)?;
+        #[cfg(test)]
+        hook();
+        let candidate = read_verified(&mut source)?;
         match island_core::migration::prepare(&candidate) {
             Ok(
                 island_core::migration::MigrationOutcome::Prepared { .. }
@@ -565,16 +646,27 @@ fn recover_in(dir: &ConfigDir, path: &Path) -> io::Result<()> {
                 ));
             }
         }
-        let recovery = path.with_extension("toml.recover");
-        VerifiedFile::write_file(dir, name(&recovery)?, candidate.as_bytes())
+        let security = source.security().map_err(io::Error::from)?;
+        let mut recovery =
+            Draft::create(dir, name(path)?, Some(&security)).map_err(io::Error::from)?;
+        recovery
+            .write(candidate.as_bytes())
             .map_err(io::Error::from)?;
-        if read_in(dir, &recovery)? != candidate {
+        if recovery.read_back().map_err(io::Error::from)? != candidate.as_bytes() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "configuration backup changed during recovery",
             ));
         }
-        VerifiedFile::rename(dir, name(&recovery)?, name(path)?).map_err(io::Error::from)?;
+        recovery
+            .rename(
+                dir,
+                name(path)?,
+                Some(&security),
+                Some((source, name(&backup)?)),
+                false,
+            )
+            .map_err(io::Error::from)?;
     }
     Ok(())
 }
@@ -615,6 +707,27 @@ mod tests {
     impl Drop for Temp {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    // Restore access before Temp removes files, including after an assertion panics.
+    struct RestoreDacl<'a> {
+        folder: &'a Path,
+        security: super::super::config_fs::FileSecurity,
+    }
+    impl Drop for RestoreDacl<'_> {
+        fn drop(&mut self) {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+            if let Ok(entries) = std::fs::read_dir(self.folder) {
+                for entry in entries.flatten() {
+                    if let Ok(file) = std::fs::OpenOptions::new()
+                        .access_mode((READ_CONTROL | WRITE_DAC).0)
+                        .open(entry.path())
+                    {
+                        self.security.restore_dacl(&file);
+                    }
+                }
+            }
         }
     }
     fn temp_base() -> Temp {
@@ -1270,40 +1383,16 @@ mod tests {
     }
 
     #[test]
-    fn draft_and_backup_failures_preserve_the_primary_file() {
-        let folder = std::env::temp_dir().join(format!(
-            "islora-write-stages-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&folder).unwrap();
+    fn backup_failure_preserves_primary_and_removes_drafts() {
+        let folder = temp_base();
         let path = folder.join("config.toml");
         let original =
             "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\"\n";
         std::fs::write(&path, original).unwrap();
-        let draft = path.with_extension("toml.new");
-        std::fs::create_dir(&draft).unwrap();
+        std::fs::create_dir(path.with_extension("toml.bak")).unwrap();
         assert!(replace(&path, "new").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        std::fs::remove_dir(&draft).unwrap();
-        let backup_draft = path.with_extension("toml.bak.new");
-        std::fs::create_dir(&backup_draft).unwrap();
-        assert!(replace(&path, "new").is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        std::fs::remove_file(draft).unwrap();
-        std::fs::remove_dir(backup_draft).unwrap();
-        let blocked_backup = path.with_extension("toml.bak");
-        std::fs::create_dir(&blocked_backup).unwrap();
-        assert!(replace(&path, "new").is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        std::fs::remove_file(path.with_extension("toml.new")).unwrap();
-        std::fs::remove_file(path.with_extension("toml.bak.new")).unwrap();
-        std::fs::remove_dir(blocked_backup).unwrap();
-        std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir(folder).unwrap();
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
     }
 
     #[test]
@@ -1418,6 +1507,7 @@ mod tests {
             &dir,
             std::ffi::OsStr::new("source"),
             std::ffi::OsStr::new(&target),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1425,6 +1515,465 @@ mod tests {
             "content"
         );
         drop(dir);
+    }
+
+    #[test]
+    fn protected_dacl_survives_write_and_backup_recovery() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+            SetSecurityInfo,
+        };
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        };
+        use windows::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let stale = folder.join("config.toml.new");
+        std::fs::write(&stale, "foreign stale draft").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .access_mode((WRITE_DAC | READ_CONTROL).0)
+            .open(&path)
+            .unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let initial = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let _restore = RestoreDacl {
+            folder: &folder,
+            security: initial,
+        };
+        let sddl = format!(
+            "D:P(A;;FA;;;{})(A;;FA;;;SY)",
+            _restore.security.owner_sid_string()
+        );
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: valid SDDL and output pointer; the returned allocation is freed below.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &windows::core::HSTRING::from(sddl),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+        }
+        .unwrap();
+        let mut present = false.into();
+        let mut defaulted = false.into();
+        let mut acl = std::ptr::null_mut();
+        // SAFETY: descriptor is live and output pointers are valid.
+        unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) }
+            .unwrap();
+        // SAFETY: the file handle and ACL are live for this call.
+        let status = unsafe {
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(acl),
+                None,
+            )
+        };
+        // SAFETY: the conversion returned this LocalAlloc allocation once.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        }
+        assert_eq!(status.0, 0);
+        drop(file);
+        let expected = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let stale_security = VerifiedFile::open(&dir, "config.toml.new".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(!expected.same_dacl(&stale_security));
+        replace_in(&dir, &path, "config_version = \"2\"\n# updated\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&stale).unwrap(),
+            "foreign stale draft"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "config_version = \"2\"\n# updated\n"
+        );
+        let actual = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(expected.same_dacl(&actual));
+        std::fs::remove_file(&path).unwrap();
+        recover_in(&dir, &path).unwrap();
+        let recovered = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(expected.same_dacl(&recovered));
+    }
+
+    #[test]
+    fn changed_source_security_aborts_replacement() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        let original = "config_version = \"2\"\n";
+        std::fs::write(&path, original).unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let security = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let _restore = RestoreDacl {
+            folder: &folder,
+            security,
+        };
+        let file = std::fs::OpenOptions::new()
+            .access_mode((READ_CONTROL | WRITE_DAC).0)
+            .open(&path)
+            .unwrap();
+        assert!(
+            replace_in_with_hook(&dir, &path, "new", || _restore
+                .security
+                .toggle_dacl_protection(&file))
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn unprotected_dacl_and_backup_match_primary() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+            SetSecurityInfo,
+        };
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
+            UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+        use windows::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let original = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let _restore = RestoreDacl {
+            folder: &folder,
+            security: original,
+        };
+        let sddl = format!(
+            "D:(A;;FA;;;{})(A;;FR;;;WD)",
+            _restore.security.owner_sid_string()
+        );
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: valid SDDL and output storage; the descriptor is freed below.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &windows::core::HSTRING::from(sddl),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+        }
+        .unwrap();
+        let mut present = false.into();
+        let mut defaulted = false.into();
+        let mut acl = std::ptr::null_mut();
+        // SAFETY: the descriptor and output pointers are valid.
+        unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) }
+            .unwrap();
+        let file = std::fs::OpenOptions::new()
+            .access_mode((READ_CONTROL | WRITE_DAC).0)
+            .open(&path)
+            .unwrap();
+        // SAFETY: the file handle and ACL remain live during the call.
+        let status = unsafe {
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(acl),
+                None,
+            )
+        };
+        // SAFETY: the descriptor is the allocation returned by the conversion.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        }
+        assert_eq!(status.0, 0);
+        drop(file);
+        let expected = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        std::fs::write(folder.join("sibling"), "").unwrap();
+        let sibling = VerifiedFile::open(&dir, "sibling".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(!expected.same_dacl(&sibling));
+        replace_in(&dir, &path, "config_version = \"2\"\n# changed\n").unwrap();
+        for item in [&path, &path.with_extension("toml.bak")] {
+            let actual = VerifiedFile::open(&dir, name(item).unwrap())
+                .unwrap()
+                .security()
+                .unwrap();
+            assert!(expected.same_dacl(&actual));
+        }
+    }
+
+    #[test]
+    fn foreign_owner_defaults_while_dacl_is_preserved() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSidToSidW, SE_FILE_OBJECT, SetSecurityInfo,
+        };
+        use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSID};
+        use windows::Win32::Storage::FileSystem::WRITE_OWNER;
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let before = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let file = match std::fs::OpenOptions::new()
+            .access_mode(WRITE_OWNER.0)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("skipping foreign owner test: {e}");
+                return;
+            }
+        };
+        let mut sid = PSID::default();
+        // SAFETY: the SID string and output pointer are valid.
+        unsafe { ConvertStringSidToSidW(windows::core::w!("S-1-5-18"), &mut sid) }.unwrap();
+        // SAFETY: the file handle and SID remain valid during the call.
+        let status = unsafe {
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(sid),
+                None,
+                None,
+                None,
+            )
+        };
+        // SAFETY: the SID was allocated by ConvertStringSidToSidW.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sid.0)));
+        }
+        drop(file);
+        if status.0 != 0 {
+            eprintln!("skipping foreign owner test: Windows error {}", status.0);
+            return;
+        }
+        let foreign = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(!foreign.same_owner(&before));
+        replace_in(&dir, &path, "config_version = \"2\"\n# changed\n").unwrap();
+        let after = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(foreign.same_dacl(&after));
+        assert!(before.same_owner(&after));
+    }
+
+    #[test]
+    fn security_failures_leave_primary_untouched() {
+        use super::super::config_fs::FAIL_SECURITY;
+        for stage in [1, 2] {
+            let folder = temp_base();
+            let path = folder.join("config.toml");
+            let original = "config_version = \"2\"\n";
+            std::fs::write(&path, original).unwrap();
+            let dir = ConfigDir::open(&folder).unwrap();
+            FAIL_SECURITY.with(|failure| failure.set(stage));
+            assert!(replace_in(&dir, &path, "new").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn held_source_can_be_rewound_for_backup() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "original").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let mut source = VerifiedFile::open_source(&dir, name(&path).unwrap()).unwrap();
+        assert_eq!(read_verified(&mut source).unwrap(), "original");
+        source.rewind().unwrap();
+        assert_eq!(read_verified(&mut source).unwrap(), "original");
+    }
+
+    #[test]
+    fn replaced_source_aborts_replacement() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        assert!(
+            replace_in_with_hook(&dir, &path, "draft", || {
+                std::fs::rename(&path, folder.join("old.toml")).unwrap();
+                std::fs::write(&path, "external").unwrap();
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn preparation_cleans_only_verified_unique_drafts() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        for item in [
+            "config.toml.1-2-3.tmp",
+            "config.toml.bak.1-2-3.tmp",
+            "config.toml.other.tmp",
+        ] {
+            std::fs::write(folder.join(item), "secret").unwrap();
+        }
+        prepare_storage_at(&base).unwrap();
+        assert!(!folder.join("config.toml.1-2-3.tmp").exists());
+        assert!(!folder.join("config.toml.bak.1-2-3.tmp").exists());
+        assert!(folder.join("config.toml.other.tmp").exists());
+    }
+
+    #[test]
+    fn fallback_replaces_after_source_handle_is_dropped() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let source = VerifiedFile::open_source(&dir, name(&path).unwrap()).unwrap();
+        let security = source.security().unwrap();
+        let mut draft = Draft::create(&dir, name(&path).unwrap(), Some(&security)).unwrap();
+        draft.write(b"new").unwrap();
+        super::super::config_fs::FORCE_RENAME_FALLBACK.with(|v| v.set(true));
+        draft
+            .rename(
+                &dir,
+                name(&path).unwrap(),
+                Some(&security),
+                Some((source, name(&path).unwrap())),
+                true,
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn first_run_collision_does_not_overwrite() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        let dir = ConfigDir::open(&folder).unwrap();
+        assert!(
+            replace_in_with_hook(&dir, &path, "draft", || std::fs::write(&path, "external")
+                .unwrap())
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+    }
+
+    #[test]
+    fn recovery_rejects_swapped_backup() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        let backup = path.with_extension("toml.bak");
+        std::fs::write(&backup, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let result = recover_in_with_hook(&dir, &path, || {
+            std::fs::rename(&backup, folder.join("old.toml")).unwrap();
+            std::fs::write(&backup, "config_version = \"2\"\n# swapped\n").unwrap();
+        });
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn failed_draft_rename_removes_owned_file() {
+        let folder = temp_base();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let mut draft = Draft::create(&dir, "config.toml".as_ref(), None).unwrap();
+        draft.write(b"draft").unwrap();
+        assert!(
+            draft
+                .rename(&dir, "invalid/name".as_ref(), None, None, false)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn first_run_inherits_folder_dacl() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("sibling"), "").unwrap();
+        prepare_storage_at(&base).unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let sibling = VerifiedFile::open(&dir, "sibling".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        let primary = VerifiedFile::open(&dir, "config.toml".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(sibling.same_dacl(&primary));
+    }
+
+    #[test]
+    fn current_user_owner_survives_write() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let before = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        replace_in(&dir, &path, "config_version = \"2\"\n# updated\n").unwrap();
+        let after = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(before.same_owner(&after));
     }
 
     #[test]
