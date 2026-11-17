@@ -4,8 +4,13 @@
 use std::mem::size_of;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use island_core::fullscreen::is_desktop_class;
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
+use island_core::fullscreen::{ScreenRect, fills_screen, is_desktop_class};
+use windows::Win32::Foundation::{FALSE, HANDLE, HWND, LPARAM, RECT, TRUE, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::System::Power::{
     HPOWERNOTIFY, POWERBROADCAST_SETTING, RegisterPowerSettingNotification,
     UnregisterPowerSettingNotification,
@@ -22,10 +27,13 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND,
-    EVENT_SYSTEM_MOVESIZESTART, GetClassNameW, GetForegroundWindow, PBT_POWERSETTINGCHANGE,
-    PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
+    EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GWL_EXSTYLE, GWL_STYLE, GetClassNameW,
+    GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, IsZoomed, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
+    PBT_POWERSETTINGCHANGE, PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
+    WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
 };
-use windows::core::Result;
+use windows::core::{BOOL, Result};
 
 pub const MSG_APPBAR: u32 = WM_APP + 2;
 pub const MSG_WINDOW_DRAG: u32 = WM_APP + 3;
@@ -156,13 +164,123 @@ pub fn fullscreen_now() -> bool {
     )
 }
 
-/// Whether the desktop or the taskbar is in front, which Windows also reports as
-/// full screen. A full screen app need not be in front for Windows to report it,
-/// for one on another screen, so nothing else is second-guessed.
-pub fn desktop_in_front() -> bool {
-    let mut class = [0u16; 32];
-    let length = unsafe { GetClassNameW(GetForegroundWindow(), &mut class) }.max(0) as usize;
-    is_desktop_class(&String::from_utf16_lossy(&class[..length]))
+/// Whether a window fills the island's screen in front of the island. Windows
+/// reports full screen for the whole session, so an app on another screen, an
+/// invisible overlay spanning one, or the bare desktop would hide the island
+/// on a screen where nothing covers it. The window in front need not have the
+/// focus: a game stays in front on its screen while another screen is used.
+pub fn covers_island(island: HWND) -> bool {
+    let mut spot = RECT::default();
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        if GetWindowRect(island, &mut spot).is_err() {
+            return false;
+        }
+        let monitor = MonitorFromWindow(island, MONITOR_DEFAULTTONEAREST);
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return false;
+        }
+    }
+    let mut search = Search {
+        spot: screen_rect(spot),
+        screen: screen_rect(info.rcMonitor),
+        own: unsafe { GetCurrentProcessId() },
+        covered: false,
+    };
+    unsafe {
+        // Stopping early reports an error, which means nothing here.
+        let _ = EnumWindows(
+            Some(front_of_island),
+            LPARAM(&mut search as *mut Search as isize),
+        );
+    }
+    search.covered
+}
+
+struct Search {
+    spot: ScreenRect,
+    screen: ScreenRect,
+    own: u32,
+    covered: bool,
+}
+
+/// Visits windows front to back and stops at the first one over the island.
+unsafe extern "system" fn front_of_island(hwnd: HWND, data: LPARAM) -> BOOL {
+    let search = unsafe { &mut *(data.0 as *mut Search) };
+    if !could_be_in_front(hwnd, search.own) {
+        return TRUE;
+    }
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return TRUE;
+    }
+    let rect = screen_rect(rect);
+    if !rect.intersects(search.spot) {
+        return TRUE;
+    }
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+    let maximized_with_caption =
+        unsafe { IsZoomed(hwnd) }.as_bool() && style & WS_CAPTION.0 == WS_CAPTION.0;
+    search.covered = fills_screen(rect, search.screen, maximized_with_caption);
+    FALSE
+}
+
+/// Whether a window can be what is seen in front of the island. The island's
+/// own windows, the desktop and taskbars, and windows that are hidden, cloaked,
+/// click-through, never activated or fully transparent, as overlays are, are
+/// looked past.
+fn could_be_in_front(hwnd: HWND, own: u32) -> bool {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return false;
+        }
+        let mut process = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut process));
+        if process == own {
+            return false;
+        }
+        let mut cloaked = 0u32;
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut _,
+            size_of::<u32>() as u32,
+        )
+        .is_ok()
+            && cloaked != 0
+        {
+            return false;
+        }
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if ex_style & (WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0) != 0 {
+            return false;
+        }
+        if ex_style & WS_EX_LAYERED.0 != 0 {
+            let mut alpha = 255u8;
+            let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
+            if GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)).is_ok()
+                && flags.0 & LWA_ALPHA.0 != 0
+                && alpha == 0
+            {
+                return false;
+            }
+        }
+        let mut class = [0u16; 32];
+        let length = GetClassNameW(hwnd, &mut class).max(0) as usize;
+        !is_desktop_class(&String::from_utf16_lossy(&class[..length]))
+    }
+}
+
+fn screen_rect(rect: RECT) -> ScreenRect {
+    ScreenRect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    }
 }
 
 /// Decodes `WM_POWERBROADCAST`. Returns whether the display is now on.

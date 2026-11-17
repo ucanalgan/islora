@@ -386,7 +386,7 @@ pub fn run() -> Result<()> {
     start_with_windows_by_default();
     let reported = fullscreen::fullscreen_now();
     let mut fullscreen_watch = FullscreenWatch::default();
-    fullscreen_watch.report(reported, fullscreen::desktop_in_front());
+    fullscreen_watch.report(reported, fullscreen::covers_island(island_window));
     island.set_suppressed(Suppression::Fullscreen, fullscreen_watch.active());
     if !fullscreen_watch.active() {
         window::show(edge_window);
@@ -807,8 +807,7 @@ impl App {
             }
             TIMER_FULLSCREEN => {
                 self.cancel_timer(TIMER_FULLSCREEN);
-                self.fullscreen
-                    .front_changed(fullscreen::desktop_in_front());
+                self.look_again_for_fullscreen();
                 self.apply_fullscreen();
             }
             _ => {}
@@ -3079,16 +3078,28 @@ impl App {
     }
 
     fn on_fullscreen(&mut self, reported: bool) {
-        self.fullscreen
-            .report(reported, fullscreen::desktop_in_front());
-        self.cancel_timer(TIMER_FULLSCREEN);
+        // The notice may be about another screen while this one is still
+        // reported, so what Windows says now counts as well.
+        self.fullscreen.report(
+            reported || fullscreen::fullscreen_now(),
+            fullscreen::covers_island(self.island_window),
+        );
         self.apply_fullscreen();
         self.stay_on_top();
+        // A window going full screen may reach its final size just after.
+        self.set_timer(TIMER_FULLSCREEN, FULLSCREEN_SETTLE_MS);
+    }
+
+    /// Checks again whether a window fills the island's screen in front of it.
+    fn look_again_for_fullscreen(&mut self) {
+        self.fullscreen.front_changed(
+            fullscreen::fullscreen_now(),
+            fullscreen::covers_island(self.island_window),
+        );
     }
 
     fn on_front_changed(&mut self) {
-        self.fullscreen
-            .front_changed(fullscreen::desktop_in_front());
+        self.look_again_for_fullscreen();
         self.stay_on_top();
         if self.fullscreen.active() {
             self.set_timer(TIMER_FULLSCREEN, FULLSCREEN_SETTLE_MS);
@@ -3153,6 +3164,9 @@ impl App {
                     return false;
                 }
                 self.reappear();
+                // What fills one screen says nothing about the one now chosen.
+                self.look_again_for_fullscreen();
+                self.apply_fullscreen();
                 if let Some(indicator) = self.tracker.monitors_changed(monitor_count()) {
                     self.show_indicator(indicator);
                 }
