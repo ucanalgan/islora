@@ -3549,14 +3549,45 @@ fn stored_preferences() -> island_core::presentation::PresentationPreferences {
 }
 
 fn presentation_for_config(text: &str) -> island_core::presentation::PresentationPreferences {
-    use island_core::migration::{MigrationOutcome, prepare};
+    use island_core::migration::{CriticalKey, MigrationError, MigrationOutcome};
     use island_core::settings::Settings;
-    match prepare(text) {
+    let without_density =
+        || Settings::read(&config::remove_settings(text, &["ui_density"])).presentation();
+    match settings::classify_ignoring_unsupported(text) {
         Ok(MigrationOutcome::Prepared { .. }) => Settings::read(text).presentation(),
-        Ok(MigrationOutcome::AlreadyCurrent | MigrationOutcome::Future { .. }) => {
-            Settings::read(&config::remove_settings(text, &["ui_density"])).presentation()
-        }
-        Err(_) => Default::default(),
+        Ok(MigrationOutcome::AlreadyCurrent | MigrationOutcome::Future { .. }) => without_density(),
+        // The presentation keys or the schema version that scopes the legacy
+        // fallback are themselves in doubt.
+        Err(
+            MigrationError::DuplicateCriticalKey(
+                CriticalKey::ConfigVersion
+                | CriticalKey::UiDensity
+                | CriticalKey::IndicatorStyle
+                | CriticalKey::MediaLayout,
+            )
+            | MigrationError::MalformedCriticalSetting(
+                CriticalKey::ConfigVersion
+                | CriticalKey::UiDensity
+                | CriticalKey::IndicatorStyle
+                | CriticalKey::MediaLayout,
+            )
+            | MigrationError::InvalidModernValue(
+                CriticalKey::ConfigVersion
+                | CriticalKey::UiDensity
+                | CriticalKey::IndicatorStyle
+                | CriticalKey::MediaLayout,
+            )
+            | MigrationError::InvalidLegacyValue
+            | MigrationError::InvalidSchemaVersion,
+        ) => Default::default(),
+        // Unsupported lines are stripped before the classification retry.
+        Err(MigrationError::UnsupportedFormat { .. }) => without_density(),
+        // Size and output failures retain the default presentation.
+        Err(
+            MigrationError::OutputTooLarge
+            | MigrationError::InvalidOutput
+            | MigrationError::InputTooLarge,
+        ) => Default::default(),
     }
 }
 
@@ -3657,7 +3688,7 @@ fn change_start_mode(
 fn start_with_windows_by_default() {
     let testing = std::env::args().any(|a| a == "--only-session" || a == "--second-copy");
     let Some(text) = settings::read() else { return };
-    if testing || config::read_autostart(&text).is_some() {
+    if testing || !applies_default_autostart(&text) {
         return;
     }
     let previous = match autostart::snapshot() {
@@ -3680,6 +3711,14 @@ fn start_with_windows_by_default() {
             "Windows başlangıç ayarı uygulanamadı ve önceki kayıt doğrulanamadı. Windows başlangıç ayarlarını kontrol edin."
         });
     }
+}
+
+/// The default applies only when no choice is recorded and the choice could
+/// be recorded: a file the ordinary writer refuses, including one the added
+/// setting would push past the size limit, leaves the registry alone.
+fn applies_default_autostart(text: &str) -> bool {
+    config::read_autostart(text).is_none()
+        && settings::prepared_write(text, "autostart", "on").is_ok()
 }
 
 fn stored_task_layout() -> TaskLayout {
@@ -4171,6 +4210,116 @@ mod tests {
                 media_layout: MediaLayout::Standard
             }
         );
+    }
+
+    #[test]
+    fn presentation_survives_errors_unrelated_to_presentation() {
+        use island_core::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
+        let current = "config_version = \"2\"\nstray line\nui_density = \"detailed\"\nindicator_style = \"ring\"\n";
+        assert_eq!(
+            presentation_for_config(current),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Standard
+            }
+        );
+        let future = "[section]\nconfig_version = \"3\"\nui_density = \"minimal\"\nindicator_style = \"context\"\n";
+        assert_eq!(
+            presentation_for_config(future),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Context,
+                media_layout: MediaLayout::Standard
+            }
+        );
+        for legacy in [
+            "stray line\nui_density = \"minimal\"\n",
+            "[section]\nconfig_version = \"1\"\nui_density = \"minimal\"\n",
+        ] {
+            assert_eq!(
+                presentation_for_config(legacy),
+                PresentationPreferences {
+                    indicator_style: IndicatorStyle::Ring,
+                    media_layout: MediaLayout::Compact
+                }
+            );
+        }
+        let explicit = "stray line\nui_density = \"minimal\"\nmedia_layout = \"informative\"\n";
+        assert_eq!(
+            presentation_for_config(explicit),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Informative
+            }
+        );
+        let invalid = "config_version = \"2\"\nindicator_style = \"unknown\"\n";
+        assert_eq!(
+            presentation_for_config(invalid),
+            PresentationPreferences::default()
+        );
+    }
+
+    #[test]
+    fn oversized_presentation_config_uses_defaults() {
+        let text = format!(
+            "config_version = \"2\"\nindicator_style = \"ring\"\n#{}",
+            "x".repeat(island_core::migration::MAX_CONFIG_BYTES)
+        );
+        assert_eq!(
+            presentation_for_config(&text),
+            island_core::presentation::PresentationPreferences::default()
+        );
+    }
+
+    #[test]
+    fn presentation_classification_ignores_unsupported_lines() {
+        use island_core::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
+        for text in [
+            "stray\nmedia_layout = \"compact\"\nmedia_layout = \"informative\"\n",
+            "stray\nconfig_version = \"bad\"\nui_density = \"minimal\"\n",
+            "stray\nindicator_style = \"ring\" trailing\n",
+        ] {
+            assert_eq!(
+                presentation_for_config(text),
+                PresentationPreferences::default(),
+                "{text:?}"
+            );
+        }
+        assert_eq!(
+            presentation_for_config("config_version = \"01\"\nui_density = \"minimal\"\n"),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Compact
+            }
+        );
+    }
+
+    #[test]
+    fn default_autostart_is_skipped_when_the_configuration_cannot_be_written() {
+        assert!(applies_default_autostart("config_version = \"2\"\n"));
+        assert!(applies_default_autostart(
+            "config_version = \"2\"\nstray line\n"
+        ));
+        assert!(applies_default_autostart("ui_density = \"minimal\"\n"));
+        for text in [
+            "config_version = \"3\"\n",
+            "config_version = \"bad\"\n",
+            "config_version = \"2\"\nmedia_layout = \"compact\"\nmedia_layout = \"compact\"\n",
+            "config_version = \"2\"\nindicator_style = \"ring\" trailing\n",
+            "config_version = \"2\"\nautostart = \"off\"\n",
+            "config_version = \"2\"\nautostart = \"on\"\n",
+        ] {
+            assert!(!applies_default_autostart(text), "{text:?}");
+        }
+        let max = island_core::migration::MAX_CONFIG_BYTES;
+        let header = "config_version = \"2\"\n";
+        let addition = "autostart = \"on\"\n".len();
+        let padded = |len: usize| format!("{header}#{}\n", "x".repeat(len - header.len() - 2));
+        let fits = padded(max - addition);
+        assert_eq!(fits.len() + addition, max);
+        assert!(applies_default_autostart(&fits));
+        let overflows = padded(max - addition + 1);
+        assert!(overflows.len() <= max);
+        assert!(!applies_default_autostart(&overflows));
     }
 
     #[test]

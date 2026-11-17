@@ -11,10 +11,10 @@ Evidence abbreviations: **M** = `crates/island-core/src/migration.rs` and its `t
 | 3 | Safe Fallback | Missing — S/A have no migration outcomes | Invalid files do not enter a verified fallback. |
 | 4 | Remove `ui_density` after migration | Partial — M `legacy_values_map_to_the_existing_feature_preferences` (Unit) | No commit to disk. |
 | 5 | Configuration Schema Version | Partial — M version classification (Unit); S `fresh_configuration_is_created_with_current_schema` (FS) | Existing legacy files are not migrated. |
-| 6 | Future Config Read-Only Compatibility | Partial — M classification; S `settings_writes_reject_future_and_invalid_sources_without_creating_drafts` (FS) | No runtime mode or write coordination; TOCTOU remains. |
+| 6 | Future Config Read-Only Compatibility | Partial — M classification; S `settings_writes_reject_future_and_invalid_sources_without_creating_drafts`, `unsupported_lines_do_not_block_ordinary_writes` (FS) and `write_permission_refuses_only_unsafe_sources`, `unsupported_lines_do_not_hide_unsafe_settings` (Unit); A `default_autostart_is_skipped_when_the_configuration_cannot_be_written`, `presentation_classification_ignores_unsupported_lines` (Unit) | No runtime mode or write coordination; TOCTOU remains. |
 | 7 | Preserve Explicit Preferences | Partial — M `explicit_modern_preferences_are_independent_and_win` (Unit) | No persisted migration verification. |
 | 8 | Atomic Migration | Missing — no migration writer | Existing S `replace` is not a verified migration commit. |
-| 9 | Silent Success, Visible Failure | Partial — S reports normal write failures | No migration-specific outcome or UI. |
+| 9 | Silent Success, Visible Failure | Partial — S reports normal write failures; A skips the first-start autostart default without a dialog when the file cannot be written (Unit) | No migration-specific outcome or UI; the skipped default is not surfaced. |
 | 10 | Version-Gated Migration | Partial — M `prepare` (Unit) | No startup gate. |
 | 11 | Fresh Install Bypass | Partial — S `fresh_configuration_is_created_with_current_schema` and `missing_primary_with_recovery_evidence_does_not_create_defaults` (FS) | Artifact checks and creation are not coordinated or handle-secured. |
 | 12 | Controlled Retry | Missing — no retry state | Invalid source can be reconsidered on every read. |

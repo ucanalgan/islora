@@ -5,6 +5,7 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use island_core::config::write_value;
+use island_core::migration::{CriticalKey, MigrationError, MigrationOutcome, prepare};
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -262,33 +263,134 @@ pub fn try_remember(key: &str, value: &str) -> io::Result<()> {
     try_remember_path(&path, key, value)
 }
 
-fn try_remember_path(path: &Path, key: &str, value: &str) -> io::Result<()> {
-    let text = try_read_path(path)?;
-    // Do not overwrite a future schema or a configuration that the migration
-    // core cannot safely classify. This is not a substitute for coordinated
-    // writes: another process can still change the file after this check.
-    match island_core::migration::prepare(&text) {
-        Ok(island_core::migration::MigrationOutcome::Future { .. }) => {
-            return Err(io::Error::new(
+/// Why an ordinary write must leave the configuration alone. Variants name a
+/// category and at most a critical key, never a configuration value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriteRefusal {
+    FutureSchema,
+    InvalidSchemaVersion,
+    DuplicateCriticalKey(CriticalKey),
+    MalformedCriticalSetting(CriticalKey),
+    TooLarge,
+    UpdateTooLarge,
+}
+
+impl From<WriteRefusal> for io::Error {
+    fn from(refusal: WriteRefusal) -> Self {
+        match refusal {
+            WriteRefusal::FutureSchema => io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "future configuration is read-only",
-            ));
-        }
-        Err(_) => {
-            return Err(io::Error::new(
+            ),
+            WriteRefusal::InvalidSchemaVersion => io::Error::new(
                 io::ErrorKind::InvalidData,
-                "configuration cannot be safely validated",
-            ));
+                "configuration schema version is invalid",
+            ),
+            WriteRefusal::DuplicateCriticalKey(key) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("configuration has a duplicate {} setting", key.name()),
+            ),
+            WriteRefusal::MalformedCriticalSetting(key) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("configuration has a malformed {} setting", key.name()),
+            ),
+            WriteRefusal::TooLarge => io::Error::new(
+                io::ErrorKind::InvalidData,
+                "configuration exceeds the size limit",
+            ),
+            WriteRefusal::UpdateTooLarge => io::Error::new(
+                io::ErrorKind::InvalidData,
+                "updated configuration exceeds the size limit",
+            ),
         }
-        Ok(_) => {}
     }
-    let updated = write_value(&text, key, value);
+}
+
+/// Classify critical settings after omitting lines the core cannot interpret.
+pub(crate) fn classify_ignoring_unsupported(
+    text: &str,
+) -> Result<MigrationOutcome, MigrationError> {
+    let initial = prepare(text);
+    // The migration parser stops at the first unsupported line. Classify each
+    // line with the same parser and omit only unsupported lines on a retry,
+    // so critical settings later in the file are still checked together.
+    if matches!(initial, Err(MigrationError::UnsupportedFormat { .. })) {
+        let mut supported = String::new();
+        for (index, line) in text.split_inclusive('\n').enumerate() {
+            let line = if index == 0 {
+                line.strip_prefix('\u{feff}').unwrap_or(line)
+            } else {
+                line
+            };
+            // A BOM is special only on the original first line.
+            let protect_bom = index > 0 && line.starts_with('\u{feff}');
+            let protected;
+            let candidate = if protect_bom {
+                protected = format!(" {line}");
+                protected.as_str()
+            } else {
+                line
+            };
+            if !matches!(
+                prepare(candidate),
+                Err(MigrationError::UnsupportedFormat { .. })
+            ) {
+                if supported.is_empty() && protect_bom {
+                    supported.push(' ');
+                }
+                supported.push_str(line);
+            }
+        }
+        prepare(&supported)
+    } else {
+        initial
+    }
+}
+
+/// Whether an ordinary write may replace this configuration. Only a future or
+/// invalid schema version, a duplicate or malformed critical key, or an
+/// oversized source refuses it. Content the migration core merely cannot
+/// migrate (unsupported lines, invalid presentation values) stays writable,
+/// because the line writer preserves every line it does not change.
+pub(crate) fn write_permission(text: &str) -> Result<(), WriteRefusal> {
+    match classify_ignoring_unsupported(text) {
+        Ok(MigrationOutcome::Future { .. }) => Err(WriteRefusal::FutureSchema),
+        Err(MigrationError::InvalidSchemaVersion) => Err(WriteRefusal::InvalidSchemaVersion),
+        Err(MigrationError::DuplicateCriticalKey(key)) => {
+            Err(WriteRefusal::DuplicateCriticalKey(key))
+        }
+        Err(MigrationError::MalformedCriticalSetting(key)) => {
+            Err(WriteRefusal::MalformedCriticalSetting(key))
+        }
+        Err(MigrationError::InputTooLarge) => Err(WriteRefusal::TooLarge),
+        Ok(MigrationOutcome::Prepared { .. } | MigrationOutcome::AlreadyCurrent)
+        | Err(
+            MigrationError::UnsupportedFormat { .. }
+            | MigrationError::InvalidLegacyValue
+            | MigrationError::InvalidModernValue(_)
+            | MigrationError::OutputTooLarge
+            | MigrationError::InvalidOutput,
+        ) => Ok(()),
+    }
+}
+
+/// The text an ordinary write of `key = value` would store, or why that write
+/// must leave the configuration alone, including when the result would
+/// exceed the size limit.
+pub(crate) fn prepared_write(text: &str, key: &str, value: &str) -> Result<String, WriteRefusal> {
+    write_permission(text)?;
+    let updated = write_value(text, key, value);
     if updated.len() > island_core::migration::MAX_CONFIG_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "updated configuration exceeds the size limit",
-        ));
+        return Err(WriteRefusal::UpdateTooLarge);
     }
+    Ok(updated)
+}
+
+fn try_remember_path(path: &Path, key: &str, value: &str) -> io::Result<()> {
+    let text = try_read_path(path)?;
+    // This is not a substitute for coordinated writes: another process can
+    // still change the file after this check.
+    let updated = prepared_write(&text, key, value)?;
     replace(path, &updated)
 }
 
@@ -599,6 +701,171 @@ mod tests {
         std::fs::remove_file(path.with_extension("toml.bak")).unwrap();
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn unsupported_lines_do_not_block_ordinary_writes() {
+        let folder = std::env::temp_dir().join(format!(
+            "islora-unsupported-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        for source in [
+            "config_version = \"2\"\nstray line\ncalendar_ics_url = \"https://example.invalid/\"\n",
+            "[section]\nconfig_version = \"2\"\nunknown = \"keep\"\n",
+            "stray\nui_density = \"minimal\"\n",
+        ] {
+            assert!(matches!(
+                prepare(source),
+                Err(MigrationError::UnsupportedFormat { .. })
+            ));
+            std::fs::write(&path, source).unwrap();
+            try_remember_path(&path, "media_layout", "compact").unwrap();
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(saved, write_value(source, "media_layout", "compact"));
+            assert_eq!(
+                std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+                source
+            );
+        }
+        std::fs::remove_file(path.with_extension("toml.bak")).unwrap();
+        for source in [
+            "config_version = \"3\"\nmedia_layout = \"standard\"\n",
+            "config_version = \"2\"\nindicator_style = \"ring\"\nindicator_style = \"ring\"\n",
+            "stray\nindicator_style = \"ring\"\nindicator_style = \"ring\"\n",
+        ] {
+            std::fs::write(&path, source).unwrap();
+            assert!(try_remember_path(&path, "media_layout", "compact").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+            assert!(!path.with_extension("toml.new").exists());
+            assert!(!path.with_extension("toml.bak").exists());
+        }
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn write_permission_refuses_only_unsafe_sources() {
+        for source in [
+            "",
+            "config_version = \"2\"\n",
+            "ui_density = \"minimal\"\n",
+            "config_version = \"2\"\nindicator_style = \"unknown\"\n",
+            "ui_density = \"unknown\"\n",
+            "orphan\n",
+            "[section]\n",
+        ] {
+            assert_eq!(write_permission(source), Ok(()), "{source:?}");
+        }
+        for (source, refusal) in [
+            ("config_version = \"3\"\n", WriteRefusal::FutureSchema),
+            (
+                "config_version = \"0\"\n",
+                WriteRefusal::InvalidSchemaVersion,
+            ),
+            (
+                "orphan\nmedia_layout = \"compact\"\nmedia_layout = \"compact\"\n",
+                WriteRefusal::DuplicateCriticalKey(CriticalKey::MediaLayout),
+            ),
+            (
+                "ui_density = \"minimal\" trailing\n",
+                WriteRefusal::MalformedCriticalSetting(CriticalKey::UiDensity),
+            ),
+            (
+                "\u{feff}config_version : 2\r\n",
+                WriteRefusal::MalformedCriticalSetting(CriticalKey::ConfigVersion),
+            ),
+        ] {
+            assert_eq!(write_permission(source), Err(refusal), "{source:?}");
+        }
+        let oversized = "#".repeat(island_core::migration::MAX_CONFIG_BYTES + 1);
+        assert_eq!(write_permission(&oversized), Err(WriteRefusal::TooLarge));
+        let marker = "SYNTHETIC_PRIVATE_MARKER";
+        let source = format!("calendar_ics_url = \"{marker}\"\nconfig_version = \"{marker}\"\n");
+        let error = io::Error::from(write_permission(&source).unwrap_err());
+        assert!(!error.to_string().contains(marker));
+    }
+
+    #[test]
+    fn unsupported_lines_do_not_hide_unsafe_settings() {
+        for (source, refusal) in [
+            ("bare\nconfig_version = \"3\"\n", WriteRefusal::FutureSchema),
+            (
+                "[section]\nconfig_version = \"3\"\n",
+                WriteRefusal::FutureSchema,
+            ),
+            (
+                "bare\nconfig_version = \"bad\"\n",
+                WriteRefusal::InvalidSchemaVersion,
+            ),
+            (
+                "bare\nconfig_version = \"18446744073709551616\"\n",
+                WriteRefusal::InvalidSchemaVersion,
+            ),
+            (
+                "[section]\nmedia_layout = \"compact\"\nmedia_layout = \"compact\"\n",
+                WriteRefusal::DuplicateCriticalKey(CriticalKey::MediaLayout),
+            ),
+            (
+                "bare\nindicator_style = \"ring\" trailing\n",
+                WriteRefusal::MalformedCriticalSetting(CriticalKey::IndicatorStyle),
+            ),
+            (
+                "\u{feff}bare\r\nconfig_version = \"3\"\r\n",
+                WriteRefusal::FutureSchema,
+            ),
+            (
+                "bare\n\u{feff}config_version = \"3\"\nconfig_version = \"3\"\n",
+                WriteRefusal::FutureSchema,
+            ),
+            (
+                "bare\nconfig_version 3",
+                WriteRefusal::MalformedCriticalSetting(CriticalKey::ConfigVersion),
+            ),
+            (
+                "x\r\n[s]\r\nui_density = \"minimal\"\r\ny\r\nui_density = \"minimal\"\r\n",
+                WriteRefusal::DuplicateCriticalKey(CriticalKey::UiDensity),
+            ),
+            ("config_version = \"3\"\nbare\n", WriteRefusal::FutureSchema),
+        ] {
+            assert_eq!(write_permission(source), Err(refusal), "{source:?}");
+        }
+        for source in [
+            "bare\n[section]\nconfig_version = \"2\"\nother bare\n",
+            "one\nconfig_version = \"2\"\ntwo\nindicator_style = \"ring\"\nthree\nmedia_layout = \"compact\"\n",
+            "config_version = \"2\"\nindicator_style = \"ring\"\nstray\n",
+            "config_version = \"2\"\nindicator_style = \"ring\"\nbare\n[section]\n",
+        ] {
+            assert_eq!(write_permission(source), Ok(()), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn prepared_write_refuses_an_update_past_the_size_limit() {
+        let max = island_core::migration::MAX_CONFIG_BYTES;
+        let header = "config_version = \"2\"\n";
+        let addition = "autostart = \"on\"\n".len();
+        let padded = |len: usize| format!("{header}#{}\n", "x".repeat(len - header.len() - 2));
+        let fits = padded(max - addition);
+        assert_eq!(
+            prepared_write(&fits, "autostart", "on"),
+            Ok(write_value(&fits, "autostart", "on"))
+        );
+        let overflows = padded(max - addition + 1);
+        assert_eq!(write_permission(&overflows), Ok(()));
+        assert_eq!(
+            prepared_write(&overflows, "autostart", "on"),
+            Err(WriteRefusal::UpdateTooLarge)
+        );
+        assert_eq!(
+            prepared_write("config_version = \"3\"\n", "autostart", "on"),
+            Err(WriteRefusal::FutureSchema)
+        );
     }
 
     #[test]

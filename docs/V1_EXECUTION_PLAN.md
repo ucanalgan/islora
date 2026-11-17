@@ -11,12 +11,41 @@ destructive Git operation each need the user's explicit approval.
 
 ## How each task is done
 
-1. **Implement:** one implementer makes the change in the owned files only.
-2. **Gate:** a separate run of `cargo fmt --all -- --check`,
+The lead is Claude Opus: it plans, writes each task's spec, assigns workers,
+reads their results, decides on corrections and makes the commits. Workers
+are Codex CLI and Claude agents. Codex does most of the coding; a change is
+always reviewed by the other kind of worker than the one that wrote it.
+
+**The lead does no work itself.** It never reads source files, diffs, logs or
+long documents and never edits code. Anything that needs reading goes to a
+read-only agent that returns a short summary (a page at most); code goes to an
+implementer; checking goes to a reviewer with a fresh context. The lead keeps
+only plans, specs and verdicts, so its context stays small and never compacts.
+A new lead session starts for each phase, from this file.
+
+**Pick the worker by the job and by the limits.** Before each batch, read both
+limits: Claude through the session usage tool, Codex from
+`rate_limits.primary.used_percent` in the newest
+`~/.codex/sessions/**/rollout-*.jsonl`. Then:
+
+- Planning, specs and final decisions: Opus, as the lead.
+- Code: Codex, or a Claude Sonnet agent when Codex has less room.
+- Review: the other kind of worker than the author, Sonnet is enough for most
+  diffs; Opus or Codex for security-critical ones.
+- Gates, commits and other mechanical steps: plain commands, or a Haiku or
+  Sonnet agent with low effort, never an Opus agent.
+- Hard architectural questions: give the same question to Opus and Codex
+  separately and decide from both answers.
+
+1. **Implement:** one worker, usually Codex
+   (`codex exec -s workspace-write -C <repo> ... < /dev/null`), makes the
+   change in the owned files only and does not commit.
+2. **Gate:** the lead runs `cargo fmt --all -- --check`,
    `cargo clippy --workspace --all-targets -- -D warnings` and
-   `cargo test --workspace`.
-3. **Review:** two reviewers who did not write the change look at the diff:
-   Codex CLI (read-only sandbox) and a Claude reviewer. They check
+   `cargo test --workspace` as plain commands, not through an agent.
+3. **Review:** a worker of the other kind looks at the diff: a Claude
+   reviewer for Codex's code, Codex (read-only sandbox) for Claude's. For a
+   risky change both review. They check
    correctness, Rust safety, Win32 handle lifetimes, threading,
    security/privacy, persistence, error handling, performance, accessibility,
    regressions and tests.
@@ -119,3 +148,24 @@ restart. Nothing is called release-ready while a critical item is open.
 | Audit and plan | done | — |
 | Existing Phase 2 work kept | done | `dbeb0d6` |
 | Formatting fix for CI | done | `7114fc9` |
+| Pre-2A | done: gate and presentation reader share one classifier that ignores only unrelated unsupported lines; 459 tests | see `git log` |
+| 2A-1 | in progress | — |
+
+## Resume here
+
+Pre-2A is committed. `settings::classify_ignoring_unsupported` strips only
+unrelated unsupported lines and re-classifies, so future, invalid-version,
+duplicate and malformed critical keys are refused wherever they appear; the
+write gate and `presentation_for_config` both use it. Known limitation,
+deferred to 2D-2: `recover` still rejects a `.bak` that contains unsupported
+lines. Next: 2A-1.
+
+Worker routing that worked: Codex implements from a spec file
+(`codex exec -s workspace-write ... < /dev/null`), the lead runs the gate as
+plain commands, one Sonnet reviewer is resumed for each re-review. The global
+skills `codex-cli` and `agent-orchestration` hold the generic rules.
+
+Budget note: one Claude implementer, gate and reviewer per round used about
+40 points of the 5-hour Claude window in half an hour, while three Codex
+reviews used 2 points of Codex's. Later runs should let Codex implement, keep
+Claude to a single review per round, and run the gate as a plain command.
