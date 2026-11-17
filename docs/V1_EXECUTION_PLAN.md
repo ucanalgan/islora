@@ -1,0 +1,121 @@
+# Islora 1.0 execution plan
+
+This is the working plan for turning the repository into Islora 1.0. It is
+derived from a read-only audit of the code on branch `v1/foundation`
+(based on `main` at `9152ce5`), not from earlier claims in other documents.
+Statuses change only when code lands with tests and an independent review.
+
+All work happens on the local branch `v1/foundation`, one reviewed commit per
+task, in dependency order. Merging, pushing, opening a pull request and any
+destructive Git operation each need the user's explicit approval.
+
+## How each task is done
+
+1. **Implement:** one implementer makes the change in the owned files only.
+2. **Gate:** a separate run of `cargo fmt --all -- --check`,
+   `cargo clippy --workspace --all-targets -- -D warnings` and
+   `cargo test --workspace`.
+3. **Review:** two reviewers who did not write the change look at the diff:
+   Codex CLI (read-only sandbox) and a Claude reviewer. They check
+   correctness, Rust safety, Win32 handle lifetimes, threading,
+   security/privacy, persistence, error handling, performance, accessibility,
+   regressions and tests.
+4. **Correct:** up to three correction rounds, then a re-review. An unresolved
+   critical finding stops the task: nothing is committed and it is reported.
+5. **Commit:** a local commit with no attribution trailers.
+
+Tests never touch the real `%APPDATA%\Islora`, the registry, the running
+Islora or the mouse; filesystem tests use unique temporary directories.
+
+## Phase B: secure configuration foundation (critical path)
+
+Order: Pre-2A → 2A-1 → 2A-2 → 2A-3 → core state → 2B-2 → 2B-3 → 2C-2 → 2C-3 →
+2D-2. Automatic migration stays disabled until 2A-2, 2B-2, 2B-3 and 2C-2 have
+all landed.
+
+| Task | Scope | Files |
+|---|---|---|
+| Pre-2A | Narrow the uncommitted gates: refuse writes only for future, invalid schema version, duplicate or malformed critical keys. The presentation reader falls back to `Settings::read` for errors unrelated to presentation. The startup autostart write is skipped when the file cannot be written. | `platform/settings.rs`, `app.rs` |
+| 2A-1 | `ConfigDir` (handle to `%APPDATA%\Islora`, no reparse point), `FileIdentity` (volume + file ID), `VerifiedFile` (opened with `FILE_FLAG_OPEN_REPARSE_POINT`, rejects reparse points, directories, extra hard links, files outside the directory) with bounded reads. Existing checks rebuilt on top. Tests with symlinks, junctions and hard links. | new `platform/config_fs.rs`, `platform/settings.rs` |
+| 2A-2 | `WriterLock`: process mutex + `config.lock` with share mode 0 and delete-on-close, bounded retry. Reads become side-effect free. First-run creation, rolling-backup recovery and the old-folder rename move into one `prepare_storage()` called once at startup. The calendar thread gets its address through its channel. | `config_fs.rs`, `settings.rs`, `app.rs`, `sources/calendar.rs` |
+| 2A-3 | Keep the primary's owner and DACL across replacement (`GetSecurityInfo`, security attributes for temp files). | `config_fs.rs`, app `Cargo.toml` |
+| Core state | Pure `island-core::config_state`: protected backup names and retention, change fingerprint, `RuntimeMode`, `StartupOutcome`, `plan_startup`, failure record encode/decode, retry decision, recovery candidate selection. Exhaustive unit tests. | new `island-core/src/config_state.rs` |
+| 2B-2 | `commit_primary`: unique `CREATE_NEW` temp file with the primary's security, write-through, flush, re-read; optimistic check that the primary still has the expected identity and bytes; rename by handle with replace (fallback `MoveFileExW` with write-through); re-open and verify; delete own temp on failure. The ordinary writer goes through it. | new `platform/config_commit.rs`, `settings.rs` |
+| 2B-3 | Protected backups: `CREATE_NEW` with core-generated unique names, read-only attribute, flush, verify, never overwrite, retention through the core rule. | `config_commit.rs` |
+| 2C-2 | `ConfigStore::bootstrap` before any window: one verified snapshot feeds every reader; every writer goes through `ConfigStore::update`, refused in read-only and recovery modes. Migration is still mapped to legacy fallback. | new `platform/config_store.rs`, `app.rs`, `calendar.rs` |
+| 2C-3 | Enable automatic migration under the lock: protected backup, commit with the classified bytes as expectation, verify, report `Migrated`; on any failure keep the original and fall back without writing. End-to-end tests for scenarios A–S in `CONFIG_MIGRATION_ACCEPTANCE.md`. | `config_store.rs` |
+| 2D-2 | Recovery: artifact inventory, persisted failure record (no config values), controlled retry, validated restore, recovery mode that refuses writes and never deletes artifacts, clear on success, distinct messages for read-only and recovery. | new `platform/config_recovery.rs`, `config_store.rs`, `app.rs`, `settings_view.rs` |
+
+## Phase C: runtime and feature correctness
+
+Independent of Phase B except where settings keys are added.
+
+- **Critical alerts:** indicators all share `Kind::Alert`, so a low-battery
+  alert is replaced by the next volume step. Give critical alerts their own
+  kind and never coalesce them away.
+- **Priority:** timer completion must outrank ordinary notifications;
+  separate slots for timer and focus completion.
+- **Suppression:** completions and queued notices keep expiring while the
+  island is hidden for full screen; hold them until the island can show.
+- **Interaction:** hover keeps transient alerts and Quick Controls open.
+- **Notification queue:** staleness limit, adaptive durations (4–6 s,
+  6–8 s grouped, 8–12 s high priority), bounded size that never drops critical.
+- **Media:** a transient metadata error must not clear the session.
+- **Features still missing:** CPU and RAM indicators; wave styles Classic Bars,
+  Fluid Wave, Pulse Dots, Micro Spectrum; motion styles Breathe, Drift,
+  Ripple; Visible Idle. Waves are state-driven and must not be presented as
+  audio analysis.
+
+## Phase D: Windows UI integration
+
+- **Native OSD:** the current suppression is disabled but its system-wide
+  show hook stays installed for nothing; remove it until a guarded design
+  exists. A guarded design needs a Windows build allowlist, a post-hide check
+  that disables itself on mismatch, and a proven fail-open path after crash.
+  Per-event volume versus brightness suppression is not possible with the
+  current single shell host and must be documented as a gap.
+- **Notifications:** report access denial and worker failure to Settings;
+  bound the cache; respect Windows Do Not Disturb; hide content while locked;
+  manual Privacy Mode; per-app privacy; grouping by app. Real-time events
+  need package identity; until then polling stays and is documented.
+- **Resilience:** panic hook and crash log without sensitive data; degrade
+  instead of exiting when tray or presence registration fails; re-register
+  the appbar after an Explorer restart; brightness keys update Quick Controls.
+
+## Phase E: Settings and data management
+
+Seven sections (Görünüm, Sistem Göstergeleri, Müzik Çalar, Etkinlikler,
+Sistem ve Bildirimler, Hızlı Kontroller, Genel), resizable window with a
+collapsible sidebar, remembered category and window state clamped to the work
+area, System/Dark/Light theme, local ranked search, override indicators,
+confirmed per-setting/feature/all resets, live try-and-commit previews,
+external-edit conflict handling, read-only and recovery messaging, JSON
+backup and restore with merge preview, and a health dashboard fed by the
+Phase B engine. Fix found defects: modal error dialogs inside a borrowed app,
+key auto-repeat toggling switches, Escape discarding the calendar address,
+the muted-apps reset without confirmation.
+
+## Phase F: accessibility, performance, resilience
+
+UI Automation providers for the custom-drawn settings window and Quick
+Controls (no screen reader can use them today), High Contrast, text scaling,
+accessible announcements, keyboard-only tests. Measured idle and wave cost
+budgets on real hardware. Thread lifetimes (focus, imaging, Bluetooth),
+calendar download timeout and size cap, LAN slow-loris limit, removing secret
+URLs from diagnostics, `SAFETY` comments for unsafe blocks.
+
+## Phase G: release gate
+
+Reproducible CI (pinned toolchain and actions, `--locked`), dependency audit,
+checksums, installer and update strategy without silent auto-update, license,
+e2e scripts that never stop the user's running copy, and real-device checks
+for multiple monitors, DPI scales, full screen games, sleep and Explorer
+restart. Nothing is called release-ready while a critical item is open.
+
+## Progress
+
+| Task | State | Commit |
+|---|---|---|
+| Audit and plan | done | — |
+| Existing Phase 2 work kept | done | `dbeb0d6` |
+| Formatting fix for CI | done | `7114fc9` |
