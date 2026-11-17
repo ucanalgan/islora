@@ -322,7 +322,7 @@ pub fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let first_run = settings::prepare_storage().unwrap_or_else(|error| {
+    settings::prepare_storage().unwrap_or_else(|error| {
         eprintln!("settings storage could not be prepared: {error}");
         false
     });
@@ -572,7 +572,7 @@ pub fn run() -> Result<()> {
     APP.with(|cell| *cell.borrow_mut() = Some(app));
 
     // The island hides when idle, so nothing else would show that the app started.
-    let welcome = first_run && std::env::args().len() == 1;
+    let welcome = settings::first_run() && std::env::args().len() == 1;
     if welcome || std::env::args().any(|a| a == "--settings-offscreen") {
         with_app(App::open_settings);
     }
@@ -3694,14 +3694,7 @@ fn start_with_windows_by_default() {
             autostart::restore,
         )
     });
-    if let Err(error) = &result
-        && matches!(
-            error.kind(),
-            std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::PermissionDenied
-                | std::io::ErrorKind::NotFound
-        )
-    {
+    if let Err(error) = &result {
         eprintln!("default Windows startup setting skipped: {error}");
         return;
     }

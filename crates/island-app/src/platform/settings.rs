@@ -162,12 +162,35 @@ pub fn prepare_storage() -> io::Result<bool> {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))?,
     );
     let result = prepare_storage_at(&base);
-    match &result {
-        Ok(_) => STORAGE_STATE.store(1, std::sync::atomic::Ordering::Relaxed),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-        Err(_) => STORAGE_STATE.store(2, std::sync::atomic::Ordering::Relaxed),
-    }
+    record_preparation(&result, &STORAGE_STATE, &FIRST_RUN);
     result
+}
+
+fn record_preparation(
+    result: &io::Result<bool>,
+    state: &std::sync::atomic::AtomicU8,
+    first: &std::sync::atomic::AtomicBool,
+) {
+    match result {
+        Ok(first_run) => {
+            if *first_run {
+                first.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            state.store(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Err(error) if preparation_is_busy(error) => {}
+        Err(_) => state.store(2, std::sync::atomic::Ordering::Relaxed),
+    }
+}
+
+fn preparation_is_busy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock || matches!(error.raw_os_error(), Some(32 | 33))
+}
+
+static FIRST_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn first_run() -> bool {
+    FIRST_RUN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 static PREPARATION_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -248,7 +271,6 @@ pub fn storage_writable() -> bool {
     let _guard = PREPARATION_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     match STORAGE_STATE.load(std::sync::atomic::Ordering::Relaxed) {
         1 => true,
-        // Lazy preparation occurs after startup, so its first-run result is no longer used.
         0 => prepare_storage().is_ok(),
         _ => false,
     }
@@ -423,8 +445,12 @@ pub(crate) fn locked_update_at<T>(
     })?;
     let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
     let text = read_locked(&lock, path)?;
+    let mut current = text.clone();
     action(&text, &mut |key, value| {
-        replace_in(lock.directory(), path, &prepared_write(&text, key, value)?)
+        let updated = prepared_write(&current, key, value)?;
+        replace_in(lock.directory(), path, &updated)?;
+        current = updated;
+        Ok(())
     })
 }
 
@@ -573,21 +599,40 @@ pub fn open_in_editor() {
 mod tests {
     use super::*;
 
-    fn temp_base() -> PathBuf {
+    static NEXT_TEMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct Temp(PathBuf);
+    impl std::ops::Deref for Temp {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for Temp {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn temp_base() -> Temp {
         let path = std::env::temp_dir().join(format!(
-            "islora-prepare-{}-{}",
+            "islora-prepare-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&path).unwrap();
-        path
+        Temp(path)
     }
 
     #[test]
-    fn locked_update_observes_latest_choice_and_rolls_back_before_unlock() {
+    fn locked_update_serializes_writers_and_rejects_oversized_value() {
         let _serial = super::super::config_fs::TEST_WRITER_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -615,7 +660,61 @@ mod tests {
         let large = "x".repeat(island_core::migration::MAX_CONFIG_BYTES + 1);
         let error = locked_update_at(&path, |_, save| save("x", &large)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn locked_update_preserves_multiple_saves() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let path = base.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        locked_update_at(&path, |_, save| {
+            save("autostart", "on")?;
+            save("sound_wave", "off")
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(
+            island_core::config::read_value(&text, "autostart").as_deref(),
+            Some("on")
+        );
+        assert_eq!(
+            island_core::config::read_value(&text, "sound_wave").as_deref(),
+            Some("off")
+        );
+    }
+
+    #[test]
+    fn busy_preparation_then_retry_retains_first_run() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let state = std::sync::atomic::AtomicU8::new(0);
+        let first = std::sync::atomic::AtomicBool::new(false);
+        let mutex = WriterMutex::acquire().unwrap();
+        let other = base.clone();
+        let result = std::thread::spawn(move || prepare_storage_at(&other))
+            .join()
+            .unwrap();
+        record_preparation(&result, &state, &first);
+        assert_eq!(state.load(std::sync::atomic::Ordering::Relaxed), 0);
+        drop(mutex);
+        record_preparation(&prepare_storage_at(&base), &state, &first);
+        assert_eq!(state.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(first.load(std::sync::atomic::Ordering::Relaxed));
+        record_preparation(&prepare_storage_at(&base), &state, &first);
+        assert!(first.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn preparation_sharing_errors_are_retryable() {
+        for code in [32, 33] {
+            assert!(preparation_is_busy(&io::Error::from_raw_os_error(code)));
+        }
+        assert!(!preparation_is_busy(&io::Error::from_raw_os_error(5)));
     }
 
     #[test]
@@ -640,7 +739,6 @@ mod tests {
         let before = listing();
         assert!(try_read_path(&path).is_err());
         assert_eq!(listing(), before);
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -669,7 +767,6 @@ mod tests {
         prepare_storage_at(&base).unwrap();
         assert!(!base.join("DynamicIsland").exists());
         assert_eq!(std::fs::read(&path).unwrap(), b"config_version = \"2\"\n");
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -686,7 +783,6 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
         drop(mutex);
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -705,7 +801,6 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(std::fs::read(&path).unwrap(), b"config_version = \"2\"\n");
         drop(lock);
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -1308,7 +1403,6 @@ mod tests {
         );
         std::fs::remove_dir(&link).unwrap();
         drop(dir);
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -1331,7 +1425,6 @@ mod tests {
             "content"
         );
         drop(dir);
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -1355,6 +1448,5 @@ mod tests {
         std::fs::remove_file(path.with_extension("toml.new")).unwrap();
         std::fs::remove_file(path.with_extension("toml.bak")).unwrap();
         std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir(folder).unwrap();
     }
 }

@@ -601,6 +601,20 @@ fn validate_name(name: &[u16]) -> Result<(), ConfigFsError> {
     Ok(())
 }
 
+/// Retries rename variants when a variant is unsupported.
+fn rename_fallback(mut attempt: impl FnMut(usize) -> (i32, u32)) -> Result<(), u32> {
+    for stage in 0..3 {
+        let (status, code) = attempt(stage);
+        if status >= 0 {
+            return Ok(());
+        }
+        if stage == 2 || !matches!(code, 87 | 50) {
+            return Err(code);
+        }
+    }
+    unreachable!()
+}
+
 /// Holds a verified file and its directory. Handles deny FILE_SHARE_DELETE, so an
 /// editor's rename-over may fail during a short read, and opening fails if DELETE
 /// access is already held. Guarantees last only while handles are held; a hard
@@ -718,46 +732,40 @@ impl VerifiedFile {
         let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         const REPLACE_IF_EXISTS: u32 = 1;
         const POSIX_SEMANTICS: u32 = 2;
-        // SAFETY: the aligned buffer covers the header and UTF-16 name; both handles remain live.
+        // SAFETY: the aligned allocation covers the header and name at its field offset; both handles remain live.
         unsafe {
             (*info).Anonymous.Flags = REPLACE_IF_EXISTS | POSIX_SEMANTICS;
             (*info).RootDirectory = handle(&dir._file);
             (*info).FileNameLength =
                 u32::try_from(wide.len() * 2).map_err(|_| ConfigFsError::InvalidName)?;
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), (*info).FileName.as_mut_ptr(), wide.len());
-            let mut status_block = IO_STATUS_BLOCK::default();
-            let mut status = NtSetInformationFile(
-                handle(&file.file),
-                &mut status_block,
-                info.cast(),
-                size as u32,
-                FileRenameInformationEx,
-            );
-            let mut code = RtlNtStatusToDosError(status);
-            if status.0 < 0 && matches!(code, 87 | 50) {
-                (*info).Anonymous.Flags = REPLACE_IF_EXISTS;
-                status = NtSetInformationFile(
+            let name_ptr = buffer
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(std::mem::offset_of!(FILE_RENAME_INFO, FileName))
+                .cast::<u16>();
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), name_ptr, wide.len());
+            rename_fallback(|stage| {
+                (*info).Anonymous.Flags = if stage == 0 {
+                    REPLACE_IF_EXISTS | POSIX_SEMANTICS
+                } else {
+                    REPLACE_IF_EXISTS
+                };
+                let mut status_block = IO_STATUS_BLOCK::default();
+                let class = if stage < 2 {
+                    FileRenameInformationEx
+                } else {
+                    FileRenameInformation
+                };
+                let status = NtSetInformationFile(
                     handle(&file.file),
                     &mut status_block,
                     info.cast(),
                     size as u32,
-                    FileRenameInformationEx,
+                    class,
                 );
-                code = RtlNtStatusToDosError(status);
-                if status.0 < 0 && matches!(code, 87 | 50) {
-                    status = NtSetInformationFile(
-                        handle(&file.file),
-                        &mut status_block,
-                        info.cast(),
-                        size as u32,
-                        FileRenameInformation,
-                    );
-                    code = RtlNtStatusToDosError(status);
-                }
-            }
-            if status.0 < 0 {
-                return Err(io::Error::from_raw_os_error(code as i32).into());
-            }
+                (status.0, RtlNtStatusToDosError(status))
+            })
+            .map_err(|code| ConfigFsError::from(io::Error::from_raw_os_error(code as i32)))?;
         }
         Ok(())
     }
@@ -839,6 +847,43 @@ mod tests {
         assert!(!temp.0.join("config.lock").exists());
         drop(WriterLock::acquire(&temp.0).unwrap());
         assert!(!temp.0.join("config.lock").exists());
+    }
+    #[test]
+    fn rename_fallback_tries_only_unsupported_variants() {
+        let mut stages = Vec::new();
+        assert_eq!(
+            rename_fallback(|stage| {
+                stages.push(stage);
+                if stage < 2 { (-1, 87) } else { (0, 0) }
+            }),
+            Ok(())
+        );
+        assert_eq!(stages, [0, 1, 2]);
+        stages.clear();
+        assert_eq!(
+            rename_fallback(|stage| {
+                stages.push(stage);
+                (-1, if stage == 0 { 50 } else { 5 })
+            }),
+            Err(5)
+        );
+        assert_eq!(stages, [0, 1]);
+    }
+    #[test]
+    fn rename_rejects_invalid_targets_without_touching_source() {
+        let temp = Temp::new();
+        std::fs::write(temp.0.join("source"), b"original").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        for target in [r"a\b", "a/b", "..", "x:y", "CON", ""] {
+            assert!(
+                matches!(
+                    VerifiedFile::rename(&dir, "source".as_ref(), target.as_ref()),
+                    Err(ConfigFsError::InvalidName)
+                ),
+                "{target:?}"
+            );
+            assert_eq!(std::fs::read(temp.0.join("source")).unwrap(), b"original");
+        }
     }
     #[test]
     fn regular_file_identity_and_read() {

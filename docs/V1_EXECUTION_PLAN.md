@@ -150,7 +150,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | Formatting fix for CI | done | `7114fc9` |
 | Pre-2A | done: gate and presentation reader share one classifier that ignores only unrelated unsupported lines; 459 tests | see `git log` |
 | 2A-1 | done: `config_fs.rs` with `ConfigDir`, `FileIdentity`, `VerifiedFile`; settings reads go through it; 471 tests | see `git log` |
-| 2A-2 | done: writer lock, side-effect-free reads, `prepare_storage`, locked autostart transactions, calendar address by channel, every file operation bound to the held directory handle; 483 tests | see `git log` |
+| 2A-2 | done (plus review cleanup): writer lock, side-effect-free reads, `prepare_storage`, locked autostart transactions, calendar address by channel, every file operation bound to the held directory handle; 483 tests | see `git log` |
 
 ## Resume here
 
@@ -182,13 +182,12 @@ directory handle (`NtCreateFile`, `FILE_RENAME_INFO` with `RootDirectory`), so
 a redirected path cannot move a write outside it. After a runtime deletion of
 the config file, saves fail instead of recreating it.
 
-Open minors from the 2A-2 review, for a small cleanup before 2A-3: a startup
-"save failed" dialog on every launch when the config is unreadable
-(`InvalidData`), pointer provenance when filling `FILE_RENAME_INFO`, no test
-for invalid rename targets or the rename fallback chain, `temp_base()` in the
-settings tests without a counter, `save()` allowed only once per transaction
-(document or chain), a misnamed locked-update test, and the first-run flag lost
-when startup preparation met a busy lock. Next: that cleanup, then 2A-3.
+The 2A-2 review minors are fixed in a follow-up commit: no startup dialog for
+an unreadable config (only a failed save shows one), the rename name pointer
+taken from the base allocation, tests for invalid rename targets and the rename
+fallback order, collision-free test directories, chained saves inside one
+locked transaction, and a first-run flag that survives a busy preparation
+(sharing errors 32 and 33 are retried too). Next: 2A-3.
 
 Budget record for 2A-2: Claude 5-hour window 40 → 56, Codex 22 → 39 (three
 implementation runs, three Codex reviews, two Sonnet reviews, four correction
