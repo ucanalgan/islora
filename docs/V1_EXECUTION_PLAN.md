@@ -152,6 +152,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2A-1 | done: `config_fs.rs` with `ConfigDir`, `FileIdentity`, `VerifiedFile`; settings reads go through it; 471 tests | see `git log` |
 | 2A-2 | done (plus review cleanup): writer lock, side-effect-free reads, `prepare_storage`, locked autostart transactions, calendar address by channel, every file operation bound to the held directory handle; 483 tests | see `git log` |
 | 2A-3 | done: owner and DACL kept across replacement through exclusive drafts and pre-rename checks; 502 tests | see `git log` |
+| Core state | parked: limits over the stop line at start; three-step split in "Resume here" | — |
 
 ## Resume here
 
@@ -204,6 +205,35 @@ documented in `config_fs.rs`: a process of the same user that races between
 the final check and the rename is out of scope, because it could rewrite the
 config directly. Accepted minor: a DACL mismatch right after draft creation
 aborts the save (fails closed). Next: core state (`island-core::config_state`).
+
+Core state is parked before it started (2026-11-17): at session start Claude's
+5-hour window was at 91% (weekly 85%) and Codex's at 55%, both over the 45%
+stop line. No limit points were spent on it. When resuming, give it to Codex as
+three single-concern steps, each committed on its own, in
+`island-core/src/config_state.rs` + `lib.rs` (pure logic, no Windows
+dependency):
+
+1. Protected backup names and retention: `ProtectedBackupName` (build and
+   parse), `next_sequence`, `retention_excess`, change fingerprint (fnv1a64,
+   used only to notice a change, not for security). Review: Sonnet.
+2. Startup decision table: `RuntimeMode`, `StartupOutcome`,
+   `PrimaryObservation`, `ArtifactInventory`, `plan_startup`, with a test for
+   every input combination. Invariants, in precedence order:
+   a. never decide "new install" while recovery artifacts exist;
+   b. a future schema is always used read-only, never migrated or written;
+   c. an invalid or conflicting file opens in legacy compatibility without
+      being touched;
+   d. no migration retry while a failure is recorded for a source with the
+      same fingerprint, until the source changes;
+   e. migration is planned only when none of the above blocks it.
+   Review: Sonnet, plus a read-only Gemini review (skip that round on 503 or
+   quota errors and note it; never wait).
+3. Failure record and retry: `FailureRecord` encode/decode (never contains a
+   setting value), `RetryDecision`, `select_candidate` (Restore / Ambiguous /
+   NoneValid). Review: Sonnet.
+
+Codex never reviews these steps, because it writes them. If a major finding is
+still open after two correction rounds, split the step or sharpen its spec.
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.
