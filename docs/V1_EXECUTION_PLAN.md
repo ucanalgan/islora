@@ -205,7 +205,8 @@ the final check and the rename is out of scope, because it could rewrite the
 config directly. Accepted minor: a DACL mismatch right after draft creation
 aborts the save (fails closed). Next: core state (`island-core::config_state`).
 
-Budget record for 2A-3: Claude 5-hour window 59 → about 75, Codex 40 → 56.
+Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
+context grew), Codex 40 → 56.
 Large specs made Codex stop halfway; three narrow steps of one concern each
 finished in one pass. Prefer narrow Codex steps from the start.
 
