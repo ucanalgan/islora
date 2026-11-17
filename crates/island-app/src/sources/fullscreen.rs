@@ -10,7 +10,6 @@ use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
-use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::System::Power::{
     HPOWERNOTIFY, POWERBROADCAST_SETTING, RegisterPowerSettingNotification,
     UnregisterPowerSettingNotification,
@@ -19,6 +18,7 @@ use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Shell::{
     ABM_NEW, ABM_REMOVE, APPBARDATA, QUERY_USER_NOTIFICATION_STATE, QUNS_BUSY,
@@ -28,10 +28,10 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND,
     EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GWL_EXSTYLE, GWL_STYLE, GetClassNameW,
-    GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, IsZoomed, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
-    PBT_POWERSETTINGCHANGE, PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
-    WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, IsZoomed, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, PBT_POWERSETTINGCHANGE,
+    PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WS_CAPTION,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
 };
 use windows::core::{BOOL, Result};
 
