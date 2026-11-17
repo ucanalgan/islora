@@ -149,7 +149,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | Existing Phase 2 work kept | done | `dbeb0d6` |
 | Formatting fix for CI | done | `7114fc9` |
 | Pre-2A | done: gate and presentation reader share one classifier that ignores only unrelated unsupported lines; 459 tests | see `git log` |
-| 2A-1 | in progress | — |
+| 2A-1 | done: `config_fs.rs` with `ConfigDir`, `FileIdentity`, `VerifiedFile`; settings reads go through it; 471 tests | see `git log` |
 
 ## Resume here
 
@@ -158,7 +158,16 @@ unrelated unsupported lines and re-classifies, so future, invalid-version,
 duplicate and malformed critical keys are refused wherever they appear; the
 write gate and `presentation_for_config` both use it. Known limitation,
 deferred to 2D-2: `recover` still rejects a `.bak` that contains unsupported
-lines. Next: 2A-1.
+lines.
+
+2A-1 is committed. `platform/config_fs.rs` holds `ConfigDir` (directory
+handle, refuses reparse points), `FileIdentity` (volume + 128-bit file ID,
+zero IDs refused) and `VerifiedFile` (handle checks for reparse point,
+directory, extra hard links, containment by parent identity, strict names and
+a final-name check against 8.3 aliases, bounded reads). Handles deny delete
+sharing on purpose. Carried into 2A-2: open the file relative to the directory
+handle (`NtCreateFile` with `RootDirectory`, marked `TODO(2A-2)`), and the
+path-based replace and recovery races. Next: 2A-2.
 
 Worker routing that worked: Codex implements from a spec file
 (`codex exec -s workspace-write ... < /dev/null`), the lead runs the gate as

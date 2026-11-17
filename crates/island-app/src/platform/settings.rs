@@ -1,12 +1,11 @@
 //! The settings file, which the user edits by hand and may hold a secret.
 
-use std::io::{self, Read, Write};
-use std::os::windows::fs::MetadataExt;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use super::config_fs::{ConfigDir, VerifiedFile};
 use island_core::config::write_value;
 use island_core::migration::{CriticalKey, MigrationError, MigrationOutcome, prepare};
-use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, w};
@@ -83,21 +82,23 @@ fn is_new_install(path: &Path) -> bool {
     matches!(inspect_file(path), Ok(false)) && !has_recovery_artifacts(path).unwrap_or(true)
 }
 
-/// A conservative path check, not a replacement for handle-based validation:
-/// the object can still change between this check and a later open.
+fn verified_file(path: &Path) -> io::Result<VerifiedFile> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
+    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "configuration has no name"))?;
+    let dir = ConfigDir::open(parent).map_err(io::Error::from)?;
+    VerifiedFile::open(&dir, name).map_err(io::Error::from)
+}
+
 fn inspect_file(path: &Path) -> io::Result<bool> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 || !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "configuration object is not a regular file",
-        ));
+    match verified_file(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
-    Ok(true)
 }
 
 /// Treat any recognised recovery artifact, including a dangling link, as
@@ -220,34 +221,12 @@ fn try_read_path(path: &Path) -> io::Result<String> {
 }
 
 /// Refuse oversized or non-UTF-8 settings without replacing or truncating
-/// the file. Recheck while reading because it may grow after metadata lookup.
+/// the file. Read one byte beyond the limit to detect oversized input.
 fn read_bounded(path: &Path) -> io::Result<String> {
-    if !inspect_file(path)? {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "configuration file is missing",
-        ));
-    }
-    let file = std::fs::File::open(path)?;
-    let limit = island_core::migration::MAX_CONFIG_BYTES;
-    if file.metadata()?.len() > limit as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "configuration exceeds the size limit",
-        ));
-    }
-    read_bounded_content(file, limit)
-}
-
-fn read_bounded_content(reader: impl Read, limit: usize) -> io::Result<String> {
-    let mut bytes = Vec::new();
-    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "configuration exceeds the size limit",
-        ));
-    }
+    let mut file = verified_file(path)?;
+    let bytes = file
+        .read_bounded(island_core::migration::MAX_CONFIG_BYTES)
+        .map_err(io::Error::from)?;
     String::from_utf8(bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -904,16 +883,6 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), (max + 1) as u64);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(folder).unwrap();
-    }
-
-    #[test]
-    fn bounded_content_read_detects_growth_after_metadata_check() {
-        let mut growing = std::io::Cursor::new(b"12345".to_vec());
-        assert_eq!(
-            read_bounded_content(&mut growing, 4).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert_eq!(growing.position(), 5);
     }
 
     #[test]
