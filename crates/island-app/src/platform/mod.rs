@@ -2,6 +2,7 @@ pub mod autostart;
 pub mod browser;
 pub mod config_commit;
 pub mod config_fs;
+mod config_store;
 pub mod drop_target;
 pub mod hotkey;
 pub mod native_osd;

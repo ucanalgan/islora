@@ -174,6 +174,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2B-2 conflict message | done: `SaveFailure { restored, conflict }` replaces the bare bool in `save_with_rollback` and `AutostartOutcome::SaveFailed`; conflict from `is_primary_changed` on the save error; distinct settings and calendar texts, failed restore always visible, old texts unchanged; Sonnet approves (minors only); 538 tests | `71145c1` |
 | 2B-3a | done: `create_protected_backup` (core-built name over the held directory, `Draft::create_exact` CREATE_NEW of that exact name with the primary's security, write-through, read-back verify, `Draft::keep_read_only` sets READONLY by handle and restores the attributes on any later failure so drop can delete); Marco (Sonnet) wrote it, Giulia and Enzo approve after one correction; 544 tests | see `git log` |
 | 2B-3b | done: `apply_protected_retention(dir, just_created, keep)` deletes only names `retention_excess` returns, never `just_created` or a non-parsing name; each excess backup opened relative to the held directory (`open_for_delete`, no reparse follow, non-directory), identity re-checked, READONLY cleared by handle, deleted by `FileDispositionInfo`, attributes restored if the delete fails, stops at the first failure; Marco (Sonnet) wrote it, Giulia and Lucia approve in one round; 552 tests | see `git log` |
+| 2C-2 S1 | done: `platform/config_store.rs` (pure, not wired): `observe` (read result -> `PrimaryObservation`, explicit arm per classification, future version saturates to `u32`, fingerprint over the exact bytes), `effective_outcome` -> `RuntimeMode` (migrate becomes `LegacyCompatible`), `writes_allowed` (false only for `ReadOnly`, `Recovery`), `ModeRefused` / `is_mode_refused` (`PermissionDenied`); Paolo wrote it in one pass, Giulia and Lucia approve; 563 tests | see `git log` |
 
 ## Resume here
 
@@ -579,6 +580,22 @@ First step next: S1 above, in a new lead session (this lead's context passed
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
+
+2C-2 S1 is committed. Paolo (Codex `gpt-6.1-terra`, high) wrote it in one
+pass; gate green (fmt, clippy, 563 tests, no BOM, ASCII only, no removed
+lines). Accepted deviation: `effective_outcome` returns `RuntimeMode`, since
+the core `LegacyCompatible` outcome cannot carry migration data; the real key
+is `config_version`. Giulia: no findings. Lucia approves with minors for the
+Phase B cleanup: `migrate_never_returned` recomputes its expected value with
+the same match (also assert that a legacy case really hits the migrate arm);
+saturation test should add `u32::MAX` and `u32::MAX + 1`. Reviews run as one
+workflow (Haiku runner for agy, Sonnet for Lucia). Spec and prompt:
+`scratchpad/spec-2c2-s1.md`, `prompt-2c2-s1-review.md`.
+
+Budget record for 2C-2 S1: Claude 5-hour 59 -> 66, weekly 17 -> 18; Codex
+5-hour 65 -> 67, weekly 26.
+
+First step next: S2 bootstrap (see the step list above).
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.
