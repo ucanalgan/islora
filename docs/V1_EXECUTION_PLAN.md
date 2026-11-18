@@ -161,7 +161,8 @@ restart. Nothing is called release-ready while a critical item is open.
 | Core state 2/3 | done: `PrimaryObservation`, `ArtifactInventory`, `RuntimeMode`, `StartupOutcome`, `plan_startup` with rules a–e in precedence order; explicit 42-row matrix and precedence tests; 516 tests | see `git log` |
 | Core state 3/3 | done: `FailureRecord` canonical encode/decode (no setting values, errors carry no input), `retry_decision` (corrupt record fails closed), `select_candidate` (Restore / Ambiguous / NoneValid); 521 tests | see `git log` |
 | Core state cleanup | done: items above the test module (pure move), missing docs, parse and decode boundary/order tests; Sonnet: no findings | see `git log` |
-| 2B-2a | next: move `replace_in`/`replace_in_with_hook` into `platform/config_commit.rs` as `commit_primary` (pure move) | — |
+| 2B-2a | done: `commit_primary` and `commit_primary_with_hook` in `platform/config_commit.rs`, pure move; Sonnet and Gemini 4: no findings; 521 tests | see `git log` |
+| 2B-2b | next: write-through drafts and byte-for-byte read-back before rename | — |
 
 ## Resume here
 
@@ -309,6 +310,9 @@ every file operation to the held directory handle so a redirected path cannot
 move a write outside it; a path-based fallback would break that, and the
 newer security invariant wins. The existing handle-based fallback
 (`FileRenameInformation` after `FileRenameInformationEx`) stays.
+
+Budget record for 2B-2a: Claude 5-hour 49 → 51, weekly 92; Codex 3 → 4 (one
+Codex run, Sonnet and Gemini 4 reviews, no correction).
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
