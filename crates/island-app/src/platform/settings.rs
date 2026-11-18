@@ -5,6 +5,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::config_commit;
 use super::config_fs::{ConfigDir, Draft, VerifiedFile, WriterLock, WriterMutex};
 use island_core::config::write_value;
 use island_core::migration::{CriticalKey, MigrationError, MigrationOutcome, prepare};
@@ -252,7 +253,7 @@ fn prepare_storage_at(base: &Path) -> io::Result<bool> {
         );
         let mut text = island_core::settings::reset_all(&template);
         text.push_str("config_version = \"2\"\n");
-        replace_in(dir, &path, &text)?;
+        config_commit::commit_primary(dir, &path, &text)?;
     }
     Ok(first_run)
 }
@@ -274,7 +275,7 @@ fn read_locked(lock: &WriterLock, path: &Path) -> io::Result<String> {
     read_verified(&mut file)
 }
 
-fn read_verified(file: &mut VerifiedFile) -> io::Result<String> {
+pub(crate) fn read_verified(file: &mut VerifiedFile) -> io::Result<String> {
     let bytes = file
         .read_bounded(island_core::migration::MAX_CONFIG_BYTES)
         .map_err(io::Error::from)?;
@@ -438,7 +439,7 @@ fn try_remember_path(path: &Path, key: &str, value: &str) -> io::Result<()> {
     let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
     let text = read_locked(&lock, path)?;
     let updated = prepared_write(&text, key, value)?;
-    replace_in(lock.directory(), path, &updated)
+    config_commit::commit_primary(lock.directory(), path, &updated)
 }
 
 pub(crate) fn locked_update<T>(
@@ -467,7 +468,7 @@ pub(crate) fn locked_update_at<T>(
     let mut current = text.clone();
     action(&text, &mut |key, value| {
         let updated = prepared_write(&current, key, value)?;
-        replace_in(lock.directory(), path, &updated)?;
+        config_commit::commit_primary(lock.directory(), path, &updated)?;
         current = updated;
         Ok(())
     })
@@ -514,7 +515,7 @@ pub fn report_error(message: &str) {
     }
 }
 
-fn name(path: &Path) -> io::Result<&std::ffi::OsStr> {
+pub(crate) fn name(path: &Path) -> io::Result<&std::ffi::OsStr> {
     path.file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "configuration has no name"))
 }
@@ -522,80 +523,6 @@ fn name(path: &Path) -> io::Result<&std::ffi::OsStr> {
 fn read_in(dir: &ConfigDir, path: &Path) -> io::Result<String> {
     let mut file = VerifiedFile::open(dir, name(path)?).map_err(io::Error::from)?;
     read_verified(&mut file)
-}
-#[cfg(test)]
-fn replace(path: &Path, text: &str) -> io::Result<()> {
-    let dir = ConfigDir::open(path.parent().unwrap()).map_err(io::Error::from)?;
-    replace_in(&dir, path, text)
-}
-/// A crash half way must not cost the user their calendar address.
-fn replace_in(dir: &ConfigDir, path: &Path, text: &str) -> io::Result<()> {
-    replace_in_with_hook(
-        dir,
-        path,
-        text,
-        #[cfg(test)]
-        || {},
-    )
-}
-fn replace_in_with_hook(
-    dir: &ConfigDir,
-    path: &Path,
-    text: &str,
-    #[cfg(test)] hook: impl FnOnce(),
-) -> io::Result<()> {
-    let target = name(path)?;
-    let mut source = match VerifiedFile::open_source(dir, target) {
-        Ok(file) => Some(file),
-        Err(super::config_fs::ConfigFsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.into()),
-    };
-    let security = source
-        .as_ref()
-        .map(VerifiedFile::security)
-        .transpose()
-        .map_err(io::Error::from)?;
-    let mut draft = Draft::create(dir, name(path)?, security.as_ref()).map_err(io::Error::from)?;
-    draft.write(text.as_bytes()).map_err(io::Error::from)?;
-    if let Some(source) = source.as_mut() {
-        source.rewind().map_err(io::Error::from)?;
-        let original = read_verified(source)?;
-        let backup = path.with_extension("toml.bak");
-        let mut backup_draft =
-            Draft::create(dir, name(&backup)?, security.as_ref()).map_err(io::Error::from)?;
-        backup_draft
-            .write(original.as_bytes())
-            .map_err(io::Error::from)?;
-        backup_draft
-            .rename(
-                dir,
-                name(&backup)?,
-                security.as_ref(),
-                Some((source.try_clone().map_err(io::Error::from)?, target)),
-                true,
-            )
-            .map_err(io::Error::from)?;
-    }
-    #[cfg(test)]
-    hook();
-    draft
-        .rename(
-            dir,
-            name(path)?,
-            security.as_ref(),
-            source.map(|f| (f, target)),
-            security.is_some(),
-        )
-        .map_err(io::Error::from)?;
-    #[cfg(test)]
-    if let Some(expected) = security.as_ref() {
-        let actual = VerifiedFile::open(dir, name(path)?)
-            .map_err(io::Error::from)?
-            .security()
-            .map_err(io::Error::from)?;
-        assert!(expected.same_dacl(&actual));
-    }
-    Ok(())
 }
 #[cfg(test)]
 fn recover(path: &Path) -> io::Result<()> {
@@ -1390,7 +1317,7 @@ mod tests {
             "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\"\n";
         std::fs::write(&path, original).unwrap();
         std::fs::create_dir(path.with_extension("toml.bak")).unwrap();
-        assert!(replace(&path, "new").is_err());
+        assert!(config_commit::replace(&path, "new").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
     }
@@ -1410,7 +1337,7 @@ mod tests {
         let original = "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\"\nmedia_layout = \"standard\"\n";
         std::fs::write(&path, original).unwrap();
         let updated = write_value(original, "media_layout", "informative");
-        replace(&path, &updated).unwrap();
+        config_commit::replace(&path, &updated).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
         assert!(updated.contains(
             "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\""
@@ -1434,7 +1361,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        assert!(replace(&folder.join("config.toml"), "new value").is_err());
+        assert!(config_commit::replace(&folder.join("config.toml"), "new value").is_err());
         assert!(!folder.exists());
     }
 
@@ -1470,7 +1397,7 @@ mod tests {
         let dir = ConfigDir::open(&link.join("settings")).unwrap();
         std::fs::remove_dir(&link).unwrap();
         make_link(&decoy);
-        replace_in(&dir, &path, "config_version = \"2\"\n# updated\n").unwrap();
+        config_commit::commit_primary(&dir, &path, "config_version = \"2\"\n# updated\n").unwrap();
         assert_eq!(
             read_in(&dir, &path).unwrap(),
             "config_version = \"2\"\n# updated\n"
@@ -1597,7 +1524,7 @@ mod tests {
             .security()
             .unwrap();
         assert!(!expected.same_dacl(&stale_security));
-        replace_in(&dir, &path, "config_version = \"2\"\n# updated\n").unwrap();
+        config_commit::commit_primary(&dir, &path, "config_version = \"2\"\n# updated\n").unwrap();
         assert_eq!(
             std::fs::read_to_string(&stale).unwrap(),
             "foreign stale draft"
@@ -1642,7 +1569,7 @@ mod tests {
             .open(&path)
             .unwrap();
         assert!(
-            replace_in_with_hook(&dir, &path, "new", || _restore
+            config_commit::commit_primary_with_hook(&dir, &path, "new", || _restore
                 .security
                 .toggle_dacl_protection(&file))
             .is_err()
@@ -1730,7 +1657,7 @@ mod tests {
             .security()
             .unwrap();
         assert!(!expected.same_dacl(&sibling));
-        replace_in(&dir, &path, "config_version = \"2\"\n# changed\n").unwrap();
+        config_commit::commit_primary(&dir, &path, "config_version = \"2\"\n# changed\n").unwrap();
         for item in [&path, &path.with_extension("toml.bak")] {
             let actual = VerifiedFile::open(&dir, name(item).unwrap())
                 .unwrap()
@@ -1797,7 +1724,7 @@ mod tests {
             .security()
             .unwrap();
         assert!(!foreign.same_owner(&before));
-        replace_in(&dir, &path, "config_version = \"2\"\n# changed\n").unwrap();
+        config_commit::commit_primary(&dir, &path, "config_version = \"2\"\n# changed\n").unwrap();
         let after = VerifiedFile::open(&dir, name(&path).unwrap())
             .unwrap()
             .security()
@@ -1816,7 +1743,7 @@ mod tests {
             std::fs::write(&path, original).unwrap();
             let dir = ConfigDir::open(&folder).unwrap();
             FAIL_SECURITY.with(|failure| failure.set(stage));
-            assert!(replace_in(&dir, &path, "new").is_err());
+            assert!(config_commit::commit_primary(&dir, &path, "new").is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         }
     }
@@ -1840,7 +1767,7 @@ mod tests {
         std::fs::write(&path, "config_version = \"2\"\n").unwrap();
         let dir = ConfigDir::open(&folder).unwrap();
         assert!(
-            replace_in_with_hook(&dir, &path, "draft", || {
+            config_commit::commit_primary_with_hook(&dir, &path, "draft", || {
                 std::fs::rename(&path, folder.join("old.toml")).unwrap();
                 std::fs::write(&path, "external").unwrap();
             })
@@ -1900,8 +1827,9 @@ mod tests {
         let path = folder.join("config.toml");
         let dir = ConfigDir::open(&folder).unwrap();
         assert!(
-            replace_in_with_hook(&dir, &path, "draft", || std::fs::write(&path, "external")
-                .unwrap())
+            config_commit::commit_primary_with_hook(&dir, &path, "draft", || {
+                std::fs::write(&path, "external").unwrap()
+            })
             .is_err()
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
@@ -1968,7 +1896,7 @@ mod tests {
             .unwrap()
             .security()
             .unwrap();
-        replace_in(&dir, &path, "config_version = \"2\"\n# updated\n").unwrap();
+        config_commit::commit_primary(&dir, &path, "config_version = \"2\"\n# updated\n").unwrap();
         let after = VerifiedFile::open(&dir, name(&path).unwrap())
             .unwrap()
             .security()
@@ -1981,7 +1909,7 @@ mod tests {
         let folder = temp_base();
         let path = folder.join("config.toml");
         std::fs::write(&path, "original = \"safe\"\n").unwrap();
-        replace(&path, "updated = \"saved\"\n").unwrap();
+        config_commit::replace(&path, "updated = \"saved\"\n").unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "updated = \"saved\"\n"
