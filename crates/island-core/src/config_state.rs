@@ -588,4 +588,465 @@ mod tests {
             assert!(!outcome.allows_writes());
         }
     }
+
+    fn record(source: u64, from_schema: u32, stage: FailureStage, attempts: u32) -> FailureRecord {
+        FailureRecord {
+            source: ChangeFingerprint::from_value(source),
+            from_schema,
+            stage,
+            attempts,
+        }
+    }
+
+    #[test]
+    fn failure_record_encoding_and_round_trips() {
+        let example = record(0xabc, 3, FailureStage::Commit, 2);
+        assert_eq!(
+            example.encode(),
+            "islora-migration-failure 1\nsource=0000000000000abc\nfrom_schema=3\nstage=commit\nattempts=2\n"
+        );
+        for item in [
+            example,
+            record(0, 0, FailureStage::Backup, 1),
+            record(u64::MAX, u32::MAX, FailureStage::Verify, u32::MAX),
+        ] {
+            let encoded = item.encode();
+            assert_eq!(FailureRecord::decode(encoded.as_bytes()), Ok(item));
+            assert_eq!(
+                FailureRecord::decode(encoded.as_bytes()).unwrap().encode(),
+                encoded
+            );
+        }
+    }
+
+    #[test]
+    fn failure_record_rejects_noncanonical_input() {
+        use FailureRecordError::*;
+        let good = record(10, 3, FailureStage::Backup, 1).encode();
+        assert_eq!(FailureRecord::decode(&[b'x'; 257]), Err(TooLarge));
+        assert_eq!(FailureRecord::decode(&[0xff]), Err(NotUtf8));
+        assert_eq!(
+            FailureRecord::decode(good.replace("failure 1", "failure 2").as_bytes()),
+            Err(UnsupportedVersion)
+        );
+        assert_eq!(
+            FailureRecord::decode(good.replace("failure 1", "failure 01").as_bytes()),
+            Err(UnsupportedVersion)
+        );
+        for bad in [
+            good.replace('\n', "\r\n"),
+            good.trim_end().to_owned(),
+            format!("{good}extra\n"),
+            good.replace("stage=backup\n", ""),
+            good.replace("from_schema=3\nstage=backup", "stage=backup\nfrom_schema=3"),
+            good.replace("stage=backup", "stage=backup\nstage=backup"),
+            good.replace("stage=backup", "theme=dark"),
+            good.replace("source=", "source ="),
+            good.replace("000000000000000a", "000000000000000A"),
+            good.replace("from_schema=3", "from_schema=+3"),
+            good.replace("attempts=1", "attempts=-1"),
+            good.replace("from_schema=3", "from_schema=03"),
+            good.replace("attempts=1", "attempts=01"),
+            good.replace("attempts=1", "attempts=0"),
+            good.replace("from_schema=3", "from_schema=4294967296"),
+            good.replace("attempts=1", "attempts=4294967296"),
+            format!("\u{feff}{good}"),
+            good.replace("from_schema=3", "from_schema=\u{0663}"),
+            good.replace("stage=backup", "stage=other"),
+        ] {
+            assert_eq!(
+                FailureRecord::decode(bad.as_bytes()),
+                Err(Malformed),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn failure_debug_does_not_echo_input() {
+        for error in [
+            FailureRecordError::TooLarge,
+            FailureRecordError::NotUtf8,
+            FailureRecordError::Malformed,
+            FailureRecordError::UnsupportedVersion,
+        ] {
+            assert!(!format!("{error:?}").contains("dark"));
+        }
+        let bad = record(0, 0, FailureStage::Backup, 1)
+            .encode()
+            .replace("stage=backup", "theme=dark");
+        assert!(
+            !format!("{:?}", FailureRecord::decode(bad.as_bytes()).unwrap_err()).contains("dark")
+        );
+        let decoded =
+            FailureRecord::decode(record(0, 0, FailureStage::Backup, 1).encode().as_bytes())
+                .unwrap();
+        assert!(!format!("{decoded:?}").contains("dark"));
+    }
+
+    #[test]
+    fn retry_decisions_match_startup() {
+        let f = ChangeFingerprint::from_value(1);
+        assert_eq!(
+            retry_decision(&StoredFailure::None, f),
+            RetryDecision::NoFailureRecorded
+        );
+        assert_eq!(
+            retry_decision(&StoredFailure::Corrupt, f),
+            RetryDecision::Suppressed
+        );
+        for source in [1, 2] {
+            let failure = record(source, 2, FailureStage::Verify, 1);
+            let decision = retry_decision(&StoredFailure::Valid(failure.clone()), f);
+            assert_eq!(
+                decision,
+                if source == 1 {
+                    RetryDecision::Suppressed
+                } else {
+                    RetryDecision::SourceChanged
+                }
+            );
+            let outcome = plan_startup(
+                &PrimaryObservation::Legacy {
+                    schema: 2,
+                    fingerprint: f,
+                },
+                &ArtifactInventory {
+                    recorded_failure: Some(failure.source),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                matches!(
+                    outcome,
+                    StartupOutcome::LegacyCompatible {
+                        reason: LegacyReason::RetrySuppressed
+                    }
+                ),
+                !decision.allows_attempt()
+            );
+        }
+        assert!(RetryDecision::NoFailureRecorded.allows_attempt());
+        assert!(RetryDecision::SourceChanged.allows_attempt());
+        assert!(!RetryDecision::Suppressed.allows_attempt());
+    }
+
+    #[test]
+    fn recovery_candidate_selection() {
+        let valid = |source, fingerprint| RecoveryCandidate {
+            source,
+            validity: CandidateValidity::Valid {
+                schema: 3,
+                fingerprint: ChangeFingerprint::from_value(fingerprint),
+            },
+        };
+        let rolling = valid(CandidateSource::RollingBackup, 1);
+        let low = valid(CandidateSource::Protected(backup(1)), 1);
+        let high = valid(CandidateSource::Protected(backup(2)), 1);
+        let other = valid(CandidateSource::Protected(backup(3)), 2);
+        let future = RecoveryCandidate {
+            source: CandidateSource::Protected(backup(4)),
+            validity: CandidateValidity::Future,
+        };
+        let invalid = RecoveryCandidate {
+            source: CandidateSource::Protected(backup(5)),
+            validity: CandidateValidity::Invalid,
+        };
+        let unreadable = RecoveryCandidate {
+            source: CandidateSource::Protected(backup(6)),
+            validity: CandidateValidity::Unreadable,
+        };
+        for (mut candidates, expected) in [
+            (vec![], CandidateSelection::NoneValid),
+            (
+                vec![future.clone(), invalid, unreadable],
+                CandidateSelection::NoneValid,
+            ),
+            (
+                vec![low.clone()],
+                CandidateSelection::Restore(low.source.clone()),
+            ),
+            (
+                vec![low.clone(), rolling.clone()],
+                CandidateSelection::Restore(CandidateSource::RollingBackup),
+            ),
+            (
+                vec![low.clone(), high.clone()],
+                CandidateSelection::Restore(high.source.clone()),
+            ),
+            (vec![low.clone(), other], CandidateSelection::Ambiguous),
+            (
+                vec![low.clone(), future],
+                CandidateSelection::Restore(low.source.clone()),
+            ),
+        ] {
+            assert_eq!(select_candidate(&candidates), expected);
+            candidates.reverse();
+            assert_eq!(select_candidate(&candidates), expected);
+        }
+        let tie = valid(
+            CandidateSource::Protected(
+                ProtectedBackupName::new(1, 4, ChangeFingerprint::from_value(0)).unwrap(),
+            ),
+            1,
+        );
+        assert_eq!(
+            select_candidate(&[low.clone(), tie.clone()]),
+            select_candidate(&[tie, low])
+        );
+    }
+}
+
+/// The migration step that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureStage {
+    /// Creating the backup failed.
+    Backup,
+    /// Committing the migration failed.
+    Commit,
+    /// Verifying the migration failed.
+    Verify,
+}
+
+/// A value-free record of a failed migration. Attempts must be at least one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailureRecord {
+    /// Fingerprint of the source file.
+    pub source: ChangeFingerprint,
+    /// Schema of the source file.
+    pub from_schema: u32,
+    /// Step that failed.
+    pub stage: FailureStage,
+    /// Number of attempts, at least one.
+    pub attempts: u32,
+}
+
+/// Maximum accepted size of a failure record in bytes.
+pub const FAILURE_RECORD_MAX_BYTES: usize = 256;
+
+/// A failure to decode a record, without retaining any input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureRecordError {
+    /// The record exceeds the size limit.
+    TooLarge,
+    /// The record is not UTF-8.
+    NotUtf8,
+    /// The record is not canonical.
+    Malformed,
+    /// The record declares another numeric version.
+    UnsupportedVersion,
+}
+
+impl FailureRecord {
+    /// Encode the record in canonical form; attempts must be at least one.
+    pub fn encode(&self) -> String {
+        let stage = match self.stage {
+            FailureStage::Backup => "backup",
+            FailureStage::Commit => "commit",
+            FailureStage::Verify => "verify",
+        };
+        format!(
+            "islora-migration-failure 1\nsource={:016x}\nfrom_schema={}\nstage={}\nattempts={}\n",
+            self.source.value(),
+            self.from_schema,
+            stage,
+            self.attempts
+        )
+    }
+
+    /// Decode only the canonical form, without retaining rejected input.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FailureRecordError> {
+        use FailureRecordError::{Malformed, NotUtf8, TooLarge, UnsupportedVersion};
+        if bytes.len() > FAILURE_RECORD_MAX_BYTES {
+            return Err(TooLarge);
+        }
+        let text = std::str::from_utf8(bytes).map_err(|_| NotUtf8)?;
+        let first = text.split('\n').next().ok_or(Malformed)?;
+        if let Some(version) = first.strip_prefix("islora-migration-failure ")
+            && !version.is_empty()
+            && version.bytes().all(|b| b.is_ascii_digit())
+            && version != "1"
+        {
+            return Err(UnsupportedVersion);
+        }
+        let mut lines = text.split('\n');
+        if lines.next() != Some("islora-migration-failure 1") {
+            return Err(Malformed);
+        }
+        let source = lines
+            .next()
+            .and_then(|s| s.strip_prefix("source="))
+            .ok_or(Malformed)?;
+        if source.len() != 16
+            || !source
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(Malformed);
+        }
+        let source = u64::from_str_radix(source, 16).map_err(|_| Malformed)?;
+        let number = |s: &str| -> Result<u32, FailureRecordError> {
+            if s.is_empty()
+                || (s.len() > 1 && s.starts_with('0'))
+                || !s.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(Malformed);
+            }
+            s.parse().map_err(|_| Malformed)
+        };
+        let from_schema = number(
+            lines
+                .next()
+                .and_then(|s| s.strip_prefix("from_schema="))
+                .ok_or(Malformed)?,
+        )?;
+        let stage = match lines.next() {
+            Some("stage=backup") => FailureStage::Backup,
+            Some("stage=commit") => FailureStage::Commit,
+            Some("stage=verify") => FailureStage::Verify,
+            _ => return Err(Malformed),
+        };
+        let attempts = number(
+            lines
+                .next()
+                .and_then(|s| s.strip_prefix("attempts="))
+                .ok_or(Malformed)?,
+        )?;
+        if attempts == 0 || lines.next() != Some("") || lines.next().is_some() {
+            return Err(Malformed);
+        }
+        Ok(Self {
+            source: ChangeFingerprint::from_value(source),
+            from_schema,
+            stage,
+            attempts,
+        })
+    }
+}
+
+/// What the platform found at the failure-record path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoredFailure {
+    /// No record exists.
+    None,
+    /// A record was decoded successfully.
+    Valid(FailureRecord),
+    /// The record could not be read or decoded.
+    Corrupt,
+}
+
+/// Whether a migration retry is allowed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryDecision {
+    /// No previous failure was recorded.
+    NoFailureRecorded,
+    /// The source changed since the failure.
+    SourceChanged,
+    /// Retry is suppressed.
+    Suppressed,
+}
+
+impl RetryDecision {
+    /// Return whether a migration attempt is allowed.
+    pub fn allows_attempt(self) -> bool {
+        self != Self::Suppressed
+    }
+}
+
+/// Decide whether to retry. Corrupt records fail closed and suppress retries;
+/// they are cleared only by a successful recovery elsewhere.
+pub fn retry_decision(stored: &StoredFailure, current_source: ChangeFingerprint) -> RetryDecision {
+    match stored {
+        StoredFailure::None => RetryDecision::NoFailureRecorded,
+        StoredFailure::Valid(record) if record.source != current_source => {
+            RetryDecision::SourceChanged
+        }
+        StoredFailure::Valid(_) | StoredFailure::Corrupt => RetryDecision::Suppressed,
+    }
+}
+
+/// The location of a recovery candidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CandidateSource {
+    /// The rolling backup.
+    RollingBackup,
+    /// A protected backup.
+    Protected(ProtectedBackupName),
+}
+
+/// The observed validity of a recovery candidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CandidateValidity {
+    /// A readable, valid configuration.
+    Valid {
+        schema: u32,
+        fingerprint: ChangeFingerprint,
+    },
+    /// A newer schema.
+    Future,
+    /// Invalid content.
+    Invalid,
+    /// Unreadable content.
+    Unreadable,
+}
+
+/// A recovery source and its observed validity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryCandidate {
+    /// The backup location.
+    pub source: CandidateSource,
+    /// The validation result.
+    pub validity: CandidateValidity,
+}
+
+/// The result of selecting a recovery candidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CandidateSelection {
+    /// Restore this source.
+    Restore(CandidateSource),
+    /// Valid sources have different content fingerprints.
+    Ambiguous,
+    /// No valid source exists.
+    NoneValid,
+}
+
+/// Select a valid candidate only when all valid fingerprints agree.
+pub fn select_candidate(candidates: &[RecoveryCandidate]) -> CandidateSelection {
+    let mut fingerprint = None;
+    let mut selected: Option<&CandidateSource> = None;
+    for candidate in candidates {
+        let CandidateValidity::Valid {
+            fingerprint: current,
+            ..
+        } = candidate.validity
+        else {
+            continue;
+        };
+        if fingerprint.is_some_and(|previous| previous != current) {
+            return CandidateSelection::Ambiguous;
+        }
+        fingerprint = Some(current);
+        selected = match (selected, &candidate.source) {
+            (None, source) => Some(source),
+            (Some(CandidateSource::RollingBackup), _) => selected,
+            (_, CandidateSource::RollingBackup) => Some(&candidate.source),
+            (Some(CandidateSource::Protected(old)), CandidateSource::Protected(new)) => {
+                let key = |name: &ProtectedBackupName| {
+                    (
+                        name.sequence(),
+                        name.source_schema(),
+                        name.fingerprint().value(),
+                    )
+                };
+                if key(new) > key(old) {
+                    Some(&candidate.source)
+                } else {
+                    selected
+                }
+            }
+        };
+    }
+    selected
+        .cloned()
+        .map_or(CandidateSelection::NoneValid, CandidateSelection::Restore)
 }
