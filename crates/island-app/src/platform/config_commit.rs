@@ -25,7 +25,6 @@ impl std::fmt::Display for CommitUnverified {
 }
 impl std::error::Error for CommitUnverified {}
 
-#[allow(dead_code, reason = "available to callers handling unverified commits")]
 pub(crate) fn is_commit_unverified(error: &io::Error) -> bool {
     error
         .get_ref()
@@ -90,6 +89,8 @@ pub(crate) fn commit_primary_with_hook(
     expected: Option<&[u8]>,
     #[cfg(test)] hook: impl FnOnce(),
 ) -> io::Result<()> {
+    #[cfg(test)]
+    let after_primary_rename = AFTER_PRIMARY_RENAME.with(|hook| hook.borrow_mut().take());
     let target = name(path)?;
     let mut source = match VerifiedFile::open_source(dir, target) {
         Ok(file) => Some(file),
@@ -152,19 +153,30 @@ pub(crate) fn commit_primary_with_hook(
         )
         .map_err(io::Error::from)?;
     #[cfg(test)]
-    AFTER_PRIMARY_RENAME.with(|hook| {
-        if let Some(hook) = hook.borrow_mut().take()
-            && verify_primary
-        {
-            hook();
-        }
-    });
+    if let Some(hook) = after_primary_rename
+        && verify_primary
+    {
+        hook();
+    }
     if verify_primary {
         let verified = (|| {
-            let mut file = VerifiedFile::open(dir, target).ok()?;
+            let mut file = VerifiedFile::open(dir, target)
+                .map_err(|error| {
+                    eprintln!(
+                        "configuration verification open failed: {:?}",
+                        io::Error::from(error).kind()
+                    );
+                })
+                .ok()?;
             let identity = file.identity();
             let bytes = file
                 .read_bounded(island_core::migration::MAX_CONFIG_BYTES)
+                .map_err(|error| {
+                    eprintln!(
+                        "configuration verification read failed: {:?}",
+                        io::Error::from(error).kind()
+                    );
+                })
                 .ok()?;
             Some(identity == draft_identity && bytes == text.as_bytes())
         })();
@@ -314,6 +326,20 @@ mod tests {
                 assert!(!path.exists());
             }
         }
+    }
+
+    #[test]
+    fn early_failure_discards_post_rename_hook() {
+        let temp = Temp::new();
+        let path = temp.0.join("config.toml");
+        std::fs::write(&path, b"old").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        AFTER_PRIMARY_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|| panic!("hook must not run")));
+        });
+        let error = commit_primary(&dir, &path, "new", Some(b"different")).unwrap_err();
+        assert!(is_primary_changed(&error));
+        commit_primary(&dir, &path, "new", Some(b"old")).unwrap();
     }
 
     #[test]

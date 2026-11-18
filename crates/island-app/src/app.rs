@@ -4269,6 +4269,29 @@ mod tests {
     }
 
     #[test]
+    fn autostart_unverified_save_reports_failed_restore() {
+        let mut save = |_: &str, _: &str| {
+            Err(std::io::Error::other(
+                crate::platform::config_commit::CommitUnverified,
+            ))
+        };
+        let outcome = autostart_transaction(
+            "",
+            &mut save,
+            false,
+            || Ok(Some("previous".into())),
+            || false,
+            |_| true,
+            |previous| {
+                assert_eq!(previous, Some("previous"));
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, AutostartOutcome::SaveFailed(false));
+    }
+
+    #[test]
     fn presentation_fallback_is_scoped_to_validated_legacy_input() {
         use island_core::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
         let legacy = "ui_density = \"minimal\"";
