@@ -29,6 +29,15 @@ pub struct FileIdentity {
 }
 
 #[derive(Debug)]
+pub struct PrimaryChanged;
+impl std::fmt::Display for PrimaryChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("configuration primary changed")
+    }
+}
+impl std::error::Error for PrimaryChanged {}
+
+#[derive(Debug)]
 pub enum ConfigFsError {
     Locked,
     ReparsePoint,
@@ -1272,6 +1281,7 @@ impl Draft {
         security: Option<&FileSecurity>,
         source: Option<(VerifiedFile, &std::ffi::OsStr)>,
         replace: bool,
+        expected: Option<&[u8]>,
     ) -> Result<(), ConfigFsError> {
         if let Some(expected) = security {
             expected.apply(&self.file)?;
@@ -1279,8 +1289,27 @@ impl Draft {
                 return Err(io::Error::other("replacement DACL changed during application").into());
             }
         }
-        if let Some((file, name)) = source {
-            file.revalidate(dir, name, security.expect("source security"))?;
+        if let Some((mut file, name)) = source {
+            match file.revalidate(dir, name, security.expect("source security")) {
+                Err(ConfigFsError::Io(error))
+                    if expected.is_some() && error.kind() == io::ErrorKind::NotFound =>
+                {
+                    return Err(io::Error::other(PrimaryChanged).into());
+                }
+                result => result?,
+            }
+            if let Some(expected) = expected {
+                file.rewind()?;
+                match file.read_bounded(island_core::migration::MAX_CONFIG_BYTES) {
+                    Ok(actual) if actual == expected => {}
+                    Ok(_) | Err(ConfigFsError::TooLarge) => {
+                        return Err(io::Error::other(PrimaryChanged).into());
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        } else if expected.is_some() {
+            return Err(io::Error::other(PrimaryChanged).into());
         }
         rename_handle(dir, &self.file, target, replace)?;
         self.renamed = true;
