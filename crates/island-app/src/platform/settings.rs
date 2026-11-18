@@ -197,7 +197,24 @@ pub fn first_run() -> bool {
 static PREPARATION_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static STORAGE_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-fn prepare_storage_at(base: &Path) -> io::Result<bool> {
+pub(crate) fn is_stale_draft_name(name: &std::ffi::OsStr) -> bool {
+    let value = name.to_string_lossy();
+    if let Some(unique) = value
+        .strip_prefix("config.toml.")
+        .and_then(|s| s.strip_suffix(".tmp"))
+    {
+        let unique = unique.strip_prefix("bak.").unwrap_or(unique);
+        let parts: Vec<_> = unique.split('-').collect();
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    } else {
+        false
+    }
+}
+
+pub(crate) fn prepare_storage_at(base: &Path) -> io::Result<bool> {
     let folder = base.join("Islora");
     let mutex = WriterMutex::acquire().map_err(io::Error::from)?;
     if !folder.exists() {
@@ -213,20 +230,8 @@ fn prepare_storage_at(base: &Path) -> io::Result<bool> {
     let dir = lock.directory();
     if let Ok(entries) = dir.entries() {
         for entry in entries {
-            let value = entry.to_string_lossy();
-            if let Some(unique) = value
-                .strip_prefix("config.toml.")
-                .and_then(|s| s.strip_suffix(".tmp"))
-            {
-                let unique = unique.strip_prefix("bak.").unwrap_or(unique);
-                let parts: Vec<_> = unique.split('-').collect();
-                if parts.len() == 3
-                    && parts
-                        .iter()
-                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-                {
-                    let _ = VerifiedFile::delete_verified(dir, &entry);
-                }
+            if is_stale_draft_name(&entry) {
+                let _ = VerifiedFile::delete_verified(dir, &entry);
             }
         }
     }
@@ -660,11 +665,11 @@ pub fn open_in_editor() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     static NEXT_TEMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    struct Temp(PathBuf);
+    pub(crate) struct Temp(PathBuf);
     impl std::ops::Deref for Temp {
         type Target = PathBuf;
         fn deref(&self) -> &PathBuf {
@@ -702,7 +707,7 @@ mod tests {
             }
         }
     }
-    fn temp_base() -> Temp {
+    pub(crate) fn temp_base() -> Temp {
         let path = std::env::temp_dir().join(format!(
             "islora-prepare-{}-{}-{}",
             std::process::id(),

@@ -175,6 +175,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2B-3a | done: `create_protected_backup` (core-built name over the held directory, `Draft::create_exact` CREATE_NEW of that exact name with the primary's security, write-through, read-back verify, `Draft::keep_read_only` sets READONLY by handle and restores the attributes on any later failure so drop can delete); Marco (Sonnet) wrote it, Giulia and Enzo approve after one correction; 544 tests | see `git log` |
 | 2B-3b | done: `apply_protected_retention(dir, just_created, keep)` deletes only names `retention_excess` returns, never `just_created` or a non-parsing name; each excess backup opened relative to the held directory (`open_for_delete`, no reparse follow, non-directory), identity re-checked, READONLY cleared by handle, deleted by `FileDispositionInfo`, attributes restored if the delete fails, stops at the first failure; Marco (Sonnet) wrote it, Giulia and Lucia approve in one round; 552 tests | see `git log` |
 | 2C-2 S1 | done: `platform/config_store.rs` (pure, not wired): `observe` (read result -> `PrimaryObservation`, explicit arm per classification, future version saturates to `u32`, fingerprint over the exact bytes), `effective_outcome` -> `RuntimeMode` (migrate becomes `LegacyCompatible`), `writes_allowed` (false only for `ReadOnly`, `Recovery`), `ModeRefused` / `is_mode_refused` (`PermissionDenied`); Paolo wrote it in one pass, Giulia and Lucia approve; 563 tests | see `git log` |
+| 2C-2 S2 | done: `ConfigSnapshot` (text, mode, `storage_ready`; `Debug` hides the text), `bootstrap_at` / `bootstrap` sharing one observe path (preparation once as before, inventory from `dir.entries()`, lock-free verified read relative to the held `ConfigDir`), `install_once` slot with poison recovery; app startup calls `config_store::bootstrap()`; settings.rs gains `is_stale_draft_name` (pure extraction) and visibility changes only; readers not switched; Lucia and Enzo approve (Giulia unavailable twice); 572 tests | see `git log` |
 
 ## Resume here
 
@@ -595,7 +596,32 @@ workflow (Haiku runner for agy, Sonnet for Lucia). Spec and prompt:
 Budget record for 2C-2 S1: Claude 5-hour 59 -> 66, weekly 17 -> 18; Codex
 5-hour 65 -> 67, weekly 26.
 
-First step next: S2 bootstrap (see the step list above).
+2C-2 S2 is committed. Paolo stopped twice for scope (correct): the inline
+stale-draft match was extracted into `settings::is_stale_draft_name` (same
+rule), and `mod config_store` became `pub(crate)`. Today's preparation does
+not treat protected backups as recovery evidence: a missing primary with only
+a protected backup gets a fresh primary and `Normal`. No caller creates
+protected backups yet, so this is recorded for 2C-3 (preparation must treat
+them as recovery evidence before migration creates any); a test pins today's
+behaviour. The preparation-failure test uses an invalid rolling backup
+(`Recovery`). Giulia (agy) failed twice with a remote connection error, so
+Enzo (fresh read-only Codex) reviewed with Lucia: Enzo no findings; Lucia
+approves with minors for the Phase B cleanup: pin `storage_ready`,
+`writes_allowed()` and unchanged bytes in `bootstrap_unreadable_gives_none_text`;
+the inventory matches `config.toml.bak` case-sensitively while settings.rs
+`artifacts()` lowercases (use `eq_ignore_ascii_case`). Codex review prompts
+must allow read-only shell reads (Codex reads files through the shell).
+
+Budget record for 2C-2 S2: Claude 5-hour 66 -> 73, weekly 18 -> 19; Codex
+5-hour 67 -> 70, weekly 26 -> 27 (three Paolo runs, two Enzo runs).
+
+Night run (user, 2026-11-19 ~01:50 local): use both 5-hour windows up to
+100%, wait for each reset (Codex ~23:48 UTC, Claude ~02:20 UTC), keep going
+until 06:00 local (03:00 UTC); stay in this lead session (background turns
+cannot open a new one); pick reviewers per step by the kind of change, not a
+fixed pair.
+
+First step next: S3 readers (see the step list above).
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.

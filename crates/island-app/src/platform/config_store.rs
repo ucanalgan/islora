@@ -87,10 +87,299 @@ pub(crate) fn is_mode_refused(error: &io::Error) -> bool {
         .is_some_and(|cause| cause.downcast_ref::<ModeRefused>().is_some())
 }
 
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use super::config_fs::{ConfigDir, VerifiedFile};
+use super::settings;
+use island_core::config_state::{ArtifactInventory, ProtectedBackupName, plan_startup};
+
+static STORE: Mutex<Option<Arc<ConfigSnapshot>>> = Mutex::new(None);
+
+pub(crate) struct ConfigSnapshot {
+    text: Option<String>,
+    mode: RuntimeMode,
+    storage_ready: bool,
+}
+
+// Readers and writers switch to these accessors in 2C-2 S3.
+#[allow(dead_code, reason = "readers switch in 2C-2 S3")]
+impl ConfigSnapshot {
+    pub(crate) fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+    pub(crate) fn mode(&self) -> &RuntimeMode {
+        &self.mode
+    }
+    pub(crate) fn writes_allowed(&self) -> bool {
+        self.storage_ready && writes_allowed(&self.mode)
+    }
+}
+
+impl fmt::Debug for ConfigSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct TextPresence(Option<usize>);
+        impl fmt::Debug for TextPresence {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self.0 {
+                    Some(len) => write!(f, "Some({len} bytes)"),
+                    None => f.write_str("None"),
+                }
+            }
+        }
+        formatter
+            .debug_struct("ConfigSnapshot")
+            .field("mode", &self.mode)
+            .field("text", &TextPresence(self.text.as_ref().map(String::len)))
+            .field("storage_ready", &self.storage_ready)
+            .finish()
+    }
+}
+
+fn prepared(result: io::Result<bool>) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("settings storage could not be prepared: {:?}", error.kind());
+            false
+        }
+    }
+}
+
+fn observe_folder(folder: io::Result<PathBuf>, storage_ready: bool) -> ConfigSnapshot {
+    let result = folder.and_then(|path| ConfigDir::open(&path).map_err(io::Error::from));
+    let dir = match result {
+        Ok(dir) => dir,
+        Err(error) => {
+            let observation = observe(Err(error));
+            return ConfigSnapshot {
+                text: None,
+                mode: effective_outcome(plan_startup(&observation, &ArtifactInventory::default())),
+                storage_ready: false,
+            };
+        }
+    };
+    let mut inventory = ArtifactInventory::default();
+    if let Ok(entries) = dir.entries() {
+        for name in entries {
+            if name == "config.toml.bak" {
+                inventory.rolling_backup = true;
+            }
+            if let Some(parsed) = name.to_str().and_then(ProtectedBackupName::parse) {
+                inventory.protected_backups.push(parsed);
+            }
+            if settings::is_stale_draft_name(&name) {
+                inventory.leftover_drafts += 1;
+            }
+        }
+    }
+    let read = VerifiedFile::open(&dir, "config.toml".as_ref())
+        .map_err(io::Error::from)
+        .and_then(|mut file| settings::read_verified(&mut file));
+    let (observation, text) = match read {
+        Ok(text) => (observe(Ok(text.clone())), Some(text)),
+        Err(error) => (observe(Err(error)), None),
+    };
+    ConfigSnapshot {
+        text,
+        mode: effective_outcome(plan_startup(&observation, &inventory)),
+        storage_ready,
+    }
+}
+
+#[allow(dead_code, reason = "instance bootstrap is used by isolated tests")]
+pub(crate) fn bootstrap_at(base: &Path) -> ConfigSnapshot {
+    let storage_ready = prepared(settings::prepare_storage_at(base));
+    observe_folder(Ok(base.join("Islora")), storage_ready)
+}
+
+// make runs under the slot mutex and must not access the store.
+fn install_once(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    make: impl FnOnce() -> ConfigSnapshot,
+) -> Arc<ConfigSnapshot> {
+    let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(snapshot) = guard.as_ref() {
+        return Arc::clone(snapshot);
+    }
+    let snapshot = Arc::new(make());
+    *guard = Some(Arc::clone(&snapshot));
+    snapshot
+}
+
+pub(crate) fn bootstrap() -> Arc<ConfigSnapshot> {
+    install_once(&STORE, || {
+        let storage_ready = prepared(settings::prepare_storage());
+        let folder = std::env::var_os("APPDATA")
+            .map(|base| PathBuf::from(base).join("Islora"))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound));
+        let snapshot = observe_folder(folder, storage_ready);
+        eprintln!("settings startup mode: {:?}", snapshot.mode);
+        snapshot
+    })
+}
+
+#[allow(dead_code, reason = "readers switch in 2C-2 S3")]
+pub(crate) fn snapshot() -> Option<Arc<ConfigSnapshot>> {
+    STORE.lock().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use island_core::config_state::{ArtifactInventory, ProtectedBackupName, plan_startup};
+
+    fn sample() -> ConfigSnapshot {
+        ConfigSnapshot {
+            text: None,
+            mode: RuntimeMode::Normal,
+            storage_ready: true,
+        }
+    }
+
+    #[test]
+    fn bootstrap_new_install_is_ready() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let snap = bootstrap_at(&base);
+        assert_eq!(snap.mode(), &RuntimeMode::Normal);
+        assert!(snap.storage_ready && snap.writes_allowed());
+        assert!(snap.text().is_some());
+    }
+
+    #[test]
+    fn bootstrap_v1_is_legacy_fallback_bytes_unchanged() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("config.toml");
+        let bytes = b"config_version = \"1\"\n";
+        std::fs::write(&path, bytes).unwrap();
+        let snap = bootstrap_at(&base);
+        assert_eq!(snap.mode(), &RuntimeMode::LegacyCompatible);
+        assert!(snap.writes_allowed());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn bootstrap_future_is_read_only_bytes_unchanged() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("config.toml");
+        let bytes = b"config_version = \"100\"\n";
+        std::fs::write(&path, bytes).unwrap();
+        let snap = bootstrap_at(&base);
+        assert_eq!(snap.mode(), &RuntimeMode::ReadOnly);
+        assert!(!snap.writes_allowed());
+        assert!(snap.text().is_some());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn bootstrap_unreadable_gives_none_text() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(
+            folder.join("config.toml"),
+            vec![b'x'; island_core::migration::MAX_CONFIG_BYTES + 1],
+        )
+        .unwrap();
+        let snap = bootstrap_at(&base);
+        assert_eq!(snap.mode(), &RuntimeMode::LegacyCompatible);
+        assert!(snap.text().is_none());
+    }
+
+    #[test]
+    fn bootstrap_prepare_failure_refuses_writes() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("config.toml.bak");
+        let bytes = b"invalid backup";
+        std::fs::write(&path, bytes).unwrap();
+        let snap = bootstrap_at(&base);
+        assert!(!snap.storage_ready);
+        assert!(!snap.writes_allowed());
+        assert_eq!(snap.mode(), &RuntimeMode::Recovery);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn bootstrap_missing_primary_with_protected_backup_records_current_behaviour() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let name = ProtectedBackupName::new(1, 1, ChangeFingerprint::of(b"backup"))
+            .unwrap()
+            .file_name();
+        let path = folder.join(name);
+        std::fs::write(&path, b"backup").unwrap();
+        // 2C-3: preparation must treat protected backups as recovery evidence
+        let snap = bootstrap_at(&base);
+        assert!(snap.storage_ready && snap.writes_allowed());
+        assert_eq!(snap.mode(), &RuntimeMode::Normal);
+        assert!(snap.text().is_some());
+        assert_eq!(std::fs::read(path).unwrap(), b"backup");
+    }
+
+    #[test]
+    fn bootstrap_twice_is_noop() {
+        let slot = Mutex::new(None);
+        let count = std::cell::Cell::new(0);
+        let make = || {
+            count.set(count.get() + 1);
+            sample()
+        };
+        let first = install_once(&slot, make);
+        let second = install_once(&slot, make);
+        assert_eq!(count.get(), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn install_once_recovers_from_poison() {
+        let slot = Mutex::new(None);
+        std::thread::scope(|scope| {
+            let result = scope
+                .spawn(|| {
+                    let _guard = slot.lock().unwrap();
+                    panic!("poison local slot");
+                })
+                .join();
+            assert!(result.is_err());
+        });
+        assert_eq!(install_once(&slot, sample).mode(), &RuntimeMode::Normal);
+    }
+
+    #[test]
+    fn snapshot_debug_hides_text() {
+        let snap = ConfigSnapshot {
+            text: Some("https://example.invalid/secret.ics".into()),
+            ..sample()
+        };
+        let debug = format!("{snap:?}");
+        assert!(!debug.contains("secret") && !debug.contains("https"));
+        assert!(debug.contains("Some(34 bytes)"));
+    }
 
     fn outcome(observation: &PrimaryObservation, inventory: &ArtifactInventory) -> RuntimeMode {
         effective_outcome(plan_startup(observation, inventory))

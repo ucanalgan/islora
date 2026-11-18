@@ -322,10 +322,7 @@ pub fn run() -> Result<()> {
         }
         return Ok(());
     }
-    settings::prepare_storage().unwrap_or_else(|error| {
-        eprintln!("settings storage could not be prepared: {error}");
-        false
-    });
+    crate::platform::config_store::bootstrap();
 
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)? };
     TASKBAR_CREATED.store(
