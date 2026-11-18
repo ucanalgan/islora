@@ -162,7 +162,8 @@ restart. Nothing is called release-ready while a critical item is open.
 | Core state 3/3 | done: `FailureRecord` canonical encode/decode (no setting values, errors carry no input), `retry_decision` (corrupt record fails closed), `select_candidate` (Restore / Ambiguous / NoneValid); 521 tests | see `git log` |
 | Core state cleanup | done: items above the test module (pure move), missing docs, parse and decode boundary/order tests; Sonnet: no findings | see `git log` |
 | 2B-2a | done: `commit_primary` and `commit_primary_with_hook` in `platform/config_commit.rs`, pure move; Sonnet and Gemini 4: no findings; 521 tests | see `git log` |
-| 2B-2b | next: write-through drafts and byte-for-byte read-back before rename | — |
+| 2B-2b | done: drafts (primary and `.bak`) opened write-through only for draft creation; each draft read back through its own handle and compared before any rename, mismatch -> `InvalidData`, no rename, draft deleted by `Drop`; Sonnet and Gemini 4: no findings; 523 tests | see `git log` |
+| 2B-2c | next: optimistic expected identity and bytes check before rename | — |
 
 ## Resume here
 
@@ -313,6 +314,24 @@ newer security invariant wins. The existing handle-based fallback
 
 Budget record for 2B-2a: Claude 5-hour 49 → 51, weekly 92; Codex 3 → 4 (one
 Codex run, Sonnet and Gemini 4 reviews, no correction).
+
+Budget record for 2B-2b: Claude 5-hour 51 → 53, weekly 92; Codex 4 → 5 (one
+Codex run, Sonnet and Gemini 4 reviews, no correction). Narrow 2B-2 steps cost
+about 2 Claude points and 1 Codex point each.
+
+Parked 2026-11-18 after 2B-2b because the lead's context passed 50% (64% of a
+400k window), not because of limits: Claude 5-hour 53% (resets 11:10 UTC),
+weekly 92% (guard 97%, resets 16:00 UTC); Codex 5-hour 5%, weekly 9%.
+Working tree clean apart from the untracked `docs/V1_STABLE_CHECKLIST.md`,
+`docs/WAVE_MEASUREMENTS.md` and `scratchpad/` (review copies only).
+First step next: 2B-2c in a new lead session. `commit_primary` gets the
+expected bytes (what the caller read under the writer lock) and, right before
+the rename, re-reads the primary through the held source handle and checks
+both identity and bytes; on a mismatch it aborts with a distinct error and
+the draft is deleted. Callers in `settings.rs` pass the bytes they read.
+Then 2B-2d (post-rename re-open and verify). Each step: Codex writes (state
+the file hygiene rules), lead runs the gate plus the BOM/ASCII/removed-lines
+check, Sonnet and Gemini 4 (`agy`) review in parallel.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
