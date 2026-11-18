@@ -1007,6 +1007,9 @@ fn validate_name(name: &[u16]) -> Result<(), ConfigFsError> {
 }
 
 #[cfg(test)]
+thread_local! { pub(crate) static FAIL_READONLY_READBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+#[cfg(test)]
 thread_local! { pub(crate) static FORCE_RENAME_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 /// Retries rename variants when a variant is unsupported.
@@ -1259,6 +1262,80 @@ impl Draft {
             }
         }
         unreachable!()
+    }
+    /// Creates a file with exactly this name, exclusively and write-through, relative to the
+    /// held directory. It never retries another name and never overwrites; an existing name
+    /// yields an `AlreadyExists` error. The file is deleted on drop until `keep_read_only`.
+    #[allow(dead_code, reason = "called by migration in 2C-3")]
+    pub fn create_exact(
+        dir: &ConfigDir,
+        exact: &std::ffi::OsStr,
+        security: Option<&FileSecurity>,
+    ) -> Result<Self, ConfigFsError> {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = exact.encode_wide().collect();
+        validate_name(&wide)?;
+        let file = open_relative(dir, &wide, true, true, security, true, true, false, true)?;
+        let draft = Self {
+            file,
+            renamed: false,
+        };
+        if let Some(expected) = security
+            && !expected.same_dacl(&FileSecurity::capture(&draft.file)?)
+        {
+            return Err(io::Error::other("file DACL differs at creation").into());
+        }
+        Ok(draft)
+    }
+    /// Marks the file read-only through its handle, keeping other attributes, and keeps it
+    /// on disk. If the attribute cannot be set the file is deleted when `self` drops.
+    #[allow(dead_code, reason = "called by migration in 2C-3")]
+    pub fn keep_read_only(mut self) -> Result<(), ConfigFsError> {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO, FileBasicInfo,
+            SetFileInformationByHandle,
+        };
+        #[cfg(test)]
+        let fail_readback = FAIL_READONLY_READBACK.with(|flag| flag.replace(false));
+        let set_attributes = |file: &File, attributes: u32| -> io::Result<()> {
+            let info = FILE_BASIC_INFO {
+                FileAttributes: attributes,
+                ..Default::default()
+            };
+            // SAFETY: the file owns a valid handle and info is valid for the duration of the call.
+            unsafe {
+                SetFileInformationByHandle(
+                    handle(file),
+                    FileBasicInfo,
+                    (&info as *const FILE_BASIC_INFO).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                )
+            }
+            .map_err(io::Error::from)
+        };
+        let current = information(&self.file)?.dwFileAttributes;
+        set_attributes(
+            &self.file,
+            (current & !FILE_ATTRIBUTE_NORMAL.0) | FILE_ATTRIBUTE_READONLY.0,
+        )?;
+        let applied = (|| {
+            #[cfg(test)]
+            if fail_readback {
+                return Err(io::Error::other("injected attribute read-back failure"));
+            }
+            if information(&self.file)?.dwFileAttributes & FILE_ATTRIBUTE_READONLY.0 == 0 {
+                return Err(io::Error::other("read-only attribute was not applied"));
+            }
+            Ok(())
+        })();
+        if let Err(error) = applied {
+            // A read-only file cannot be deleted, so restore the original attributes first
+            // (best effort) and let the drop delete the file this call created.
+            let _ = set_attributes(&self.file, current);
+            return Err(error.into());
+        }
+        self.renamed = true;
+        Ok(())
     }
     pub(crate) fn identity(&self) -> Result<FileIdentity, ConfigFsError> {
         identity(&self.file, &information(&self.file)?)

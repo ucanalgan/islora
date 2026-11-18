@@ -191,6 +191,45 @@ pub(crate) fn commit_primary_with_hook(
     Ok(())
 }
 
+/// The primary configuration file name, whose security a protected backup copies.
+#[allow(dead_code, reason = "called by migration in 2C-3")]
+const PRIMARY_NAME: &str = "config.toml";
+
+/// Writes one protected backup of `text` next to the primary under a core-built unique name.
+/// The file is created exclusively (an existing name is an `AlreadyExists` error, never
+/// overwritten), written through, read back and compared, then marked read-only. Any failure
+/// deletes only the file this call created. Retention is not handled here.
+#[allow(dead_code, reason = "called by migration in 2C-3")]
+pub(crate) fn create_protected_backup(
+    dir: &ConfigDir,
+    text: &str,
+    schema: u32,
+) -> io::Result<island_core::config_state::ProtectedBackupName> {
+    use island_core::config_state::{ChangeFingerprint, ProtectedBackupName, next_sequence};
+    let existing: Vec<ProtectedBackupName> = dir
+        .entries()
+        .map_err(io::Error::from)?
+        .iter()
+        .filter_map(|entry| ProtectedBackupName::parse(entry.to_str()?))
+        .collect();
+    let sequence = next_sequence(&existing)
+        .ok_or_else(|| io::Error::other("protected backup sequence exhausted"))?;
+    let backup = ProtectedBackupName::new(sequence, schema, ChangeFingerprint::of(text.as_bytes()))
+        .ok_or_else(|| io::Error::other("invalid protected backup name"))?;
+    let security = match VerifiedFile::open_source(dir, std::ffi::OsStr::new(PRIMARY_NAME)) {
+        Ok(primary) => Some(primary.security().map_err(io::Error::from)?),
+        Err(super::config_fs::ConfigFsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let file_name = backup.file_name();
+    let mut file = Draft::create_exact(dir, std::ffi::OsStr::new(&file_name), security.as_ref())
+        .map_err(io::Error::from)?;
+    file.write(text.as_bytes()).map_err(io::Error::from)?;
+    verify_draft(&mut file, text.as_bytes())?;
+    file.keep_read_only().map_err(io::Error::from)?;
+    Ok(backup)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +398,139 @@ mod tests {
         commit_primary(&dir, &path, "new", None).unwrap();
         AFTER_PRIMARY_RENAME.with(|hook| assert!(hook.borrow().is_none()));
         commit_primary(&dir, &path, "updated", Some(b"new")).unwrap();
+    }
+
+    fn is_readonly(path: &Path) -> bool {
+        std::fs::metadata(path).unwrap().permissions().readonly()
+    }
+
+    /// Clears the read-only attribute so the temporary folder can be removed.
+    fn clear_readonly(folder: &Path) {
+        for entry in std::fs::read_dir(folder).unwrap().flatten() {
+            let mut permissions = entry.metadata().unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(entry.path(), permissions);
+        }
+    }
+
+    #[test]
+    fn protected_backup_has_canonical_name_bytes_and_readonly() {
+        use island_core::config_state::{ChangeFingerprint, ProtectedBackupName};
+        let temp = Temp::new();
+        std::fs::write(temp.0.join("config.toml"), b"old").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let backup = create_protected_backup(&dir, "config text", 2).unwrap();
+        let file_name = backup.file_name();
+        assert_eq!(ProtectedBackupName::parse(&file_name), Some(backup.clone()));
+        assert_eq!(backup.sequence(), 1);
+        assert_eq!(backup.source_schema(), 2);
+        assert_eq!(backup.fingerprint(), ChangeFingerprint::of(b"config text"));
+        let path = temp.0.join(&file_name);
+        assert_eq!(std::fs::read(&path).unwrap(), b"config text");
+        assert!(is_readonly(&path));
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn second_protected_backup_takes_next_sequence_and_keeps_first() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let first = create_protected_backup(&dir, "first", 2).unwrap();
+        let second = create_protected_backup(&dir, "second", 2).unwrap();
+        assert_eq!(second.sequence(), first.sequence() + 1);
+        let first_path = temp.0.join(first.file_name());
+        assert_eq!(std::fs::read(&first_path).unwrap(), b"first");
+        assert!(is_readonly(&first_path));
+        let second_path = temp.0.join(second.file_name());
+        assert_eq!(std::fs::read(&second_path).unwrap(), b"second");
+        assert!(is_readonly(&second_path));
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn protected_backup_ignores_unrelated_names() {
+        let temp = Temp::new();
+        let unrelated = [
+            ("config.toml", &b"primary"[..]),
+            ("config.toml.bak", b"previous backup"),
+            ("config.toml.1-2-3.tmp", b"draft"),
+            ("config.protected.7.v2.0000000000000000.bak", b"bad name"),
+            ("notes.txt", b"notes"),
+        ];
+        for (name, bytes) in unrelated {
+            std::fs::write(temp.0.join(name), bytes).unwrap();
+        }
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let backup = create_protected_backup(&dir, "text", 2).unwrap();
+        assert_eq!(backup.sequence(), 1);
+        for (name, bytes) in unrelated {
+            assert_eq!(std::fs::read(temp.0.join(name)).unwrap(), bytes);
+            assert!(!is_readonly(&temp.0.join(name)));
+        }
+        assert_eq!(
+            std::fs::read_dir(&temp.0).unwrap().count(),
+            unrelated.len() + 1
+        );
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn colliding_name_returns_already_exists_and_keeps_existing_file() {
+        use island_core::config_state::{ChangeFingerprint, ProtectedBackupName};
+        let temp = Temp::new();
+        // An upper-case spelling does not parse, so the sequence stays 1, but the
+        // case-insensitive filesystem reports the exact canonical name as taken.
+        let canonical = ProtectedBackupName::new(1, 2, ChangeFingerprint::of(b"text"))
+            .unwrap()
+            .file_name();
+        let planted = temp.0.join(canonical.to_ascii_uppercase());
+        std::fs::write(&planted, b"planted").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let error = create_protected_backup(&dir, "text", 2).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&planted).unwrap(), b"planted");
+        assert!(!is_readonly(&planted));
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn protected_backup_readonly_readback_failure_leaves_no_file() {
+        let temp = Temp::new();
+        std::fs::write(temp.0.join("config.toml"), b"old").unwrap();
+        std::fs::write(temp.0.join("config.toml.bak"), b"previous").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        super::super::config_fs::FAIL_READONLY_READBACK.with(|flag| flag.set(true));
+        let error = create_protected_backup(&dir, "text", 2).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 2);
+        assert_eq!(std::fs::read(temp.0.join("config.toml")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(temp.0.join("config.toml.bak")).unwrap(),
+            b"previous"
+        );
+        let backup = create_protected_backup(&dir, "text", 2).unwrap();
+        assert_eq!(backup.sequence(), 1);
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn protected_backup_readback_mismatch_leaves_no_file() {
+        let temp = Temp::new();
+        std::fs::write(temp.0.join("config.toml"), b"old").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        FAIL_VERIFICATION_AT.with(|count| count.set(1));
+        let error = create_protected_backup(&dir, "text", 2).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+        assert_eq!(std::fs::read(temp.0.join("config.toml")).unwrap(), b"old");
+        let backup = create_protected_backup(&dir, "text", 2).unwrap();
+        assert_eq!(backup.sequence(), 1);
+        drop(dir);
+        clear_readonly(&temp.0);
     }
 }

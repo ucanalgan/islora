@@ -172,6 +172,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2B-2d | done: after the rename the primary is re-opened through the held directory (verified open) and must have the draft's identity and the written bytes, else `CommitUnverified` (`is_commit_unverified`); the save fails, later saves in the same locked transaction are refused, the action's own result passes through; Sonnet and Gemini 4 approve after one correction; 532 tests | `ed549da` |
 | 2B-2 cleanup | done: post-rename test hook cleared at every commit start, stale `dead_code` allow dropped, verify logs the error kind only, `autostart_transaction` test for an unverified save with a failed restore -> `SaveFailed(false)`; Sonnet: no findings; 534 tests | `dd3b913` |
 | 2B-2 conflict message | done: `SaveFailure { restored, conflict }` replaces the bare bool in `save_with_rollback` and `AutostartOutcome::SaveFailed`; conflict from `is_primary_changed` on the save error; distinct settings and calendar texts, failed restore always visible, old texts unchanged; Sonnet approves (minors only); 538 tests | `9730185` |
+| 2B-3a | done: `create_protected_backup` (core-built name over the held directory, `Draft::create_exact` CREATE_NEW of that exact name with the primary's security, write-through, read-back verify, `Draft::keep_read_only` sets READONLY by handle and restores the attributes on any later failure so drop can delete); Marco (Sonnet) wrote it, Giulia and Enzo approve after one correction; 544 tests | see `git log` |
 
 ## Resume here
 
@@ -450,6 +451,38 @@ Parked 2026-11-18 at about 21:20 UTC (00:20 local, 2026-11-19) after this step: 
 First step next: the next Phase B row (2B-3 or whichever follows 2B-2 in the
 Phase B list), as narrow Codex steps; Codex needs its window to fall below
 45% first. Weekly guard for this week: 97%.
+
+Worker names (fixed, approved by the user 2026-11-19; use them in prompts,
+reports and cost lines): Paolo = Codex author, Marco = Sonnet author, Lucia =
+Sonnet reviewer, Giulia = Gemini 4 on `agy` reviewer and tie-breaker, Enzo =
+read-only Codex reviewer and scout, Nino = Haiku or Gemini flash scans, Sofia =
+Opus for hard architecture questions. The lead is Augusto.
+
+2B-3 is split in two: 2B-3a creates one protected backup, 2B-3b applies
+retention. 2B-3a is committed: Marco wrote it (Codex was at 63%). Giulia and
+Enzo found the same major independently: after READONLY was set, a failed
+read-back left an undeletable orphan; one correction restores the attributes
+before returning. Re-review: Giulia no findings. Enzo raised a critical
+(`VerifiedFile::open_source` re-opens the parent by path) rejected as
+pre-existing: `commit_primary` uses the same call and the re-open is the 2A-1
+containment check by identity, not a write path; and a major (restore of the
+attributes can also fail -> read-only orphan) downgraded to minor: a double
+fault, and the leftover is a valid verified backup that 2B-3b retention will
+remove. Minors for the Phase B cleanup: those two, plus a test that the
+startup draft sweep leaves protected backups (the sweep is private in
+`settings.rs`; by reading, its pattern never matches the backup names), and
+the `PRIMARY_NAME` constant in `config_commit.rs` duplicates the name in
+`settings.rs`.
+
+Budget record for 2B-3a: Claude 5-hour 7 -> (see next reading), Codex 5-hour
+63 -> about 66 (two Enzo reviews); one Marco run plus one correction, two
+Giulia and two Enzo reviews.
+
+First step next: 2B-3b retention: `retention_excess` over the parsed
+protected backups picks what to delete; clear READONLY by handle and delete
+relative to the held directory; never delete the backup just created or any
+file that does not parse as a protected backup name. Owned
+`config_commit.rs` and `config_fs.rs`. Reviewers: Giulia plus Lucia or Enzo.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
