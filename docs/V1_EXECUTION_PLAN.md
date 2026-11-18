@@ -207,7 +207,7 @@ replace an existing file. Leftover drafts are swept at startup. Threat model,
 documented in `config_fs.rs`: a process of the same user that races between
 the final check and the rename is out of scope, because it could rewrite the
 config directly. Accepted minor: a DACL mismatch right after draft creation
-aborts the save (fails closed). Next: core state (`island-core::config_state`).
+aborts the save (fails closed). Core state followed; see below.
 
 Core state is parked before it started (2026-11-17): at session start Claude's
 5-hour window was at 91% (weekly 85%) and Codex's at 55%, both over the 45%
