@@ -11,3 +11,6 @@ config.toml
 
 # Local working notes.
 docs/PLAN.md
+
+# Scratch files: review copies, specs, diffs, probe scripts, logs.
+scratchpad/
