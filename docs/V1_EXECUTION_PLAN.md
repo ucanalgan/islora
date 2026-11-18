@@ -154,7 +154,8 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2A-3 | done: owner and DACL kept across replacement through exclusive drafts and pre-rename checks; 502 tests | see `git log` |
 | Core state 1/3 | done: `ProtectedBackupName` (canonical build/parse), `next_sequence`, `retention_excess`, FNV-1a `ChangeFingerprint`; 507 tests | see `git log` |
 | Core state 2/3 | done: `PrimaryObservation`, `ArtifactInventory`, `RuntimeMode`, `StartupOutcome`, `plan_startup` with rules a–e in precedence order; explicit 42-row matrix and precedence tests; 516 tests | see `git log` |
-| Core state 3/3 | next | — |
+| Core state 3/3 | done: `FailureRecord` canonical encode/decode (no setting values, errors carry no input), `retry_decision` (corrupt record fails closed), `select_candidate` (Restore / Ambiguous / NoneValid); 521 tests | see `git log` |
+| Core state cleanup | next: one commit for the collected minors (see "Resume here") | — |
 
 ## Resume here
 
@@ -255,6 +256,27 @@ fields and on `mode`, `allows_writes`, `has_recovery_artifacts`.
 
 Budget record for core state step 2: Claude 5-hour 38 → 41, Codex 5-hour
 1 → 2 (two Codex runs, one Sonnet review, one Gemini 4 review on agy).
+
+Step 3 is committed. Codex wrote it in one pass, the gate was green (no BOM,
+ASCII only, no removed lines) and the Sonnet review approved it. More minors
+for the cleanup: test the 256/257-byte boundary (256 bytes must be Malformed);
+test the error order (257 bytes of invalid UTF-8 is TooLarge; non-UTF-8 after
+a version-2 line); and move the non-test items that steps 2 and 3 appended
+after `mod tests` above it (the spec said "append").
+
+Budget record for core state step 3: Claude 5-hour 41 → 45, Codex 5-hour
+2 → 3 (one Codex run, one Sonnet review). Whole core state: Claude 35 → 45,
+Codex 0 → 3, Claude weekly 90 → 91. Each narrow step cost about 3 Claude
+points.
+
+Parked 2026-11-18 at the stop line: Claude 5-hour 45% (resets 11:10 UTC),
+weekly 91% (resets 16:00 UTC); Codex 5-hour 3%, weekly 9%. Working tree
+clean apart from the untracked `docs/V1_STABLE_CHECKLIST.md`,
+`docs/WAVE_MEASUREMENTS.md` and `scratchpad/`, none of which are part of
+this work. First step next: one Codex run for the cleanup commit covering
+every core state minor listed above (tests, doc comments, item order), with a
+Sonnet review; then 2B-2. Keep Codex steps narrow and tell Codex the file
+hygiene rules (no BOM, ASCII escapes, no removed lines) in every prompt.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
