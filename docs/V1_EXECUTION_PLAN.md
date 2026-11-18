@@ -24,11 +24,11 @@ implementer; checking goes to a reviewer with a fresh context. The lead keeps
 only plans, specs and verdicts, so its context stays small and never compacts.
 A new lead session starts every 2-3 tasks, from this file.
 
-**Budget line.** Codex: stop at 45% of its 5-hour window. Claude: the user
-allowed using the whole 5-hour window on 2026-11-18, so the 5-hour line is
-100%; the guard is Claude's weekly window, stop at 97% (raised to 100% by the
-user at 11:25 UTC on 2026-11-18 for 2B-2d). Park cleanly before
-either line (see `resume-handoff`).
+**Budget line.** Since 2026-11-19 (about 22:20 UTC on 11-18) the user allows
+using the whole 5-hour window of both providers: the 5-hour line is 100% for
+Claude and for Codex. Keep a few points in reserve for the hand-over. The
+guard is Claude's weekly window, stop at 97%. Park cleanly before either line
+(see `resume-handoff`).
 
 **Pick the worker by the job and by the limits.** Before each batch, read both
 limits: Claude through the session usage tool, Codex from
@@ -513,9 +513,69 @@ Budget record for 2B-3b: Claude 5-hour 32 -> 44, weekly 13 -> 15; Codex
 5-hour 65 (no Codex run). One Marco run, one Giulia and one Lucia review, no
 correction. Marco-written steps keep costing about 11-12 Claude points.
 
-First step next: 2C-2 (next Phase B row after 2B-3), as narrow steps; let
-Paolo (Codex) write once its 5-hour window is below 45%. Then the Phase B
-cleanup commit with every collected minor.
+2C-2 design (2026-11-19). Three Sonnet scouts mapped the readers, writers and
+startup (`scratchpad/2c2-map-*.md`, not tracked); Sofia (Opus), Enzo (Codex)
+and Giulia (Gemini 4) split the task independently
+(`scratchpad/2c2-wf-3.md` Enzo, `-4.md` Giulia, `-5.md` Sofia). The lead's
+decisions:
+- Store ownership: a process-wide store in `platform/config_store.rs` (UI
+  thread only, `Mutex<Option<..>>`, poison -> `into_inner`) handing out
+  `Arc<ConfigSnapshot>`; every function has a `*_at(base)` / instance form so
+  tests never touch the global. Not an `App` field: about 20 write call sites
+  pass rollback closures that borrow `&mut self` (Sofia; Giulia and Enzo
+  missed it). The store mutex is never held across an action, commit,
+  rollback or MessageBox (re-entrancy through `with_app`).
+- Calendar: no store on the worker; the UI thread sends the address from the
+  snapshot over the existing channel. `calendar.rs` needs no code change.
+- Modes: `Migrate` maps to `LegacyCompatible`; writes are refused only in
+  `ReadOnly` and `Recovery`, as the 2C-2 row says (Enzo wanted legacy refused
+  too; rejected: it would freeze every v1 user's settings until 2C-3). Note
+  for 2C-3: `config_state.rs` docs say legacy runs "without modifying".
+- Refusal: typed `ModeRefused` (`is_mode_refused`), checked before the
+  WriterLock and before any action closure (no autostart change); interactive
+  callers get a distinct message, startup stays silent.
+- Snapshot after a write: the committed, verified text (write-through), not a
+  new read. A failed fresh read keeps the previous snapshot; defaults never
+  overwrite live state. Reads are lock-free through `VerifiedFile`.
+- Bootstrap: `prepare_storage` stays as is and runs once; if it fails,
+  bootstrap still observes through `ConfigDir` so a missing primary with
+  artifacts becomes `Recovery`, and writes stay refused (Giulia). The calendar
+  address never reaches logs or `Debug` output.
+- Known boundary, not 2C-2: `prepare_storage` still creates the folder and
+  renames the legacy folder by path before the directory handle exists
+  (Enzo); record it for Phase B cleanup.
+
+2C-2 steps, in order, each one commit (Paolo writes; reviewers Giulia plus
+Lucia or Enzo; Enzo never when Paolo wrote alone without another kind):
+1. S1 pure classifier: new `config_store.rs` + `platform/mod.rs`. `observe`
+   (read result -> `PrimaryObservation` via `classify_ignoring_unsupported`),
+   `effective_outcome` (never `Migrate`), `writes_allowed`, `ModeRefused`.
+   No wiring. Tests per Sofia's S1 list.
+2. S2 bootstrap: `config_store.rs`, `app.rs` (replace the bare
+   `prepare_storage()` call). Inventory from `dir.entries()`; one lock-free
+   verified read; store the snapshot. Readers not switched yet.
+3. S3 readers: `app.rs`. Every `settings::read()` in `app.rs` reads the
+   snapshot; `reload()` refreshes it once. Keep the `--notch` override and
+   the presentation fallback order.
+4. S4a pure move of the write core (`try_remember_path`, `locked_update_at`,
+   `read_locked`) into `config_store.rs`; `settings.rs` keeps thin wrappers.
+5. S4b mode gate and write-through in `update` / `update_with`.
+6. S5 refusal message: `SaveFailure` gains `read_only`; settings and calendar
+   texts; startup autostart silent on refusal.
+7. S6 refresh semantics: failed refresh keeps the snapshot; reclassify on
+   refresh (v3 -> ReadOnly, back to v2 -> Normal, deleted primary ->
+   Recovery); a prepare failure stays refused until restart.
+8. S7 expected bytes = snapshot bytes (Giulia and Enzo): an external edit
+   without reload gives `PrimaryChanged`, rollback, the conflict message and a
+   reload. Behaviour change; acceptance row #22.
+9. S8 cleanup and docs: drop dead `settings::read`, update
+   `CONFIG_MIGRATION.md` "Not yet done" and acceptance rows #43 and #48.
+Budget: the design round cost Claude 5-hour 44 -> 56 (three Sonnet scouts, one
+Opus design, Haiku runners for Codex and agy). Codex steps should cost about
+3 Claude points each plus reviews.
+
+First step next: S1 above, in a new lead session (this lead's context passed
+48%). Then the Phase B cleanup commit with every collected minor after 2C-2.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
