@@ -160,7 +160,8 @@ restart. Nothing is called release-ready while a critical item is open.
 | Core state 1/3 | done: `ProtectedBackupName` (canonical build/parse), `next_sequence`, `retention_excess`, FNV-1a `ChangeFingerprint`; 507 tests | see `git log` |
 | Core state 2/3 | done: `PrimaryObservation`, `ArtifactInventory`, `RuntimeMode`, `StartupOutcome`, `plan_startup` with rules a–e in precedence order; explicit 42-row matrix and precedence tests; 516 tests | see `git log` |
 | Core state 3/3 | done: `FailureRecord` canonical encode/decode (no setting values, errors carry no input), `retry_decision` (corrupt record fails closed), `select_candidate` (Restore / Ambiguous / NoneValid); 521 tests | see `git log` |
-| Core state cleanup | next: one commit for the collected minors (see "Resume here") | — |
+| Core state cleanup | done: items above the test module (pure move), missing docs, parse and decode boundary/order tests; Sonnet: no findings | see `git log` |
+| 2B-2a | next: move `replace_in`/`replace_in_with_hook` into `platform/config_commit.rs` as `commit_primary` (pure move) | — |
 
 ## Resume here
 
@@ -282,6 +283,32 @@ this work. First step next: one Codex run for the cleanup commit covering
 every core state minor listed above (tests, doc comments, item order), with a
 Sonnet review; then 2B-2. Keep Codex steps narrow and tell Codex the file
 hygiene rules (no BOM, ASCII escapes, no removed lines) in every prompt.
+
+Core state cleanup is committed (one Codex run, gate green, every removed
+line re-added unchanged, Sonnet: no findings). Budget: Claude 5-hour 46 → 49,
+weekly 91 → 92; Codex 3 → 3.
+
+2B-2 plan, from a read-only Gemini 4 (`agy`) scan of `config_fs.rs` and
+`settings.rs`: the unique `CREATE_NEW` draft with the primary's descriptor
+and deletion of the own draft on failure already exist (`Draft::create`,
+`Drop for Draft`); write-through, draft read-back, expected-bytes check and
+post-rename verification are missing or partial. Narrow steps, each its own
+commit, each reviewed by Sonnet and Gemini 4 on `agy`:
+- 2B-2a: move `replace_in`, `replace_in_with_hook`, test-only `replace` and
+  `name` from `settings.rs` into new `platform/config_commit.rs` as
+  `commit_primary`; settings writers call it. Pure move, no behaviour change.
+- 2B-2b: drafts opened write-through; the draft is read back and compared
+  byte for byte before the rename.
+- 2B-2c: optimistic check before the rename: the primary still has the
+  expected identity and the expected bytes (the bytes the caller read under
+  the lock); otherwise abort and delete the draft.
+- 2B-2d: after the rename, re-open the primary relative to the directory and
+  verify it is the draft's file identity with the written bytes.
+Deviation from the 2B-2 row: no path-based `MoveFileExW` fallback. 2A-2 bound
+every file operation to the held directory handle so a redirected path cannot
+move a write outside it; a path-based fallback would break that, and the
+newer security invariant wins. The existing handle-based fallback
+(`FileRenameInformation` after `FileRenameInformationEx`) stays.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
