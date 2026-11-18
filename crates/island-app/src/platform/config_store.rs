@@ -207,13 +207,16 @@ fn install_once(
     snapshot
 }
 
+fn config_folder() -> io::Result<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(|base| PathBuf::from(base).join("Islora"))
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+}
+
 pub(crate) fn bootstrap() -> Arc<ConfigSnapshot> {
     install_once(&STORE, || {
         let storage_ready = prepared(settings::prepare_storage());
-        let folder = std::env::var_os("APPDATA")
-            .map(|base| PathBuf::from(base).join("Islora"))
-            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound));
-        let snapshot = observe_folder(folder, storage_ready);
+        let snapshot = observe_folder(config_folder(), storage_ready);
         eprintln!("settings startup mode: {:?}", snapshot.mode);
         snapshot
     })
@@ -224,10 +227,150 @@ pub(crate) fn snapshot() -> Option<Arc<ConfigSnapshot>> {
     STORE.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
+fn text_in(slot: &Mutex<Option<Arc<ConfigSnapshot>>>) -> Option<String> {
+    slot.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .and_then(|snapshot| snapshot.text.clone())
+}
+
+pub(crate) fn text() -> Option<String> {
+    text_in(&STORE)
+}
+
+fn refresh_folder(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    folder: io::Result<PathBuf>,
+) -> Arc<ConfigSnapshot> {
+    let previous = slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let storage_ready = previous
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.storage_ready);
+    let snapshot = Arc::new(observe_folder(folder, storage_ready));
+    if previous.is_some() {
+        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&snapshot));
+    }
+    snapshot
+}
+
+#[cfg(test)]
+fn refresh_in(slot: &Mutex<Option<Arc<ConfigSnapshot>>>, base: &Path) -> Arc<ConfigSnapshot> {
+    refresh_folder(slot, Ok(base.join("Islora")))
+}
+
+/// Refresh the installed snapshot; bootstrap must run first.
+pub(crate) fn refresh() -> Arc<ConfigSnapshot> {
+    refresh_folder(&STORE, config_folder())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use island_core::config_state::{ArtifactInventory, ProtectedBackupName, plan_startup};
+
+    #[test]
+    fn app_never_reads_config_directly() {
+        let app = include_str!("../app.rs");
+        let production = app.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("settings::read("));
+    }
+
+    #[test]
+    fn text_has_no_side_effects() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let slot = Mutex::new(None);
+        install_once(&slot, || bootstrap_at(&base));
+        let old = text_in(&slot).unwrap();
+        std::fs::write(base.join("Islora/config.toml"), b"changed").unwrap();
+        assert_eq!(text_in(&slot), Some(old));
+    }
+
+    #[test]
+    fn refresh_reads_once_and_replaces_snapshot() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let slot = Mutex::new(None);
+        let old = install_once(&slot, || bootstrap_at(&base));
+        assert!(old.storage_ready && old.writes_allowed());
+        let new_text = "config_version = \"1\"\n";
+        std::fs::write(base.join("Islora/config.toml"), new_text).unwrap();
+        let new = refresh_in(&slot, &base);
+        assert!(new.storage_ready && new.writes_allowed());
+        assert!(!Arc::ptr_eq(&old, &new));
+        assert_eq!(text_in(&slot).as_deref(), Some(new_text));
+    }
+
+    #[test]
+    fn refresh_keeps_storage_ready_false_after_prepare_failure() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("config.toml.bak"), b"invalid backup").unwrap();
+        let slot = Mutex::new(None);
+        install_once(&slot, || bootstrap_at(&base));
+        std::fs::write(folder.join("config.toml"), b"config_version = \"1\"\n").unwrap();
+        let snapshot = refresh_in(&slot, &base);
+        assert!(!snapshot.storage_ready && !snapshot.writes_allowed());
+    }
+
+    #[test]
+    fn refresh_failed_read_gives_none_text() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let slot = Mutex::new(None);
+        install_once(&slot, || bootstrap_at(&base));
+        std::fs::write(
+            base.join("Islora/config.toml"),
+            vec![b'x'; island_core::migration::MAX_CONFIG_BYTES + 1],
+        )
+        .unwrap();
+        refresh_in(&slot, &base);
+        assert!(text_in(&slot).is_none());
+    }
+
+    #[test]
+    fn refresh_on_empty_slot_is_not_ready() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        bootstrap_at(&base);
+        let slot = Mutex::new(None);
+        let snapshot = refresh_in(&slot, &base);
+        assert!(!snapshot.storage_ready);
+        assert!(snapshot.text.is_some());
+        assert!(
+            slot.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn folder_open_failure_clears_storage_ready() {
+        let base = settings::tests::temp_base();
+        let file = base.join("not_a_folder");
+        std::fs::write(&file, b"file").unwrap();
+        let snapshot = observe_folder(Ok(file.clone()), true);
+        assert!(!snapshot.storage_ready && !snapshot.writes_allowed());
+        let slot = Mutex::new(Some(Arc::new(ConfigSnapshot {
+            text: None,
+            mode: RuntimeMode::Normal,
+            storage_ready: true,
+        })));
+        let refreshed = refresh_in(&slot, &file);
+        assert!(!refreshed.storage_ready && !refreshed.writes_allowed());
+    }
 
     fn sample() -> ConfigSnapshot {
         ConfigSnapshot {

@@ -140,6 +140,7 @@ fn path() -> Option<PathBuf> {
 }
 
 /// Reads the existing settings file without creating it.
+#[allow(dead_code, reason = "removed in 2C-2 S8")]
 pub fn read() -> Option<String> {
     let path = path()?;
     match try_read_path(&path) {
@@ -311,7 +312,10 @@ pub fn try_remember(key: &str, value: &str) -> io::Result<()> {
     }
     let path =
         path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))?;
-    try_remember_path(&path, key, value)
+    let result = try_remember_path(&path, key, value);
+    // 2C-2 S4b replaces this re-read with write-through of committed text.
+    crate::platform::config_store::refresh();
+    result
 }
 
 /// Why an ordinary write must leave the configuration alone. Variants name a
@@ -458,7 +462,10 @@ pub(crate) fn locked_update<T>(
     }
     let path =
         path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))?;
-    locked_update_at(&path, action)
+    let result = locked_update_at(&path, action);
+    // 2C-2 S4b replaces this re-read with write-through of committed text.
+    crate::platform::config_store::refresh();
+    result
 }
 
 pub(crate) fn locked_update_at<T>(

@@ -53,6 +53,7 @@ use windows::Win32::UI::Shell::ABN_FULLSCREENAPP;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Result, w};
 
+use crate::platform::config_store;
 use crate::platform::settings_window::{
     self, MSG_OPEN_SETTINGS, MSG_SETTINGS_CLOSED, SettingsWindow,
 };
@@ -1667,6 +1668,7 @@ impl App {
     }
 
     fn reload(&mut self) {
+        config_store::refresh();
         apply_settings(&mut self.island);
         self.preferences = stored_preferences();
         self.renderer.set_preferences(self.preferences);
@@ -1736,7 +1738,7 @@ impl App {
             window.bring_to_front();
             return;
         }
-        let address = settings::read()
+        let address = config_store::text()
             .and_then(|text| config::read_value(&text, "calendar_ics_url"))
             .unwrap_or_default();
         let page = argument_after("--settings-page")
@@ -3484,29 +3486,29 @@ fn monitor_count() -> u32 {
 }
 
 fn stored_notices_off() -> Vec<String> {
-    settings::read().map_or_else(Vec::new, |text| config::read_notices_off(&text))
+    config_store::text().map_or_else(Vec::new, |text| config::read_notices_off(&text))
 }
 
 fn stored_windows_notifications() -> bool {
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_value(&text, "windows_notifications"))
         .as_deref()
         == Some("on")
 }
 
 fn stored_monitor() -> Option<String> {
-    settings::read().and_then(|text| config::read_value(&text, "monitor"))
+    config_store::text().and_then(|text| config::read_value(&text, "monitor"))
 }
 
 fn stored_focus_hides_notifications() -> bool {
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_value(&text, "focus_hides_notifications"))
         .as_deref()
         != Some("off")
 }
 
 fn stored_muted_apps() -> Vec<String> {
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_value(&text, "muted_apps"))
         .map_or_else(Vec::new, |value| {
             value
@@ -3523,19 +3525,19 @@ fn stored_style() -> IslandStyle {
     if std::env::args().any(|a| a == "--notch") {
         return IslandStyle::Notch;
     }
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_island_style(&text))
         .unwrap_or_default()
 }
 
 fn stored_material() -> Material {
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_material(&text))
         .unwrap_or_default()
 }
 
 fn stored_preferences() -> island_core::presentation::PresentationPreferences {
-    settings::read().map_or_else(Default::default, |text| presentation_for_config(&text))
+    config_store::text().map_or_else(Default::default, |text| presentation_for_config(&text))
 }
 
 fn presentation_for_config(text: &str) -> island_core::presentation::PresentationPreferences {
@@ -3582,7 +3584,7 @@ fn presentation_for_config(text: &str) -> island_core::presentation::Presentatio
 }
 
 fn stored_sound_wave() -> bool {
-    settings::read().is_none_or(|text| {
+    config_store::text().is_none_or(|text| {
         island_core::settings::Settings::read(&text)
             .music
             .sound_wave()
@@ -3590,7 +3592,7 @@ fn stored_sound_wave() -> bool {
 }
 
 fn stored_reduced_motion() -> bool {
-    settings::read().is_some_and(|text| {
+    config_store::text().is_some_and(|text| {
         island_core::settings::Settings::read(&text)
             .appearance
             .reduced_motion()
@@ -3598,7 +3600,7 @@ fn stored_reduced_motion() -> bool {
 }
 
 fn stored_quick_timeout() -> u64 {
-    settings::read().map_or(8, |text| {
+    config_store::text().map_or(8, |text| {
         island_core::settings::Settings::read(&text)
             .quick_controls
             .timeout_seconds()
@@ -3606,7 +3608,7 @@ fn stored_quick_timeout() -> u64 {
 }
 
 fn stored_wave_style() -> WaveStyle {
-    settings::read().map_or(WaveStyle::Normal, |text| {
+    config_store::text().map_or(WaveStyle::Normal, |text| {
         island_core::settings::Settings::read(&text)
             .music
             .wave_style()
@@ -3650,7 +3652,7 @@ fn prints_address() -> bool {
 }
 
 fn stored_progress_style() -> ProgressStyle {
-    settings::read()
+    config_store::text()
         .map(|text| config::read_progress_style(&text))
         .unwrap_or_default()
 }
@@ -3779,13 +3781,13 @@ fn applies_default_autostart(text: &str) -> bool {
 }
 
 fn stored_task_layout() -> TaskLayout {
-    settings::read()
+    config_store::text()
         .map(|text| config::read_task_layout(&text))
         .unwrap_or_default()
 }
 
 fn apply_settings(island: &mut Island) {
-    let text = settings::read().unwrap_or_default();
+    let text = config_store::text().unwrap_or_default();
     island.set_progress_style(config::read_progress_style(&text));
     island.set_task_layout(config::read_task_layout(&text));
     island.set_presets(config::read_presets(&text).unwrap_or(TIMER_PRESETS));
@@ -4224,7 +4226,7 @@ unsafe extern "system" fn edge_proc(
 }
 
 fn calendar_address() -> Option<String> {
-    settings::read().and_then(|text| config::read_value(&text, "calendar_ics_url"))
+    config_store::text().and_then(|text| config::read_value(&text, "calendar_ics_url"))
 }
 
 #[cfg(test)]

@@ -176,6 +176,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2B-3b | done: `apply_protected_retention(dir, just_created, keep)` deletes only names `retention_excess` returns, never `just_created` or a non-parsing name; each excess backup opened relative to the held directory (`open_for_delete`, no reparse follow, non-directory), identity re-checked, READONLY cleared by handle, deleted by `FileDispositionInfo`, attributes restored if the delete fails, stops at the first failure; Marco (Sonnet) wrote it, Giulia and Lucia approve in one round; 552 tests | see `git log` |
 | 2C-2 S1 | done: `platform/config_store.rs` (pure, not wired): `observe` (read result -> `PrimaryObservation`, explicit arm per classification, future version saturates to `u32`, fingerprint over the exact bytes), `effective_outcome` -> `RuntimeMode` (migrate becomes `LegacyCompatible`), `writes_allowed` (false only for `ReadOnly`, `Recovery`), `ModeRefused` / `is_mode_refused` (`PermissionDenied`); Paolo wrote it in one pass, Giulia and Lucia approve; 563 tests | see `git log` |
 | 2C-2 S2 | done: `ConfigSnapshot` (text, mode, `storage_ready`; `Debug` hides the text), `bootstrap_at` / `bootstrap` sharing one observe path (preparation once as before, inventory from `dir.entries()`, lock-free verified read relative to the held `ConfigDir`), `install_once` slot with poison recovery; app startup calls `config_store::bootstrap()`; settings.rs gains `is_stale_draft_name` (pure extraction) and visibility changes only; readers not switched; Lucia and Enzo approve (Giulia unavailable twice); 572 tests | see `git log` |
+| 2C-2 S3 | done: the 17 `settings::read()` call sites in app.rs read `config_store::text()` (parsing, defaults, `--notch`, presentation fallback unchanged); `reload()` refreshes first; `refresh` shares the observe path, does not re-prepare, copies `storage_ready`, installs nothing on an empty slot; `try_remember` / `locked_update` refresh after every write attempt (interim re-read until S4b); Lucia approves after one correction, Enzo's two majors rejected by the lead; 579 tests | see `git log` |
 
 ## Resume here
 
@@ -621,7 +622,31 @@ until 06:00 local (03:00 UTC); stay in this lead session (background turns
 cannot open a new one); pick reviewers per step by the kind of change, not a
 fixed pair.
 
-First step next: S3 readers (see the step list above).
+2C-2 S3 is committed. Paolo wrote it, one correction round (Lucia's
+accepted findings: a test that `storage_ready: true` is copied; refresh after
+every write attempt, Ok or Err, so an unverified commit cannot leave the
+snapshot older than the file; no install on an empty slot so `bootstrap`
+still prepares; one shared `config_folder()`; a folder-open failure always
+gives `storage_ready: false`). Reviewers chosen by kind: Lucia (Rust logic)
+and Enzo (lock and ordering detail); Giulia skipped (agy connection errors).
+Lead rejected Enzo's two majors: (1) refresh after `Ok(SaveFailed)` is
+correct for an interim disk re-read (atomic rename, snapshot = disk), and
+S4b's commit-only write-through replaces it; (2) a write refused before any
+attempt touches no file, and external edits are picked up by `reload()` by
+design. Minors for the Phase B cleanup: concurrent refreshes can swap an
+older observation in (store is UI-thread only; add a generation check if a
+second thread ever refreshes); `folder_open_failure_clears_storage_ready`
+should name its failure cause. For S6: `open_settings` now shows the
+snapshot's calendar address, so an editor change without Reload shows the old
+address (before S3 it read the file); decide whether `open_settings`
+refreshes first.
+
+Budget record for 2C-2 S3: Claude 5-hour 73 -> 81, weekly 19 -> 20; Codex
+5-hour 70 -> 73, weekly 27 (two Paolo runs, two Enzo runs, two Lucia runs).
+
+First step next: S4a pure move of the write core (see the step list above).
+Reviewer for a pure move: the gate's removed-lines check plus one light
+reviewer (Lucia or Nino); Paolo writes.
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.
