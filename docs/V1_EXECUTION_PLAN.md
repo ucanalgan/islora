@@ -474,9 +474,13 @@ startup draft sweep leaves protected backups (the sweep is private in
 the `PRIMARY_NAME` constant in `config_commit.rs` duplicates the name in
 `settings.rs`.
 
-Budget record for 2B-3a: Claude 5-hour 7 -> (see next reading), Codex 5-hour
-63 -> about 66 (two Enzo reviews); one Marco run plus one correction, two
-Giulia and two Enzo reviews.
+Budget record for 2B-3a: Claude 5-hour 7 -> 19, weekly 10 -> 12; Codex
+5-hour 63 -> 65 (two Enzo reviews); one Marco run plus one correction, two
+Giulia and two Enzo reviews. A Sonnet-written critical step costs about 12
+Claude 5-hour points, against about 3 when Codex writes.
+
+Lead context at 45% after three tasks this session: hand over to a new lead
+session before 2B-3b.
 
 First step next: 2B-3b retention: `retention_excess` over the parsed
 protected backups picks what to delete; clear READONLY by handle and delete
