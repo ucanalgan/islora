@@ -14,14 +14,15 @@ destructive Git operation each need the user's explicit approval.
 The lead is Claude Opus: it plans, writes each task's spec, assigns workers,
 reads their results, decides on corrections and makes the commits. Workers
 are Codex CLI and Claude agents. Codex does most of the coding; a change is
-always reviewed by the other kind of worker than the one that wrote it.
+reviewed by a reviewer the lead picks per task; the author's model may review
+only in a fresh read-only run and only alongside another model kind.
 
 **The lead does no work itself.** It never reads source files, diffs, logs or
 long documents and never edits code. Anything that needs reading goes to a
 read-only agent that returns a short summary (a page at most); code goes to an
 implementer; checking goes to a reviewer with a fresh context. The lead keeps
 only plans, specs and verdicts, so its context stays small and never compacts.
-A new lead session starts for each phase, from this file.
+A new lead session starts every 2-3 tasks, from this file.
 
 **Budget line.** Codex: stop at 45% of its 5-hour window. Claude: the user
 allowed using the whole 5-hour window on 2026-11-18, so the 5-hour line is
@@ -35,8 +36,11 @@ limits: Claude through the session usage tool, Codex from
 
 - Planning, specs and final decisions: Opus, as the lead.
 - Code: Codex, or a Claude Sonnet agent when Codex has less room.
-- Review: the other kind of worker than the author, Sonnet is enough for most
-  diffs; Opus or Codex for security-critical ones.
+- Review: the lead picks the main reviewer per task by the kind of change
+  (Sonnet, Gemini 4 on `agy`, or a fresh read-only Codex run, never alone for
+  Codex-written code); critical changes get at least two model kinds.
+- The lead is always Opus 5.5. The kind of work decides the model; limits are
+  only a brake (park near the line), never a reason to use the wrong model.
 - Gates, commits and other mechanical steps: plain commands, or a Haiku or
   Sonnet agent with low effort, never an Opus agent.
 - Hard architectural questions: give the same question to Opus and Codex
@@ -331,7 +335,8 @@ both identity and bytes; on a mismatch it aborts with a distinct error and
 the draft is deleted. Callers in `settings.rs` pass the bytes they read.
 Then 2B-2d (post-rename re-open and verify). Each step: Codex writes (state
 the file hygiene rules), lead runs the gate plus the BOM/ASCII/removed-lines
-check, Sonnet and Gemini 4 (`agy`) review in parallel.
+check; the lead names the reviewers per step (2B-2c/d are critical, so at
+least two model kinds, Gemini 4 on `agy` among them).
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
