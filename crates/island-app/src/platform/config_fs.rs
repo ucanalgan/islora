@@ -816,10 +816,12 @@ fn open_relative(
     owner_access: bool,
     assign_identity: bool,
     share_delete: bool,
+    write_through: bool,
 ) -> Result<File, ConfigFsError> {
     use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows::Wdk::Storage::FileSystem::{
-        FILE_CREATE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+        FILE_CREATE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        FILE_WRITE_THROUGH, NtCreateFile,
     };
     use windows::Win32::Foundation::{OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING};
     use windows::Win32::Storage::FileSystem::{
@@ -920,7 +922,13 @@ fn open_relative(
                     Default::default()
                 },
             if create { FILE_CREATE } else { FILE_OPEN },
-            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            FILE_OPEN_REPARSE_POINT
+                | FILE_SYNCHRONOUS_IO_NONALERT
+                | if write_through {
+                    FILE_WRITE_THROUGH
+                } else {
+                    Default::default()
+                },
             None,
             0,
         )
@@ -938,6 +946,7 @@ fn open_relative(
             false,
             assign_identity,
             share_delete,
+            write_through,
         );
     }
     if retryable && security.is_some() && create && assign_identity {
@@ -952,6 +961,7 @@ fn open_relative(
             false,
             false,
             share_delete,
+            write_through,
         );
     }
     if status.0 < 0 {
@@ -1040,6 +1050,7 @@ impl VerifiedFile {
             true,
             true,
             share_delete,
+            false,
         )?;
         let info = information(&file)?;
         if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
@@ -1218,7 +1229,7 @@ impl Draft {
             );
             let wide: Vec<u16> = std::ffi::OsStr::new(&name).encode_wide().collect();
             validate_name(&wide)?;
-            match open_relative(dir, &wide, true, true, security, true, true, false) {
+            match open_relative(dir, &wide, true, true, security, true, true, false, true) {
                 Ok(file) => {
                     let draft = Self {
                         file,
@@ -1376,6 +1387,31 @@ mod tests {
     }
     fn open_file(dir: &ConfigDir, name: &str) -> Result<VerifiedFile, ConfigFsError> {
         VerifiedFile::open(dir, name.as_ref())
+    }
+    #[test]
+    fn draft_handle_has_write_through() {
+        use windows::Wdk::Storage::FileSystem::{
+            FILE_MODE_INFORMATION, FILE_WRITE_THROUGH, FileModeInformation, NtQueryInformationFile,
+        };
+        use windows::Win32::System::IO::IO_STATUS_BLOCK;
+
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let draft = Draft::create(&dir, "config.toml".as_ref(), None).unwrap();
+        let mut info = FILE_MODE_INFORMATION::default();
+        let mut status_block = IO_STATUS_BLOCK::default();
+        // SAFETY: the draft handle is live and both output buffers are valid for the call.
+        let status = unsafe {
+            NtQueryInformationFile(
+                handle(&draft.file),
+                &mut status_block,
+                (&mut info as *mut FILE_MODE_INFORMATION).cast(),
+                std::mem::size_of::<FILE_MODE_INFORMATION>() as u32,
+                FileModeInformation,
+            )
+        };
+        assert!(status.0 >= 0, "NtQueryInformationFile failed: {status:?}");
+        assert_ne!(info.Mode & FILE_WRITE_THROUGH.0, 0);
     }
     fn symlink_result(result: io::Result<()>) -> bool {
         match result {

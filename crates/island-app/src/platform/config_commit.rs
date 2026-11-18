@@ -7,6 +7,34 @@ use super::config_fs::{ConfigDir, Draft, VerifiedFile};
 use super::settings::{name, read_verified};
 
 #[cfg(test)]
+thread_local! {
+    static FAIL_VERIFICATION_AT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn verify_draft(draft: &mut Draft, expected: &[u8]) -> io::Result<()> {
+    let actual = draft.read_back().map_err(io::Error::from)?;
+    #[cfg(test)]
+    let actual = FAIL_VERIFICATION_AT.with(|count| {
+        let remaining = count.get();
+        if remaining > 0 {
+            count.set(remaining - 1);
+        }
+        let mut actual = actual;
+        if remaining == 1 {
+            actual.push(0);
+        }
+        actual
+    });
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "configuration draft did not verify",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub(crate) fn replace(path: &Path, text: &str) -> io::Result<()> {
     let dir = ConfigDir::open(path.parent().unwrap()).map_err(io::Error::from)?;
     commit_primary(&dir, path, text)
@@ -40,6 +68,7 @@ pub(crate) fn commit_primary_with_hook(
         .map_err(io::Error::from)?;
     let mut draft = Draft::create(dir, name(path)?, security.as_ref()).map_err(io::Error::from)?;
     draft.write(text.as_bytes()).map_err(io::Error::from)?;
+    verify_draft(&mut draft, text.as_bytes())?;
     if let Some(source) = source.as_mut() {
         source.rewind().map_err(io::Error::from)?;
         let original = read_verified(source)?;
@@ -49,6 +78,7 @@ pub(crate) fn commit_primary_with_hook(
         backup_draft
             .write(original.as_bytes())
             .map_err(io::Error::from)?;
+        verify_draft(&mut backup_draft, original.as_bytes())?;
         backup_draft
             .rename(
                 dir,
@@ -79,4 +109,52 @@ pub(crate) fn commit_primary_with_hook(
         assert!(expected.same_dacl(&actual));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    struct Temp(std::path::PathBuf);
+    impl Temp {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "islora-config-commit-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn verification_mismatch_leaves_files_unchanged_and_removes_drafts() {
+        for fail_at in 1..=2 {
+            let temp = Temp::new();
+            let path = temp.0.join("config.toml");
+            let backup = temp.0.join("config.toml.bak");
+            std::fs::write(&path, b"old").unwrap();
+            std::fs::write(&backup, b"previous backup").unwrap();
+            let dir = ConfigDir::open(&temp.0).unwrap();
+            FAIL_VERIFICATION_AT.with(|count| count.set(fail_at));
+            let error = commit_primary(&dir, &path, "new").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            assert_eq!(std::fs::read(&backup).unwrap(), b"previous backup");
+            assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 2);
+        }
+    }
 }
