@@ -170,6 +170,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2B-2b | done: drafts (primary and `.bak`) opened write-through only for draft creation; each draft read back through its own handle and compared before any rename, mismatch -> `InvalidData`, no rename, draft deleted by `Drop`; Sonnet and Gemini 4: no findings; 523 tests | see `git log` |
 | 2B-2c | done: `commit_primary(dir, path, text, expected: Option<&[u8]>)`; bytes checked against the held source handle early (before any backup draft) and last in `Draft::rename`; mismatch, missing or oversized primary -> `PrimaryChanged` (`is_primary_changed`), no rename, `.bak` kept, draft deleted; Sonnet and Gemini 4 approve after one correction; 528 tests | `5dde171` |
 | 2B-2d | done: after the rename the primary is re-opened through the held directory (verified open) and must have the draft's identity and the written bytes, else `CommitUnverified` (`is_commit_unverified`); the save fails, later saves in the same locked transaction are refused, the action's own result passes through; Sonnet and Gemini 4 approve after one correction; 532 tests | `ed549da` |
+| 2B-2 cleanup | done: post-rename test hook cleared at every commit start, stale `dead_code` allow dropped, verify logs the error kind only, `autostart_transaction` test for an unverified save with a failed restore -> `SaveFailed(false)`; Sonnet: no findings; 534 tests | `dd3b913` |
 
 ## Resume here
 
@@ -408,6 +409,23 @@ reset: the 2B-2 cleanup commit (one Codex run, Sonnet review) covering the
 caller that shows a conflict message; then the next Phase B row. In specs,
 name every file the change truly needs as owned from the start; both 2B-2c
 and 2B-2d lost a run or a test to a too-narrow owned list.
+
+2B-2 cleanup is committed (`dd3b913`): one Codex run, gate green, one Sonnet
+review with no findings. Not done here, kept for its own step: wire
+`is_primary_changed` into the save-failure path so a conflict with an
+external edit shows its own message (UI text in `app.rs`).
+
+Budget record for 2B-2 cleanup: Claude 5-hour 25 -> 28, weekly 98 -> 99;
+Codex 5-hour 15 -> 1 after its reset (about 1 point).
+
+Parked 2026-11-18 at 13:40 UTC on the weekly window: Claude weekly 99%
+(resets 16:00 UTC), 5-hour 28%; Codex 5-hour 1%, weekly 11%. Working tree
+clean apart from the untracked `docs/V1_STABLE_CHECKLIST.md`,
+`docs/WAVE_MEASUREMENTS.md` and `scratchpad/`. First step next, in a new
+lead session after 16:00 UTC: the conflict-message step above (owned
+`app.rs` and `platform/settings.rs`; Sonnet review), then the next Phase B
+row. Put the weekly guard back to 97% for the new week unless the user says
+otherwise.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
