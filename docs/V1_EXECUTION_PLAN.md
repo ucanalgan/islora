@@ -23,6 +23,11 @@ implementer; checking goes to a reviewer with a fresh context. The lead keeps
 only plans, specs and verdicts, so its context stays small and never compacts.
 A new lead session starts for each phase, from this file.
 
+**Budget line.** Codex: stop at 45% of its 5-hour window. Claude: the user
+allowed using the whole 5-hour window on 2026-11-18, so the 5-hour line is
+100%; the guard is Claude's weekly window, stop at 97%. Park cleanly before
+either line (see `resume-handoff`).
+
 **Pick the worker by the job and by the limits.** Before each batch, read both
 limits: Claude through the session usage tool, Codex from
 `rate_limits.primary.used_percent` in the newest
