@@ -226,8 +226,9 @@ dependency):
    d. no migration retry while a failure is recorded for a source with the
       same fingerprint, until the source changes;
    e. migration is planned only when none of the above blocks it.
-   Review: Sonnet, plus a read-only Gemini review (skip that round on 503 or
-   quota errors and note it; never wait).
+   Review: Sonnet, plus a read-only Gemini 4 review through Antigravity
+   (`agy`, `gemini-4-hydrogen-high`; skip that round on errors and note it;
+   never wait).
 3. Failure record and retry: `FailureRecord` encode/decode (never contains a
    setting value), `RetryDecision`, `select_candidate` (Restore / Ambiguous /
    NoneValid). Review: Sonnet.
