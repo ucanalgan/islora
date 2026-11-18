@@ -171,6 +171,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2B-2c | done: `commit_primary(dir, path, text, expected: Option<&[u8]>)`; bytes checked against the held source handle early (before any backup draft) and last in `Draft::rename`; mismatch, missing or oversized primary -> `PrimaryChanged` (`is_primary_changed`), no rename, `.bak` kept, draft deleted; Sonnet and Gemini 4 approve after one correction; 528 tests | `5dde171` |
 | 2B-2d | done: after the rename the primary is re-opened through the held directory (verified open) and must have the draft's identity and the written bytes, else `CommitUnverified` (`is_commit_unverified`); the save fails, later saves in the same locked transaction are refused, the action's own result passes through; Sonnet and Gemini 4 approve after one correction; 532 tests | `ed549da` |
 | 2B-2 cleanup | done: post-rename test hook cleared at every commit start, stale `dead_code` allow dropped, verify logs the error kind only, `autostart_transaction` test for an unverified save with a failed restore -> `SaveFailed(false)`; Sonnet: no findings; 534 tests | `dd3b913` |
+| 2B-2 conflict message | done: `SaveFailure { restored, conflict }` replaces the bare bool in `save_with_rollback` and `AutostartOutcome::SaveFailed`; conflict from `is_primary_changed` on the save error; distinct settings and calendar texts, failed restore always visible, old texts unchanged; Sonnet approves (minors only); 538 tests | `9730185` |
 
 ## Resume here
 
@@ -426,6 +427,29 @@ lead session after 16:00 UTC: the conflict-message step above (owned
 `app.rs` and `platform/settings.rs`; Sonnet review), then the next Phase B
 row. Put the weekly guard back to 97% for the new week unless the user says
 otherwise.
+
+The conflict-message step is committed (`9730185`). A read-only Codex scout
+mapped the save-failure path; Codex (`gpt-6.1-terra` high) wrote it in one
+pass; gate green (fmt, clippy, 538 tests), no BOM, new non-ASCII text as
+`\u{..}` escapes, the two old texts moved byte for byte. Sonnet approved.
+Minors for the Phase B cleanup: an `autostart_transaction` test with a
+PrimaryChanged save error (asserts `restored: true, conflict: true`); rename
+bindings still called `restored` that now hold a `SaveFailure` (`app.rs`
+around 2110 and 3763, `settings.rs` around 526); one-line docs on
+`calendar_save_note` and `persistence_failure_message`. The user chose to run
+this step over the stop line (Claude 5-hour 63%, Codex 5-hour 62% at start).
+
+Budget record for the conflict-message step: Claude 5-hour 63 -> 67, weekly
+9; Codex 5-hour 62 -> 63, weekly 25 (one Codex scout, one Codex
+implementation, one Sonnet review, no correction).
+
+Parked 2026-11-18 at about 21:20 UTC (00:20 local, 2026-11-19) after this step: Claude 5-hour 67%
+(resetting now), weekly 9%; Codex 5-hour 63% (resets about 00:30 UTC), weekly
+25%. Working tree clean apart from the untracked
+`docs/V1_STABLE_CHECKLIST.md`, `docs/WAVE_MEASUREMENTS.md` and `scratchpad/`.
+First step next: the next Phase B row (2B-3 or whichever follows 2B-2 in the
+Phase B list), as narrow Codex steps; Codex needs its window to fall below
+45% first. Weekly guard for this week: 97%.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
