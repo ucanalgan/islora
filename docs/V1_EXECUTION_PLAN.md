@@ -167,7 +167,8 @@ restart. Nothing is called release-ready while a critical item is open.
 | Core state cleanup | done: items above the test module (pure move), missing docs, parse and decode boundary/order tests; Sonnet: no findings | see `git log` |
 | 2B-2a | done: `commit_primary` and `commit_primary_with_hook` in `platform/config_commit.rs`, pure move; Sonnet and Gemini 4: no findings; 521 tests | see `git log` |
 | 2B-2b | done: drafts (primary and `.bak`) opened write-through only for draft creation; each draft read back through its own handle and compared before any rename, mismatch -> `InvalidData`, no rename, draft deleted by `Drop`; Sonnet and Gemini 4: no findings; 523 tests | see `git log` |
-| 2B-2c | next: optimistic expected identity and bytes check before rename | — |
+| 2B-2c | done: `commit_primary(dir, path, text, expected: Option<&[u8]>)`; bytes checked against the held source handle early (before any backup draft) and last in `Draft::rename`; mismatch, missing or oversized primary -> `PrimaryChanged` (`is_primary_changed`), no rename, `.bak` kept, draft deleted; Sonnet and Gemini 4 approve after one correction; 528 tests | `5dde171` |
+| 2B-2d | next: post-rename re-open and verify | — |
 
 ## Resume here
 
@@ -337,6 +338,43 @@ Then 2B-2d (post-rename re-open and verify). Each step: Codex writes (state
 the file hygiene rules), lead runs the gate plus the BOM/ASCII/removed-lines
 check; the lead names the reviewers per step (2B-2c/d are critical, so at
 least two model kinds, Gemini 4 on `agy` among them).
+
+2B-2c is committed (`5dde171`). The first spec kept `config_fs.rs` out of the
+owned files, so Codex stopped without editing (the final checks live in
+`Draft::rename`, and `VerifiedFile` does not expose identity). Revision 2 made
+`config_fs.rs` owned, put the bytes check in `Draft::rename`, and dropped the
+caller's expected identity: the existing held-source re-check enforces it
+(`replaced_source_aborts_replacement`), and a swap to identical bytes needs a
+same-user racer, which the threat model excludes. Chained saves pass the text
+the previous save wrote; first run and recovery pass `None`. Gemini 4 found
+two majors (an external invalid-UTF-8 edit gave `InvalidData`, and a refused
+save had already replaced `.bak`); one Codex correction added the early check
+before `read_verified` and any backup draft. Re-review: Sonnet and Gemini 4
+approve. Minors for the phase cleanup: `is_primary_changed` is used only by
+tests (`#[allow(dead_code)]`), so wire it into a caller that shows a conflict
+message; an edit in the tiny window between the early and final checks still
+lets `.bak` take the pre-edit primary text (accepted, within the threat model);
+an atomic editor save that swaps identity after the early check would surface
+as the generic source-changed error, not `PrimaryChanged`.
+
+Budget record for 2B-2c: Claude 5-hour 57 -> (reset at 11:10 UTC) 7, weekly
+93 -> 96; Codex 5-hour 5 -> 13, weekly 10 -> 11 (three Codex runs: one that
+stopped on the spec, one implementation, one correction; two Sonnet and two
+Gemini 4 reviews). A critical step with one correction costs about 3 weekly
+Claude points and 8 Codex points.
+
+Parked 2026-11-18 at about 11:20 UTC on the weekly guard: Claude weekly 96%
+(guard 97%, resets 16:00 UTC), 5-hour 7%; Codex 5-hour 13%, weekly 11%. 2B-2d
+would cross the guard. Working tree clean apart from the untracked
+`docs/V1_STABLE_CHECKLIST.md`, `docs/WAVE_MEASUREMENTS.md` and `scratchpad/`
+(specs, diffs and review outputs only). First step next, after the weekly
+reset: 2B-2d in a new lead session. Owned files from the start:
+`config_commit.rs`, `config_fs.rs` and, for tests, `settings.rs`. After the
+primary rename, re-open the primary relative to the held directory and verify
+it is the draft's file identity (capture it from the draft handle before the
+rename) with exactly the written bytes; on a mismatch return a distinct error,
+and say in the spec what the caller does then (the rename already happened).
+Reviewers: Sonnet and Gemini 4 on `agy`, both from the first round.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
