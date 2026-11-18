@@ -177,6 +177,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2C-2 S1 | done: `platform/config_store.rs` (pure, not wired): `observe` (read result -> `PrimaryObservation`, explicit arm per classification, future version saturates to `u32`, fingerprint over the exact bytes), `effective_outcome` -> `RuntimeMode` (migrate becomes `LegacyCompatible`), `writes_allowed` (false only for `ReadOnly`, `Recovery`), `ModeRefused` / `is_mode_refused` (`PermissionDenied`); Paolo wrote it in one pass, Giulia and Lucia approve; 563 tests | see `git log` |
 | 2C-2 S2 | done: `ConfigSnapshot` (text, mode, `storage_ready`; `Debug` hides the text), `bootstrap_at` / `bootstrap` sharing one observe path (preparation once as before, inventory from `dir.entries()`, lock-free verified read relative to the held `ConfigDir`), `install_once` slot with poison recovery; app startup calls `config_store::bootstrap()`; settings.rs gains `is_stale_draft_name` (pure extraction) and visibility changes only; readers not switched; Lucia and Enzo approve (Giulia unavailable twice); 572 tests | see `git log` |
 | 2C-2 S3 | done: the 17 `settings::read()` call sites in app.rs read `config_store::text()` (parsing, defaults, `--notch`, presentation fallback unchanged); `reload()` refreshes first; `refresh` shares the observe path, does not re-prepare, copies `storage_ready`, installs nothing on an empty slot; `try_remember` / `locked_update` refresh after every write attempt (interim re-read until S4b); Lucia approves after one correction, Enzo's two majors rejected by the lead; 579 tests | see `git log` |
+| 2C-2 S4a | done: `read_locked`, `try_remember_path`, `locked_update_at` moved from settings.rs to config_store.rs, pure move (mechanical removed/added check: only `use` lines and one `pub(crate)` differ); settings.rs wrappers resolve through `use`; Nino (Haiku) approves; 579 tests | see `git log` |
 
 ## Resume here
 
@@ -644,9 +645,16 @@ refreshes first.
 Budget record for 2C-2 S3: Claude 5-hour 73 -> 81, weekly 19 -> 20; Codex
 5-hour 70 -> 73, weekly 27 (two Paolo runs, two Enzo runs, two Lucia runs).
 
-First step next: S4a pure move of the write core (see the step list above).
-Reviewer for a pure move: the gate's removed-lines check plus one light
-reviewer (Lucia or Nino); Paolo writes.
+2C-2 S4a is committed (pure move; the gate compared removed and added lines
+mechanically, then Nino checked bodies, wrappers and name resolution: no
+findings). Spec `scratchpad/spec-2c2-s4a.md`.
+
+First step next: S4b mode gate and write-through; spec ready in
+`scratchpad/spec-2c2-s4b.md` (gate before `storage_writable` and the lock;
+write-through of the last committed text with the mode reclassified from a
+folder listing, no primary re-read; `CommitUnverified` falls back to one
+re-read; no commit -> snapshot unchanged). Critical step (persistence):
+reviewers Lucia plus Giulia, or Enzo if agy is down.
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.

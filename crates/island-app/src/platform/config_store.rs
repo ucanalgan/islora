@@ -7,7 +7,8 @@ use island_core::config_state::{
 };
 use island_core::migration::{MigrationError, MigrationOutcome};
 
-use super::settings::classify_ignoring_unsupported;
+use super::config_commit;
+use super::settings::{classify_ignoring_unsupported, prepared_write, read_verified};
 
 /// Classify the result of reading the primary configuration.
 #[allow(dead_code, reason = "wired at startup in 2C-2 S2")]
@@ -90,7 +91,7 @@ pub(crate) fn is_mode_refused(error: &io::Error) -> bool {
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::config_fs::{ConfigDir, VerifiedFile};
+use super::config_fs::{ConfigDir, VerifiedFile, WriterLock};
 use super::settings;
 use island_core::config_state::{ArtifactInventory, ProtectedBackupName, plan_startup};
 
@@ -261,6 +262,56 @@ fn refresh_in(slot: &Mutex<Option<Arc<ConfigSnapshot>>>, base: &Path) -> Arc<Con
 /// Refresh the installed snapshot; bootstrap must run first.
 pub(crate) fn refresh() -> Arc<ConfigSnapshot> {
     refresh_folder(&STORE, config_folder())
+}
+
+fn read_locked(lock: &WriterLock, path: &Path) -> io::Result<String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "configuration has no name"))?;
+    let mut file = VerifiedFile::open(lock.directory(), std::ffi::OsStr::new(name))
+        .map_err(io::Error::from)?;
+    read_verified(&mut file)
+}
+
+pub(crate) fn try_remember_path(path: &Path, key: &str, value: &str) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
+    })?;
+    let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
+    let text = read_locked(&lock, path)?;
+    let updated = prepared_write(&text, key, value)?;
+    config_commit::commit_primary(lock.directory(), path, &updated, Some(text.as_bytes()))
+}
+
+pub(crate) fn locked_update_at<T>(
+    path: &Path,
+    action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
+) -> io::Result<T> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
+    })?;
+    let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
+    let text = read_locked(&lock, path)?;
+    let mut current = text.clone();
+    let mut unverified = false;
+    action(&text, &mut |key, value| {
+        if unverified {
+            return Err(io::Error::other(config_commit::CommitUnverified));
+        }
+        let updated = prepared_write(&current, key, value)?;
+        if let Err(error) = config_commit::commit_primary(
+            lock.directory(),
+            path,
+            &updated,
+            Some(current.as_bytes()),
+        ) {
+            unverified = config_commit::is_commit_unverified(&error);
+            return Err(error);
+        }
+        current = updated;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

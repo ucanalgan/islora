@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use super::config_commit;
 use super::config_fs::{ConfigDir, Draft, VerifiedFile, WriterLock, WriterMutex};
+pub(crate) use super::config_store::locked_update_at;
+use super::config_store::try_remember_path;
 use island_core::config::write_value;
 use island_core::migration::{CriticalKey, MigrationError, MigrationOutcome, prepare};
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -271,16 +273,6 @@ fn read_bounded(path: &Path) -> io::Result<String> {
     read_verified(&mut file)
 }
 
-fn read_locked(lock: &WriterLock, path: &Path) -> io::Result<String> {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "configuration has no name"))?;
-    let mut file = VerifiedFile::open(lock.directory(), std::ffi::OsStr::new(name))
-        .map_err(io::Error::from)?;
-    read_verified(&mut file)
-}
-
 pub(crate) fn read_verified(file: &mut VerifiedFile) -> io::Result<String> {
     let bytes = file
         .read_bounded(island_core::migration::MAX_CONFIG_BYTES)
@@ -441,16 +433,6 @@ pub(crate) fn prepared_write(text: &str, key: &str, value: &str) -> Result<Strin
     Ok(updated)
 }
 
-fn try_remember_path(path: &Path, key: &str, value: &str) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
-    })?;
-    let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
-    let text = read_locked(&lock, path)?;
-    let updated = prepared_write(&text, key, value)?;
-    config_commit::commit_primary(lock.directory(), path, &updated, Some(text.as_bytes()))
-}
-
 pub(crate) fn locked_update<T>(
     action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
 ) -> io::Result<T> {
@@ -466,36 +448,6 @@ pub(crate) fn locked_update<T>(
     // 2C-2 S4b replaces this re-read with write-through of committed text.
     crate::platform::config_store::refresh();
     result
-}
-
-pub(crate) fn locked_update_at<T>(
-    path: &Path,
-    action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
-) -> io::Result<T> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
-    })?;
-    let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
-    let text = read_locked(&lock, path)?;
-    let mut current = text.clone();
-    let mut unverified = false;
-    action(&text, &mut |key, value| {
-        if unverified {
-            return Err(io::Error::other(config_commit::CommitUnverified));
-        }
-        let updated = prepared_write(&current, key, value)?;
-        if let Err(error) = config_commit::commit_primary(
-            lock.directory(),
-            path,
-            &updated,
-            Some(current.as_bytes()),
-        ) {
-            unverified = config_commit::is_commit_unverified(&error);
-            return Err(error);
-        }
-        current = updated;
-        Ok(())
-    })
 }
 
 /// Details of a failed settings save and its rollback.
