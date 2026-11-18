@@ -230,6 +230,44 @@ pub(crate) fn create_protected_backup(
     Ok(backup)
 }
 
+/// Deletes the oldest protected backups beyond `keep`, as chosen by the core retention rule,
+/// and returns the deleted names oldest first. Only names that parse as a canonical
+/// `ProtectedBackupName` are ever considered; every other file is never opened. `just_created`
+/// is never deleted, and if it is not among the parsed names the call fails with `NotFound`
+/// before deleting anything. Every file operation is relative to the held directory handle.
+/// Deletion is per file and stops at the first failure, so backups deleted before a failure
+/// stay deleted (they were excess) and every file not yet reached is unchanged; the file that
+/// failed keeps its original attributes and still exists.
+#[allow(dead_code, reason = "called by migration in 2C-3")]
+pub(crate) fn apply_protected_retention(
+    dir: &ConfigDir,
+    just_created: &island_core::config_state::ProtectedBackupName,
+    keep: usize,
+) -> io::Result<Vec<island_core::config_state::ProtectedBackupName>> {
+    use island_core::config_state::{ProtectedBackupName, retention_excess};
+    let parsed: Vec<ProtectedBackupName> = dir
+        .entries()
+        .map_err(io::Error::from)?
+        .iter()
+        .filter_map(|entry| ProtectedBackupName::parse(entry.to_str()?))
+        .collect();
+    if !parsed.contains(just_created) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the protected backup just created is not in the folder",
+        ));
+    }
+    let mut excess = retention_excess(&parsed, keep);
+    excess.retain(|name| name != just_created);
+    let mut deleted = Vec::with_capacity(excess.len());
+    for name in excess {
+        VerifiedFile::delete_read_only(dir, std::ffi::OsStr::new(&name.file_name()))
+            .map_err(io::Error::from)?;
+        deleted.push(name);
+    }
+    Ok(deleted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +568,205 @@ mod tests {
         assert_eq!(std::fs::read(temp.0.join("config.toml")).unwrap(), b"old");
         let backup = create_protected_backup(&dir, "text", 2).unwrap();
         assert_eq!(backup.sequence(), 1);
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    use island_core::config_state::ProtectedBackupName;
+
+    /// Creates `count` protected backups with distinct text, oldest first.
+    fn make_backups(dir: &ConfigDir, count: usize) -> Vec<ProtectedBackupName> {
+        (1..=count)
+            .map(|index| create_protected_backup(dir, &format!("backup {index}"), 2).unwrap())
+            .collect()
+    }
+
+    fn path_of(temp: &Temp, name: &ProtectedBackupName) -> std::path::PathBuf {
+        temp.0.join(name.file_name())
+    }
+
+    /// Bytes and attributes of every file in the folder, to prove nothing changed.
+    fn snapshot(folder: &Path) -> Vec<(String, Vec<u8>, u32)> {
+        use std::os::windows::fs::MetadataExt;
+        let mut files: Vec<_> = std::fs::read_dir(folder)
+            .unwrap()
+            .flatten()
+            .map(|entry| {
+                let attributes = entry.metadata().unwrap().file_attributes();
+                let bytes = std::fs::read(entry.path()).unwrap_or_default();
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    bytes,
+                    attributes,
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn retention_keeps_newest_and_deletes_older() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let backups = make_backups(&dir, 5);
+        let deleted = apply_protected_retention(&dir, &backups[4], 3).unwrap();
+        assert_eq!(deleted, backups[..2].to_vec());
+        for old in &backups[..2] {
+            assert!(!path_of(&temp, old).exists());
+        }
+        for (index, kept) in backups.iter().enumerate().skip(2) {
+            let path = path_of(&temp, kept);
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                format!("backup {}", index + 1).as_bytes()
+            );
+            assert!(is_readonly(&path));
+        }
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 3);
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn retention_under_limit_deletes_nothing() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let backups = make_backups(&dir, 2);
+        let before = snapshot(&temp.0);
+        let deleted = apply_protected_retention(&dir, &backups[1], 3).unwrap();
+        assert!(deleted.is_empty());
+        assert_eq!(snapshot(&temp.0), before);
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn retention_never_deletes_just_created() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let backups = make_backups(&dir, 2);
+        let planted = ProtectedBackupName::new(900, 2, ChangeFingerprint::of(b"planted")).unwrap();
+        let planted_path = path_of(&temp, &planted);
+        std::fs::write(&planted_path, b"planted").unwrap();
+        let deleted = apply_protected_retention(&dir, &backups[1], 1).unwrap();
+        assert_eq!(deleted, vec![backups[0].clone()]);
+        let survivor = path_of(&temp, &backups[1]);
+        assert_eq!(std::fs::read(&survivor).unwrap(), b"backup 2");
+        assert!(is_readonly(&survivor));
+        assert_eq!(std::fs::read(&planted_path).unwrap(), b"planted");
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn retention_ignores_unparsed_names() {
+        let temp = Temp::new();
+        let unrelated = [
+            "config.toml",
+            "config.toml.bak",
+            "config.toml.1-2-3.tmp",
+            "config.protected.000001.v2.0000000000000000.BAK",
+            "config.protected.000001.v2.0000000000000000.bak.tmp",
+            "notes.txt",
+        ];
+        for name in unrelated {
+            std::fs::write(temp.0.join(name), name.as_bytes()).unwrap();
+        }
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let backups = make_backups(&dir, 4);
+        let before: Vec<_> = snapshot(&temp.0)
+            .into_iter()
+            .filter(|(name, _, _)| unrelated.contains(&name.as_str()))
+            .collect();
+        assert_eq!(before.len(), unrelated.len());
+        let deleted = apply_protected_retention(&dir, &backups[3], 1).unwrap();
+        assert_eq!(deleted, backups[..3].to_vec());
+        let after: Vec<_> = snapshot(&temp.0)
+            .into_iter()
+            .filter(|(name, _, _)| unrelated.contains(&name.as_str()))
+            .collect();
+        assert_eq!(after, before);
+        assert_eq!(
+            std::fs::read_dir(&temp.0).unwrap().count(),
+            unrelated.len() + 1
+        );
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn retention_missing_just_created_deletes_nothing() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        make_backups(&dir, 4);
+        let missing = ProtectedBackupName::new(5, 2, ChangeFingerprint::of(b"absent")).unwrap();
+        let before = snapshot(&temp.0);
+        let error = apply_protected_retention(&dir, &missing, 1).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(snapshot(&temp.0), before);
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn retention_refuses_directory_with_backup_name() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        let folder_name = ProtectedBackupName::new(1, 2, ChangeFingerprint::of(b"dir")).unwrap();
+        let folder = path_of(&temp, &folder_name);
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("inside.txt"), b"inside").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let backups = make_backups(&dir, 4);
+        assert_eq!(backups[0].sequence(), 2);
+        let before = snapshot(&temp.0);
+        let error = apply_protected_retention(&dir, &backups[3], 3).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(folder.is_dir());
+        assert_eq!(std::fs::read(folder.join("inside.txt")).unwrap(), b"inside");
+        assert_eq!(snapshot(&temp.0), before);
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn retention_failure_leaves_file_and_later_files() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let backups = make_backups(&dir, 5);
+        let before = snapshot(&temp.0);
+        // Read and write sharing only, so deleting the oldest excess backup is refused.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2)
+            .open(path_of(&temp, &backups[0]))
+            .unwrap();
+        let result = apply_protected_retention(&dir, &backups[4], 3);
+        assert!(result.is_err());
+        assert!(is_readonly(&path_of(&temp, &backups[0])));
+        assert_eq!(snapshot(&temp.0), before);
+        drop(held);
+        drop(dir);
+        clear_readonly(&temp.0);
+    }
+
+    #[test]
+    fn retention_delete_failure_restores_readonly() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let backups = make_backups(&dir, 5);
+        let before = snapshot(&temp.0);
+        super::super::config_fs::FAIL_DELETE_DISPOSITION.with(|flag| flag.set(true));
+        let error = apply_protected_retention(&dir, &backups[4], 3).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(is_readonly(&path_of(&temp, &backups[0])));
+        assert_eq!(snapshot(&temp.0), before);
+        let deleted = apply_protected_retention(&dir, &backups[4], 3).unwrap();
+        assert_eq!(deleted, backups[..2].to_vec());
         drop(dir);
         clear_readonly(&temp.0);
     }

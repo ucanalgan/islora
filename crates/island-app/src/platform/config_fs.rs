@@ -983,6 +983,74 @@ fn open_relative(
     Ok(unsafe { File::from_raw_handle(result.0) })
 }
 
+/// Opens an existing non-directory entry by its exact name relative to the held directory,
+/// without following a final reparse point, with only the access needed to read and write its
+/// attributes and to delete it. A directory with that name is refused as `IsDirectory`.
+#[allow(dead_code, reason = "called by migration in 2C-3")]
+fn open_for_delete(dir: &ConfigDir, name: &[u16]) -> Result<File, ConfigFsError> {
+    use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows::Wdk::Storage::FileSystem::{
+        FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, NtCreateFile,
+    };
+    use windows::Win32::Foundation::{OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING};
+    use windows::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAGS_AND_ATTRIBUTES, FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES,
+    };
+    use windows::Win32::System::IO::IO_STATUS_BLOCK;
+    use windows::core::PWSTR;
+    const STATUS_FILE_IS_A_DIRECTORY: u32 = 0xC000_00BA;
+    let length = u16::try_from(
+        name.len()
+            .checked_mul(2)
+            .ok_or(ConfigFsError::InvalidName)?,
+    )
+    .map_err(|_| ConfigFsError::InvalidName)?;
+    let object_name = UNICODE_STRING {
+        Length: length,
+        MaximumLength: length,
+        Buffer: PWSTR(name.as_ptr() as *mut _),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: handle(&dir._file),
+        ObjectName: &object_name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        ..Default::default()
+    };
+    let mut result = HANDLE::default();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: the directory handle and all input and output buffers remain valid for this synchronous call.
+    let status = unsafe {
+        NtCreateFile(
+            &mut result,
+            DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+            &attributes,
+            &mut status_block,
+            None,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_NON_DIRECTORY_FILE,
+            None,
+            0,
+        )
+    };
+    if status.0 as u32 == STATUS_FILE_IS_A_DIRECTORY {
+        return Err(ConfigFsError::IsDirectory);
+    }
+    if status.0 < 0 {
+        // SAFETY: converting a returned NTSTATUS does not dereference memory.
+        return Err(
+            io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32).into(),
+        );
+    }
+    // SAFETY: successful NtCreateFile returns a new owned file handle.
+    Ok(unsafe { File::from_raw_handle(result.0) })
+}
+
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_DELETE_DISPOSITION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 fn validate_name(name: &[u16]) -> Result<(), ConfigFsError> {
     let stem = name.split(|&c| c == b'.' as u16).next().unwrap_or_default();
     let stem_ascii = String::from_utf16_lossy(stem).to_ascii_uppercase();
@@ -1141,6 +1209,91 @@ impl VerifiedFile {
             )
         }
         .map_err(io::Error::from)?;
+        Ok(())
+    }
+    /// Deletes one existing file by its exact name relative to the held directory, clearing
+    /// only its read-only attribute through the handle first. A reparse point, a directory or
+    /// a file whose final name differs from `name` is refused with nothing changed. If marking
+    /// the file for deletion fails after the attribute was cleared, the original attributes
+    /// are restored through the same handle and the file stays.
+    #[allow(dead_code, reason = "called by migration in 2C-3")]
+    pub(crate) fn delete_read_only(
+        dir: &ConfigDir,
+        name: &std::ffi::OsStr,
+    ) -> Result<(), ConfigFsError> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO, FILE_DISPOSITION_INFO,
+            FileBasicInfo, FileDispositionInfo, SetFileInformationByHandle,
+        };
+        let wide: Vec<u16> = name.encode_wide().collect();
+        validate_name(&wide)?;
+        let file = open_for_delete(dir, &wide)?;
+        let info = information(&file)?;
+        if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Err(ConfigFsError::ReparsePoint);
+        }
+        if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+            return Err(ConfigFsError::IsDirectory);
+        }
+        // The same name must still resolve, under the 2A-1 checks, to the file held here.
+        let identity = identity(&file, &info)?;
+        if Self::open_source(dir, name)?.identity() != identity {
+            return Err(ConfigFsError::InvalidName);
+        }
+        let original = info.dwFileAttributes;
+        let set_attributes = |attributes: u32| -> io::Result<()> {
+            let info = FILE_BASIC_INFO {
+                FileAttributes: attributes,
+                ..Default::default()
+            };
+            // SAFETY: the file owns a valid handle and info is valid for the duration of the call.
+            unsafe {
+                SetFileInformationByHandle(
+                    handle(&file),
+                    FileBasicInfo,
+                    (&info as *const FILE_BASIC_INFO).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                )
+            }
+            .map_err(io::Error::from)
+        };
+        let was_read_only = original & FILE_ATTRIBUTE_READONLY.0 != 0;
+        if was_read_only {
+            // Zero means "leave unchanged" for this call, so a file with no other attribute
+            // is given NORMAL instead.
+            let cleared = original & !FILE_ATTRIBUTE_READONLY.0;
+            set_attributes(if cleared == 0 {
+                FILE_ATTRIBUTE_NORMAL.0
+            } else {
+                cleared
+            })?;
+        }
+        #[cfg(test)]
+        let injected = FAIL_DELETE_DISPOSITION.with(|flag| flag.replace(false));
+        #[cfg(not(test))]
+        let injected = false;
+        let deleted = if injected {
+            Err(io::Error::other("injected delete failure"))
+        } else {
+            let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+            // SAFETY: the file owns a valid handle and the disposition is valid for the call.
+            unsafe {
+                SetFileInformationByHandle(
+                    handle(&file),
+                    FileDispositionInfo,
+                    (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+                    std::mem::size_of_val(&disposition) as u32,
+                )
+            }
+            .map_err(io::Error::from)
+        };
+        if let Err(error) = deleted {
+            if was_read_only {
+                let _ = set_attributes(original);
+            }
+            return Err(error.into());
+        }
         Ok(())
     }
     pub fn security(&self) -> Result<FileSecurity, ConfigFsError> {

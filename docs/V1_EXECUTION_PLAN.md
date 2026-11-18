@@ -2,7 +2,7 @@
 
 This is the working plan for turning the repository into Islora 1.0. It is
 derived from a read-only audit of the code on branch `v1/foundation`
-(based on `main` at `9152ce5`), not from earlier claims in other documents.
+(based on `main` at `d7c5314`), not from earlier claims in other documents.
 Statuses change only when code lands with tests and an independent review.
 
 All work happens on the local branch `v1/foundation`, one reviewed commit per
@@ -156,8 +156,8 @@ restart. Nothing is called release-ready while a critical item is open.
 | Task | State | Commit |
 |---|---|---|
 | Audit and plan | done | — |
-| Existing Phase 2 work kept | done | `dbeb0d6` |
-| Formatting fix for CI | done | `7114fc9` |
+| Existing Phase 2 work kept | done | `99633f8` |
+| Formatting fix for CI | done | `dc2736d` |
 | Pre-2A | done: gate and presentation reader share one classifier that ignores only unrelated unsupported lines; 459 tests | see `git log` |
 | 2A-1 | done: `config_fs.rs` with `ConfigDir`, `FileIdentity`, `VerifiedFile`; settings reads go through it; 471 tests | see `git log` |
 | 2A-2 | done (plus review cleanup): writer lock, side-effect-free reads, `prepare_storage`, locked autostart transactions, calendar address by channel, every file operation bound to the held directory handle; 483 tests | see `git log` |
@@ -168,11 +168,12 @@ restart. Nothing is called release-ready while a critical item is open.
 | Core state cleanup | done: items above the test module (pure move), missing docs, parse and decode boundary/order tests; Sonnet: no findings | see `git log` |
 | 2B-2a | done: `commit_primary` and `commit_primary_with_hook` in `platform/config_commit.rs`, pure move; Sonnet and Gemini 4: no findings; 521 tests | see `git log` |
 | 2B-2b | done: drafts (primary and `.bak`) opened write-through only for draft creation; each draft read back through its own handle and compared before any rename, mismatch -> `InvalidData`, no rename, draft deleted by `Drop`; Sonnet and Gemini 4: no findings; 523 tests | see `git log` |
-| 2B-2c | done: `commit_primary(dir, path, text, expected: Option<&[u8]>)`; bytes checked against the held source handle early (before any backup draft) and last in `Draft::rename`; mismatch, missing or oversized primary -> `PrimaryChanged` (`is_primary_changed`), no rename, `.bak` kept, draft deleted; Sonnet and Gemini 4 approve after one correction; 528 tests | `5dde171` |
-| 2B-2d | done: after the rename the primary is re-opened through the held directory (verified open) and must have the draft's identity and the written bytes, else `CommitUnverified` (`is_commit_unverified`); the save fails, later saves in the same locked transaction are refused, the action's own result passes through; Sonnet and Gemini 4 approve after one correction; 532 tests | `ed549da` |
-| 2B-2 cleanup | done: post-rename test hook cleared at every commit start, stale `dead_code` allow dropped, verify logs the error kind only, `autostart_transaction` test for an unverified save with a failed restore -> `SaveFailed(false)`; Sonnet: no findings; 534 tests | `dd3b913` |
-| 2B-2 conflict message | done: `SaveFailure { restored, conflict }` replaces the bare bool in `save_with_rollback` and `AutostartOutcome::SaveFailed`; conflict from `is_primary_changed` on the save error; distinct settings and calendar texts, failed restore always visible, old texts unchanged; Sonnet approves (minors only); 538 tests | `9730185` |
+| 2B-2c | done: `commit_primary(dir, path, text, expected: Option<&[u8]>)`; bytes checked against the held source handle early (before any backup draft) and last in `Draft::rename`; mismatch, missing or oversized primary -> `PrimaryChanged` (`is_primary_changed`), no rename, `.bak` kept, draft deleted; Sonnet and Gemini 4 approve after one correction; 528 tests | `b1c774c` |
+| 2B-2d | done: after the rename the primary is re-opened through the held directory (verified open) and must have the draft's identity and the written bytes, else `CommitUnverified` (`is_commit_unverified`); the save fails, later saves in the same locked transaction are refused, the action's own result passes through; Sonnet and Gemini 4 approve after one correction; 532 tests | `dfe7ce3` |
+| 2B-2 cleanup | done: post-rename test hook cleared at every commit start, stale `dead_code` allow dropped, verify logs the error kind only, `autostart_transaction` test for an unverified save with a failed restore -> `SaveFailed(false)`; Sonnet: no findings; 534 tests | `9b94644` |
+| 2B-2 conflict message | done: `SaveFailure { restored, conflict }` replaces the bare bool in `save_with_rollback` and `AutostartOutcome::SaveFailed`; conflict from `is_primary_changed` on the save error; distinct settings and calendar texts, failed restore always visible, old texts unchanged; Sonnet approves (minors only); 538 tests | `71145c1` |
 | 2B-3a | done: `create_protected_backup` (core-built name over the held directory, `Draft::create_exact` CREATE_NEW of that exact name with the primary's security, write-through, read-back verify, `Draft::keep_read_only` sets READONLY by handle and restores the attributes on any later failure so drop can delete); Marco (Sonnet) wrote it, Giulia and Enzo approve after one correction; 544 tests | see `git log` |
+| 2B-3b | done: `apply_protected_retention(dir, just_created, keep)` deletes only names `retention_excess` returns, never `just_created` or a non-parsing name; each excess backup opened relative to the held directory (`open_for_delete`, no reparse follow, non-directory), identity re-checked, READONLY cleared by handle, deleted by `FileDispositionInfo`, attributes restored if the delete fails, stops at the first failure; Marco (Sonnet) wrote it, Giulia and Lucia approve in one round; 552 tests | see `git log` |
 
 ## Resume here
 
@@ -343,7 +344,7 @@ the file hygiene rules), lead runs the gate plus the BOM/ASCII/removed-lines
 check; the lead names the reviewers per step (2B-2c/d are critical, so at
 least two model kinds, Gemini 4 on `agy` among them).
 
-2B-2c is committed (`5dde171`). The first spec kept `config_fs.rs` out of the
+2B-2c is committed (`b1c774c`). The first spec kept `config_fs.rs` out of the
 owned files, so Codex stopped without editing (the final checks live in
 `Draft::rename`, and `VerifiedFile` does not expose identity). Revision 2 made
 `config_fs.rs` owned, put the bytes check in `Draft::rename`, and dropped the
@@ -381,7 +382,7 @@ and say in the spec what the caller does then (the rename already happened).
 Reviewers: Sonnet and Gemini 4 on `agy`, both from the first round.
 
 The user raised the weekly guard to 100% at 11:25 UTC and 2B-2d ran at once.
-2B-2d is committed (`ed549da`). The identity is captured from the draft's own
+2B-2d is committed (`dfe7ce3`). The identity is captured from the draft's own
 handle before the rename (`Draft::identity`; `FileIdentity` and
 `VerifiedFile::identity` are now `pub(crate)` and no longer test-only). Only
 the primary replacement is verified; backup, first run and recovery are
@@ -412,7 +413,7 @@ caller that shows a conflict message; then the next Phase B row. In specs,
 name every file the change truly needs as owned from the start; both 2B-2c
 and 2B-2d lost a run or a test to a too-narrow owned list.
 
-2B-2 cleanup is committed (`dd3b913`): one Codex run, gate green, one Sonnet
+2B-2 cleanup is committed (`9b94644`): one Codex run, gate green, one Sonnet
 review with no findings. Not done here, kept for its own step: wire
 `is_primary_changed` into the save-failure path so a conflict with an
 external edit shows its own message (UI text in `app.rs`).
@@ -429,7 +430,7 @@ lead session after 16:00 UTC: the conflict-message step above (owned
 row. Put the weekly guard back to 97% for the new week unless the user says
 otherwise.
 
-The conflict-message step is committed (`9730185`). A read-only Codex scout
+The conflict-message step is committed (`71145c1`). A read-only Codex scout
 mapped the save-failure path; Codex (`gpt-6.1-terra` high) wrote it in one
 pass; gate green (fmt, clippy, 538 tests), no BOM, new non-ASCII text as
 `\u{..}` escapes, the two old texts moved byte for byte. Sonnet approved.
@@ -487,6 +488,34 @@ protected backups picks what to delete; clear READONLY by handle and delete
 relative to the held directory; never delete the backup just created or any
 file that does not parse as a protected backup name. Owned
 `config_commit.rs` and `config_fs.rs`. Reviewers: Giulia plus Lucia or Enzo.
+
+2B-3b is committed. Marco wrote it in one pass (Codex was at 65%, the user
+chose Marco); gate green (fmt, clippy, 552 tests, no BOM, ASCII only, no
+removed lines). Giulia: no findings. Lucia approves with minors for the Phase
+B cleanup: `open_for_delete` repeats the `NtCreateFile` setup of
+`open_relative` (factor it out or say why); a failed attribute restore after a
+failed delete is dropped silently (report both); and
+`retention_failure_leaves_file_and_later_files` asserts only `is_err()`
+(check for a sharing or access error). Deviations accepted: the final-name
+check reuses `VerifiedFile::open_source` by identity, which also refuses a
+backup with extra hard links; no `SYNCHRONIZE` on the delete handle.
+2B-3 is complete. `apply_protected_retention` has no caller yet (2C-3).
+
+History rewrite (user request, 2026-11-19): `main`'s tip `9152ce5` still had
+a Claude co-author trailer. It was rebuilt without it as `d7c5314`, and the 37
+`v1/foundation` commits on top were re-parented with identical trees, authors,
+dates and messages (old `332b0ca` -> `c87bc0d`); both branches force-pushed
+with lease. Hashes in this plan are updated; older ones are in
+`backup/pre-coauthor-fix-2-main` and `backup/pre-coauthor-fix-2-foundation`
+(local only).
+
+Budget record for 2B-3b: Claude 5-hour 32 -> 44, weekly 13 -> 15; Codex
+5-hour 65 (no Codex run). One Marco run, one Giulia and one Lucia review, no
+correction. Marco-written steps keep costing about 11-12 Claude points.
+
+First step next: 2C-2 (next Phase B row after 2B-3), as narrow steps; let
+Paolo (Codex) write once its 5-hour window is below 45%. Then the Phase B
+cleanup commit with every collected minor.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
