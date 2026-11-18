@@ -152,7 +152,8 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2A-1 | done: `config_fs.rs` with `ConfigDir`, `FileIdentity`, `VerifiedFile`; settings reads go through it; 471 tests | see `git log` |
 | 2A-2 | done (plus review cleanup): writer lock, side-effect-free reads, `prepare_storage`, locked autostart transactions, calendar address by channel, every file operation bound to the held directory handle; 483 tests | see `git log` |
 | 2A-3 | done: owner and DACL kept across replacement through exclusive drafts and pre-rename checks; 502 tests | see `git log` |
-| Core state | parked: limits over the stop line at start; three-step split in "Resume here" | — |
+| Core state 1/3 | done: `ProtectedBackupName` (canonical build/parse), `next_sequence`, `retention_excess`, FNV-1a `ChangeFingerprint`; 507 tests | see `git log` |
+| Core state 2/3, 3/3 | next | — |
 
 ## Resume here
 
@@ -232,6 +233,16 @@ dependency):
 3. Failure record and retry: `FailureRecord` encode/decode (never contains a
    setting value), `RetryDecision`, `select_candidate` (Restore / Ambiguous /
    NoneValid). Review: Sonnet.
+
+Step 1 is committed (Codex `gpt-6.1-terra` high wrote it in one pass, gate
+green, Sonnet review approved). Minors collected for the end-of-phase cleanup:
+add rejection-table cases for uppercase prefix/suffix (`Protected`, `.BAK`,
+`V3`), a `-` sign and inner whitespace; document that `retention_excess`
+orders equal sequences by schema and fingerprint (only reachable with a
+planted file, since `next_sequence` never repeats a number).
+
+Budget record for core state step 1: Claude 5-hour 35 → 38, Codex 5-hour
+0 → 1 (one Codex run, one Sonnet review, no correction round).
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
