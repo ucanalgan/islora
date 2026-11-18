@@ -486,17 +486,36 @@ pub(crate) fn locked_update_at<T>(
     })
 }
 
+/// Details of a failed settings save and its rollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SaveFailure {
+    /// Whether the previous state was restored.
+    pub(crate) restored: bool,
+    /// Whether another program changed the primary configuration file.
+    pub(crate) conflict: bool,
+}
+
+impl SaveFailure {
+    /// Classify a save error and record the rollback result.
+    pub(crate) fn from_error(error: &io::Error, restored: bool) -> Self {
+        Self {
+            restored,
+            conflict: config_commit::is_primary_changed(error),
+        }
+    }
+}
+
 /// Complete a change already applied at runtime. The rollback must report
 /// whether it actually restored the previous state.
 pub(crate) fn save_with_rollback(
     save: impl FnOnce() -> io::Result<()>,
     rollback: impl FnOnce() -> bool,
-) -> Result<(), bool> {
+) -> Result<(), SaveFailure> {
     match save() {
         Ok(()) => Ok(()),
         Err(error) => {
             eprintln!("settings could not be saved: {error}");
-            Err(rollback())
+            Err(SaveFailure::from_error(&error, rollback()))
         }
     }
 }
@@ -511,12 +530,25 @@ pub fn persist_or_rollback(key: &str, value: &str, rollback: impl FnOnce() -> bo
     }
 }
 
-pub(crate) fn report_persistence_failure(restored: bool) {
-    report_error(if restored {
-        "Ayar kaydedilemedi. Önceki seçim geri yüklendi. config.toml erişimini kontrol edin."
-    } else {
-        "Ayar kaydedilemedi ve önceki durum geri yüklenemedi. Değişiklik bu oturumda veya Windows'ta etkin kalmış olabilir. Ayarları kontrol edin."
-    });
+pub(crate) fn persistence_failure_message(failure: SaveFailure) -> &'static str {
+    match (failure.restored, failure.conflict) {
+        (true, false) => {
+            "Ayar kaydedilemedi. Önceki seçim geri yüklendi. config.toml erişimini kontrol edin."
+        }
+        (false, false) => {
+            "Ayar kaydedilemedi ve önceki durum geri yüklenemedi. Değişiklik bu oturumda veya Windows'ta etkin kalmış olabilir. Ayarları kontrol edin."
+        }
+        (true, true) => {
+            "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. Dosyadaki de\u{11f}i\u{15f}ikli\u{11f}i kontrol edip tekrar deneyin."
+        }
+        (false, true) => {
+            "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi ve \u{f6}nceki durum geri y\u{fc}klenemedi. De\u{11f}i\u{15f}iklik bu oturumda veya Windows'ta etkin kalm\u{131}\u{15f} olabilir. Ayarlar\u{131} kontrol edin."
+        }
+    }
+}
+
+pub(crate) fn report_persistence_failure(failure: SaveFailure) {
+    report_error(persistence_failure_message(failure));
 }
 
 pub fn report_error(message: &str) {
@@ -766,7 +798,13 @@ mod tests {
         let result = locked_update_at(&path, |_, save| {
             Ok(save_with_rollback(|| save("autostart", "on"), || false))
         });
-        assert_eq!(result.unwrap(), Err(false));
+        assert_eq!(
+            result.unwrap(),
+            Err(SaveFailure {
+                restored: false,
+                conflict: false
+            })
+        );
     }
 
     #[test]
@@ -1345,6 +1383,87 @@ mod tests {
     }
 
     #[test]
+    fn persistence_failure_message_covers_all_outcomes() {
+        for (failure, expected) in [
+            (
+                SaveFailure {
+                    restored: true,
+                    conflict: false,
+                },
+                "Ayar kaydedilemedi. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. config.toml eri\u{15f}imini kontrol edin.",
+            ),
+            (
+                SaveFailure {
+                    restored: false,
+                    conflict: false,
+                },
+                "Ayar kaydedilemedi ve \u{f6}nceki durum geri y\u{fc}klenemedi. De\u{11f}i\u{15f}iklik bu oturumda veya Windows'ta etkin kalm\u{131}\u{15f} olabilir. Ayarlar\u{131} kontrol edin.",
+            ),
+            (
+                SaveFailure {
+                    restored: true,
+                    conflict: true,
+                },
+                "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. Dosyadaki de\u{11f}i\u{15f}ikli\u{11f}i kontrol edip tekrar deneyin.",
+            ),
+            (
+                SaveFailure {
+                    restored: false,
+                    conflict: true,
+                },
+                "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi ve \u{f6}nceki durum geri y\u{fc}klenemedi. De\u{11f}i\u{15f}iklik bu oturumda veya Windows'ta etkin kalm\u{131}\u{15f} olabilir. Ayarlar\u{131} kontrol edin.",
+            ),
+        ] {
+            assert_eq!(persistence_failure_message(failure), expected);
+        }
+    }
+
+    #[test]
+    fn save_with_rollback_ordinary_failure_is_not_conflict() {
+        let result = save_with_rollback(
+            || Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            || true,
+        );
+        assert_eq!(
+            result,
+            Err(SaveFailure {
+                restored: true,
+                conflict: false
+            })
+        );
+    }
+
+    #[test]
+    fn save_with_rollback_reports_conflict_on_external_edit() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        let original = "config_version = \"2\"\n";
+        let external = "config_version = \"2\"\n# external\n";
+        std::fs::write(&path, original).unwrap();
+        let result = save_with_rollback(
+            || {
+                locked_update_at(&path, |text, save| {
+                    assert_eq!(text, original);
+                    std::fs::write(&path, external).unwrap();
+                    save("theme", "black")
+                })
+            },
+            || true,
+        );
+        assert_eq!(
+            result,
+            Err(SaveFailure {
+                restored: true,
+                conflict: true
+            })
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+    }
+
+    #[test]
     fn save_success_and_failure_restore_runtime_and_renderer() {
         use std::cell::Cell;
         let runtime = Cell::new("new");
@@ -1365,14 +1484,23 @@ mod tests {
                 true
             },
         );
-        assert_eq!(result, Err(true));
+        assert_eq!(
+            result,
+            Err(SaveFailure {
+                restored: true,
+                conflict: false
+            })
+        );
         assert_eq!(
             (runtime.get(), renderer.get(), unrelated.get()),
             ("old", "old", "untouched")
         );
         assert_eq!(
             save_with_rollback(|| Err(io::Error::other("save failed")), || false),
-            Err(false)
+            Err(SaveFailure {
+                restored: false,
+                conflict: false
+            })
         );
     }
 

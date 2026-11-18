@@ -6,10 +6,6 @@ use std::path::Path;
 use super::config_fs::{ConfigDir, Draft, VerifiedFile};
 use super::settings::{name, read_verified};
 
-#[allow(
-    dead_code,
-    reason = "available to callers handling optimistic conflicts"
-)]
 pub(crate) fn is_primary_changed(error: &io::Error) -> bool {
     error
         .get_ref()

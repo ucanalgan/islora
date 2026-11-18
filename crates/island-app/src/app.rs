@@ -2230,7 +2230,7 @@ impl App {
         }
         if let Err(error) = settings::try_remember("calendar_ics_url", &address) {
             eprintln!("calendar settings could not be saved: {error}");
-            return Some("Takvim adresi kaydedilemedi; dosya erisimini kontrol edin");
+            return Some(calendar_save_note(&error));
         }
         self.calendar.set_address(Some(address.clone()));
         Some(if address.is_empty() {
@@ -3658,11 +3658,19 @@ fn stored_progress_style() -> ProgressStyle {
         .unwrap_or_default()
 }
 
+fn calendar_save_note(error: &std::io::Error) -> &'static str {
+    if crate::platform::config_commit::is_primary_changed(error) {
+        "Takvim adresi kaydedilemedi; config.toml baska bir program tarafindan degistirildi"
+    } else {
+        "Takvim adresi kaydedilemedi; dosya erisimini kontrol edin"
+    }
+}
+
 fn change_start_mode(
     island: &mut Island,
     mode: StartMode,
     save: impl FnOnce(&str) -> std::io::Result<()>,
-) -> Option<std::result::Result<(), bool>> {
+) -> Option<std::result::Result<(), settings::SaveFailure>> {
     let previous = island.start_mode();
     if !island.set_start_mode(mode) {
         return None;
@@ -3706,7 +3714,7 @@ enum AutostartOutcome {
     NoChange,
     SnapshotFailed,
     ApplyFailed(bool),
-    SaveFailed(bool),
+    SaveFailed(settings::SaveFailure),
 }
 
 fn autostart_transaction(
@@ -3734,7 +3742,9 @@ fn autostart_transaction(
     }
     if let Err(error) = save("autostart", if on { "on" } else { "off" }) {
         eprintln!("settings could not be saved: {error}");
-        return Ok(AutostartOutcome::SaveFailed(restore(previous.as_deref())));
+        return Ok(AutostartOutcome::SaveFailed(
+            settings::SaveFailure::from_error(&error, restore(previous.as_deref())),
+        ));
     }
     Ok(AutostartOutcome::NoChange)
 }
@@ -3755,7 +3765,10 @@ fn report_autostart_result(result: std::io::Result<AutostartOutcome>) {
         }
         Err(error) => {
             eprintln!("could not lock Windows startup setting: {error}");
-            settings::report_persistence_failure(true);
+            settings::report_persistence_failure(settings::SaveFailure {
+                restored: true,
+                conflict: false,
+            });
         }
     }
 }
@@ -4264,8 +4277,28 @@ mod tests {
             )
         })
         .unwrap();
-        assert_eq!(outcome, AutostartOutcome::SaveFailed(true));
+        assert_eq!(
+            outcome,
+            AutostartOutcome::SaveFailed(settings::SaveFailure {
+                restored: true,
+                conflict: false
+            })
+        );
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn calendar_save_note_distinguishes_conflict() {
+        let conflict = std::io::Error::other(crate::platform::config_fs::PrimaryChanged);
+        assert_eq!(
+            calendar_save_note(&conflict),
+            "Takvim adresi kaydedilemedi; config.toml baska bir program tarafindan degistirildi"
+        );
+        let ordinary = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            calendar_save_note(&ordinary),
+            "Takvim adresi kaydedilemedi; dosya erisimini kontrol edin"
+        );
     }
 
     #[test]
@@ -4288,7 +4321,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(outcome, AutostartOutcome::SaveFailed(false));
+        assert_eq!(
+            outcome,
+            AutostartOutcome::SaveFailed(settings::SaveFailure {
+                restored: false,
+                conflict: false
+            })
+        );
     }
 
     #[test]
@@ -4456,7 +4495,10 @@ mod tests {
             change_start_mode(&mut island, requested, |_| Err(std::io::Error::other(
                 "save failed"
             ))),
-            Some(Err(true))
+            Some(Err(settings::SaveFailure {
+                restored: true,
+                conflict: false
+            }))
         );
         assert_eq!(island.start_mode(), previous);
         assert_eq!(
