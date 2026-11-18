@@ -26,7 +26,8 @@ A new lead session starts every 2-3 tasks, from this file.
 
 **Budget line.** Codex: stop at 45% of its 5-hour window. Claude: the user
 allowed using the whole 5-hour window on 2026-11-18, so the 5-hour line is
-100%; the guard is Claude's weekly window, stop at 97%. Park cleanly before
+100%; the guard is Claude's weekly window, stop at 97% (raised to 100% by the
+user at 11:25 UTC on 2026-11-18 for 2B-2d). Park cleanly before
 either line (see `resume-handoff`).
 
 **Pick the worker by the job and by the limits.** Before each batch, read both
@@ -168,7 +169,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2B-2a | done: `commit_primary` and `commit_primary_with_hook` in `platform/config_commit.rs`, pure move; Sonnet and Gemini 4: no findings; 521 tests | see `git log` |
 | 2B-2b | done: drafts (primary and `.bak`) opened write-through only for draft creation; each draft read back through its own handle and compared before any rename, mismatch -> `InvalidData`, no rename, draft deleted by `Drop`; Sonnet and Gemini 4: no findings; 523 tests | see `git log` |
 | 2B-2c | done: `commit_primary(dir, path, text, expected: Option<&[u8]>)`; bytes checked against the held source handle early (before any backup draft) and last in `Draft::rename`; mismatch, missing or oversized primary -> `PrimaryChanged` (`is_primary_changed`), no rename, `.bak` kept, draft deleted; Sonnet and Gemini 4 approve after one correction; 528 tests | `5dde171` |
-| 2B-2d | next: post-rename re-open and verify | — |
+| 2B-2d | done: after the rename the primary is re-opened through the held directory (verified open) and must have the draft's identity and the written bytes, else `CommitUnverified` (`is_commit_unverified`); the save fails, later saves in the same locked transaction are refused, the action's own result passes through; Sonnet and Gemini 4 approve after one correction; 532 tests | `ed549da` |
 
 ## Resume here
 
@@ -375,6 +376,38 @@ it is the draft's file identity (capture it from the draft handle before the
 rename) with exactly the written bytes; on a mismatch return a distinct error,
 and say in the spec what the caller does then (the rename already happened).
 Reviewers: Sonnet and Gemini 4 on `agy`, both from the first round.
+
+The user raised the weekly guard to 100% at 11:25 UTC and 2B-2d ran at once.
+2B-2d is committed (`ed549da`). The identity is captured from the draft's own
+handle before the rename (`Draft::identity`; `FileIdentity` and
+`VerifiedFile::identity` are now `pub(crate)` and no longer test-only). Only
+the primary replacement is verified; backup, first run and recovery are
+unchanged (more than a one-line reuse). Sonnet and Gemini 4 both found one
+major: `locked_update_at` replaced the action's result with
+`Err(CommitUnverified)`, so the autostart flow reported "restored" after a
+failed restore, or hid the failure. One Codex correction returns the action's
+result unchanged and keeps refusing later saves in the transaction.
+Re-review: both approve. Minors for the phase cleanup: a direct
+`autostart_transaction` test with an unverified commit and a failed restore
+(the function is private to `app.rs`); clear the test-only
+`AFTER_PRIMARY_RENAME` hook at the start of `commit_primary_with_hook` so an
+early failure cannot leave it armed; drop the stale `#[allow(dead_code)]` on
+`is_commit_unverified`; optionally log the cause hidden by `.ok()` in the
+verify.
+
+Budget record for 2B-2d: Claude 5-hour 7 -> 14, weekly 96 -> 97; Codex 5-hour
+13 -> 15, weekly 11 (two Codex runs, two Sonnet and two Gemini 4 reviews).
+
+Parked 2026-11-18 at 11:40 UTC after two tasks (2B-2c, 2B-2d), per the
+2-3 task hand-over rule: Claude 5-hour 14%, weekly 97% (resets 16:00 UTC);
+Codex 5-hour 15%, weekly 11%. Working tree clean apart from the untracked
+`docs/V1_STABLE_CHECKLIST.md`, `docs/WAVE_MEASUREMENTS.md` and `scratchpad/`.
+2B-2 is complete. First step next, in a new lead session after the weekly
+reset: the 2B-2 cleanup commit (one Codex run, Sonnet review) covering the
+2B-2c and 2B-2d minors above, including wiring `is_primary_changed` into a
+caller that shows a conflict message; then the next Phase B row. In specs,
+name every file the change truly needs as owned from the start; both 2B-2c
+and 2B-2d lost a run or a test to a too-narrow owned list.
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
