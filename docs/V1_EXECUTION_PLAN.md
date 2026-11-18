@@ -153,7 +153,8 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2A-2 | done (plus review cleanup): writer lock, side-effect-free reads, `prepare_storage`, locked autostart transactions, calendar address by channel, every file operation bound to the held directory handle; 483 tests | see `git log` |
 | 2A-3 | done: owner and DACL kept across replacement through exclusive drafts and pre-rename checks; 502 tests | see `git log` |
 | Core state 1/3 | done: `ProtectedBackupName` (canonical build/parse), `next_sequence`, `retention_excess`, FNV-1a `ChangeFingerprint`; 507 tests | see `git log` |
-| Core state 2/3, 3/3 | next | — |
+| Core state 2/3 | done: `PrimaryObservation`, `ArtifactInventory`, `RuntimeMode`, `StartupOutcome`, `plan_startup` with rules a–e in precedence order; explicit 42-row matrix and precedence tests; 516 tests | see `git log` |
+| Core state 3/3 | next | — |
 
 ## Resume here
 
@@ -243,6 +244,17 @@ planted file, since `next_sequence` never repeats a number).
 
 Budget record for core state step 1: Claude 5-hour 35 → 38, Codex 5-hour
 0 → 1 (one Codex run, one Sonnet review, no correction round).
+
+Step 2 is committed. Codex wrote it in one pass; Sonnet and Gemini 4
+(`agy`, `gemini-4-hydrogen-high`) both found the same defect: Codex had added
+a BOM and turned two step-1 non-ASCII test strings into mojibake. Rated major
+(an existing test lost its meaning); one Codex correction run restored them as
+`\u{..}` escapes. Neither reviewer found a problem in the decision logic or the
+42-row table. Minor for the cleanup: doc comments on `ArtifactInventory`
+fields and on `mode`, `allows_writes`, `has_recovery_artifacts`.
+
+Budget record for core state step 2: Claude 5-hour 38 → 41, Codex 5-hour
+1 → 2 (two Codex runs, one Sonnet review, one Gemini 4 review on agy).
 
 Codex never reviews these steps, because it writes them. If a major finding is
 still open after two correction rounds, split the step or sharpen its spec.
