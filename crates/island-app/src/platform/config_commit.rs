@@ -16,8 +16,25 @@ pub(crate) fn is_primary_changed(error: &io::Error) -> bool {
         .is_some_and(|cause| cause.is::<super::config_fs::PrimaryChanged>())
 }
 
+#[derive(Debug)]
+pub(crate) struct CommitUnverified;
+impl std::fmt::Display for CommitUnverified {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("configuration commit could not be verified")
+    }
+}
+impl std::error::Error for CommitUnverified {}
+
+#[allow(dead_code, reason = "available to callers handling unverified commits")]
+pub(crate) fn is_commit_unverified(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<CommitUnverified>())
+}
+
 #[cfg(test)]
 thread_local! {
+    pub(crate) static AFTER_PRIMARY_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
     static FAIL_VERIFICATION_AT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -122,6 +139,8 @@ pub(crate) fn commit_primary_with_hook(
     }
     #[cfg(test)]
     hook();
+    let draft_identity = draft.identity().map_err(io::Error::from)?;
+    let verify_primary = security.is_some();
     draft
         .rename(
             dir,
@@ -132,6 +151,27 @@ pub(crate) fn commit_primary_with_hook(
             expected,
         )
         .map_err(io::Error::from)?;
+    #[cfg(test)]
+    AFTER_PRIMARY_RENAME.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take()
+            && verify_primary
+        {
+            hook();
+        }
+    });
+    if verify_primary {
+        let verified = (|| {
+            let mut file = VerifiedFile::open(dir, target).ok()?;
+            let identity = file.identity();
+            let bytes = file
+                .read_bounded(island_core::migration::MAX_CONFIG_BYTES)
+                .ok()?;
+            Some(identity == draft_identity && bytes == text.as_bytes())
+        })();
+        if verified != Some(true) {
+            return Err(io::Error::other(CommitUnverified));
+        }
+    }
     #[cfg(test)]
     if let Some(expected) = security.as_ref() {
         let actual = VerifiedFile::open(dir, name(path)?)
@@ -246,6 +286,37 @@ mod tests {
     }
 
     #[test]
+    fn post_rename_changes_are_unverified() {
+        for mode in 0..3 {
+            let temp = Temp::new();
+            let path = temp.0.join("config.toml");
+            std::fs::write(&path, b"old").unwrap();
+            let dir = ConfigDir::open(&temp.0).unwrap();
+            let hook_path = path.clone();
+            AFTER_PRIMARY_RENAME.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || match mode {
+                    0 => std::fs::write(&hook_path, b"changed").unwrap(),
+                    1 => {
+                        std::fs::rename(&hook_path, hook_path.with_extension("old")).unwrap();
+                        std::fs::write(&hook_path, b"new").unwrap();
+                    }
+                    _ => std::fs::remove_file(&hook_path).unwrap(),
+                }));
+            });
+            let error = commit_primary(&dir, &path, "new", Some(b"old")).unwrap_err();
+            assert!(is_commit_unverified(&error));
+            assert!(!is_primary_changed(&error));
+            assert_eq!(
+                std::fs::read(temp.0.join("config.toml.bak")).unwrap(),
+                b"old"
+            );
+            if mode == 2 {
+                assert!(!path.exists());
+            }
+        }
+    }
+
+    #[test]
     fn matching_primary_is_replaced() {
         let temp = Temp::new();
         let path = temp.0.join("config.toml");
@@ -253,5 +324,18 @@ mod tests {
         let dir = ConfigDir::open(&temp.0).unwrap();
         commit_primary(&dir, &path, "new", Some(b"old")).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn first_run_discards_post_rename_hook() {
+        let temp = Temp::new();
+        let path = temp.0.join("config.toml");
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        AFTER_PRIMARY_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|| panic!("hook must not run")));
+        });
+        commit_primary(&dir, &path, "new", None).unwrap();
+        AFTER_PRIMARY_RENAME.with(|hook| assert!(hook.borrow().is_none()));
+        commit_primary(&dir, &path, "updated", Some(b"new")).unwrap();
     }
 }

@@ -466,9 +466,21 @@ pub(crate) fn locked_update_at<T>(
     let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
     let text = read_locked(&lock, path)?;
     let mut current = text.clone();
+    let mut unverified = false;
     action(&text, &mut |key, value| {
+        if unverified {
+            return Err(io::Error::other(config_commit::CommitUnverified));
+        }
         let updated = prepared_write(&current, key, value)?;
-        config_commit::commit_primary(lock.directory(), path, &updated, Some(current.as_bytes()))?;
+        if let Err(error) = config_commit::commit_primary(
+            lock.directory(),
+            path,
+            &updated,
+            Some(current.as_bytes()),
+        ) {
+            unverified = config_commit::is_commit_unverified(&error);
+            return Err(error);
+        }
         current = updated;
         Ok(())
     })
@@ -701,6 +713,60 @@ mod tests {
         let large = "x".repeat(island_core::migration::MAX_CONFIG_BYTES + 1);
         let error = locked_update_at(&path, |_, save| save("x", &large)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn unverified_save_fails_and_stops_chained_saves() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let path = base.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let hook_path = path.clone();
+        config_commit::AFTER_PRIMARY_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(hook_path, "external").unwrap();
+            }));
+        });
+        let result = save_with_rollback(
+            || {
+                locked_update_at(&path, |_, save| {
+                    let error = save("autostart", "on").unwrap_err();
+                    assert!(config_commit::is_commit_unverified(&error));
+                    let error = save("sound_wave", "off").unwrap_err();
+                    assert!(config_commit::is_commit_unverified(&error));
+                    Ok(())
+                })
+            },
+            || true,
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+            "config_version = \"2\"\n"
+        );
+    }
+
+    #[test]
+    fn unverified_save_preserves_failed_rollback_result() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let path = base.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let hook_path = path.clone();
+        config_commit::AFTER_PRIMARY_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(hook_path, "external").unwrap();
+            }));
+        });
+        let result = locked_update_at(&path, |_, save| {
+            Ok(save_with_rollback(|| save("autostart", "on"), || false))
+        });
+        assert_eq!(result.unwrap(), Err(false));
     }
 
     #[test]

@@ -23,7 +23,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FileIdentity {
+pub(crate) struct FileIdentity {
     volume: u64,
     id: [u8; 16],
 }
@@ -279,7 +279,7 @@ impl ConfigDir {
         }
         Ok(names)
     }
-    pub fn identity(&self) -> FileIdentity {
+    pub(crate) fn identity(&self) -> FileIdentity {
         self.identity
     }
 }
@@ -1171,8 +1171,7 @@ impl VerifiedFile {
         }
         Ok(())
     }
-    #[cfg(test)]
-    pub fn identity(&self) -> FileIdentity {
+    pub(crate) fn identity(&self) -> FileIdentity {
         self._identity
     }
     pub fn read_bounded(&mut self, limit: usize) -> Result<Vec<u8>, ConfigFsError> {
@@ -1260,6 +1259,9 @@ impl Draft {
             }
         }
         unreachable!()
+    }
+    pub(crate) fn identity(&self) -> Result<FileIdentity, ConfigFsError> {
+        identity(&self.file, &information(&self.file)?)
     }
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), ConfigFsError> {
         use std::io::Write;
