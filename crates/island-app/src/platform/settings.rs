@@ -2251,7 +2251,7 @@ pub(crate) mod tests {
         let draft = folder.join("config.toml.failure.1-2-3.tmp");
         std::fs::write(&failure, b"failure").unwrap();
         std::fs::write(&draft, b"draft").unwrap();
-        let snap = super::super::config_store::bootstrap_at(&base);
+        let snap = super::super::config_store::bootstrap_at(&base, false);
         assert_eq!(
             snap.mode(),
             &island_core::config_state::RuntimeMode::Recovery
@@ -2273,7 +2273,7 @@ pub(crate) mod tests {
         let rolling = b"config_version = \"2\"\n";
         std::fs::write(&protected, b"protected").unwrap();
         std::fs::write(folder.join("config.toml.bak"), rolling).unwrap();
-        let snap = super::super::config_store::bootstrap_at(&base);
+        let snap = super::super::config_store::bootstrap_at(&base, false);
         assert_eq!(snap.mode(), &island_core::config_state::RuntimeMode::Normal);
         assert_eq!(std::fs::read(folder.join("config.toml")).unwrap(), rolling);
         assert_eq!(std::fs::read(protected).unwrap(), b"protected");

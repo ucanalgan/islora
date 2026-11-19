@@ -3,11 +3,12 @@
 use std::{fmt, io};
 
 use island_core::config_state::{
-    ChangeFingerprint, PrimaryObservation, RuntimeMode, StartupOutcome,
+    ChangeFingerprint, LegacyReason, PrimaryObservation, RuntimeMode, StartupOutcome,
 };
 use island_core::migration::{MigrationError, MigrationOutcome};
 
 use super::config_commit;
+use super::config_migrate::{self, FallbackReason, MigrationReport};
 use super::settings::{classify_ignoring_unsupported, prepared_write, read_verified};
 
 /// Classify the result of reading the primary configuration.
@@ -109,10 +110,18 @@ pub(crate) struct ConfigSnapshot {
     text: Option<String>,
     mode: RuntimeMode,
     storage_ready: bool,
+    migration_report: Arc<Mutex<Option<MigrationReport>>>,
 }
 
 // Readers and writers switch to these accessors in 2C-2 S3.
 impl ConfigSnapshot {
+    #[allow(dead_code, reason = "report consumers arrive after S6b")]
+    pub(crate) fn take_migration_report(&self) -> Option<MigrationReport> {
+        self.migration_report
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
     #[allow(dead_code, reason = "readers will use this in 2C-2 S5")]
     pub(crate) fn text(&self) -> Option<&str> {
         self.text.as_deref()
@@ -192,10 +201,11 @@ fn observe_folder_at(
                 text: None,
                 mode: effective_outcome(plan_startup(&observation, &ArtifactInventory::default())),
                 storage_ready: false,
+                migration_report: Arc::new(Mutex::new(None)),
             };
         }
     };
-    observe_directory(&dir, storage_ready, sequence, &mut || {})
+    observe_directory(&dir, storage_ready, sequence, &mut || {}).0
 }
 
 fn observe_directory(
@@ -203,7 +213,7 @@ fn observe_directory(
     storage_ready: bool,
     sequence: u64,
     checkpoint: &mut impl FnMut(),
-) -> ConfigSnapshot {
+) -> (ConfigSnapshot, StartupOutcome) {
     checkpoint();
     let inventory = inventory(dir);
     checkpoint();
@@ -215,38 +225,91 @@ fn observe_directory(
         Err(error) => (observe(Err(error)), None),
     };
     checkpoint();
+    let outcome = plan_startup(&observation, &inventory);
     let snapshot = ConfigSnapshot {
         sequence,
         text,
-        mode: effective_outcome(plan_startup(&observation, &inventory)),
+        mode: effective_outcome(outcome.clone()),
         storage_ready,
+        migration_report: Arc::new(Mutex::new(None)),
     };
     checkpoint();
-    snapshot
+    (snapshot, outcome)
 }
 
 fn bootstrap_prepared(
     base: &Path,
     result: io::Result<(bool, WriterLock)>,
+    migrate: bool,
     mut checkpoint: impl FnMut(),
 ) -> ConfigSnapshot {
     match result {
         Ok((_first_run, lock)) => {
-            let snapshot =
+            let (mut snapshot, outcome) =
                 observe_directory(lock.directory(), true, next_sequence(), &mut checkpoint);
-            drop(lock);
+            let report = if migrate && matches!(outcome, StartupOutcome::Migrate { .. }) {
+                let path = base.join("Islora").join(settings::PRIMARY_NAME);
+                let result = config_migrate::migrate_locked(
+                    &lock,
+                    &path,
+                    snapshot
+                        .text
+                        .as_ref()
+                        .expect("migration requires text")
+                        .as_bytes(),
+                );
+                let report = match result {
+                    Ok(report) => report,
+                    Err(error) => {
+                        eprintln!("migration I/O failed: {:?}", error.kind());
+                        MigrationReport::Fallback(FallbackReason::Io(error.kind()))
+                    }
+                };
+                // Re-observe under the same lock even on fallback or an I/O error.
+                // A failed read produces no text and therefore refuses writes.
+                snapshot =
+                    observe_directory(lock.directory(), true, next_sequence(), &mut checkpoint).0;
+                report
+            } else if migrate
+                && matches!(
+                    outcome,
+                    StartupOutcome::LegacyCompatible {
+                        reason: LegacyReason::RetrySuppressed
+                    }
+                )
+            {
+                MigrationReport::Fallback(FallbackReason::Suppressed)
+            } else {
+                MigrationReport::NotNeeded
+            };
+            *snapshot
+                .migration_report
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(report);
             snapshot
         }
         Err(error) => {
             eprintln!("settings storage could not be prepared: {:?}", error.kind());
-            observe_folder(Ok(base.join("Islora")), false)
+            let reason = if error.kind() == io::ErrorKind::WouldBlock
+                || matches!(error.raw_os_error(), Some(32 | 33))
+            {
+                FallbackReason::Busy
+            } else {
+                FallbackReason::Unprepared
+            };
+            let snapshot = observe_folder(Ok(base.join("Islora")), false);
+            *snapshot
+                .migration_report
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(MigrationReport::Fallback(reason));
+            snapshot
         }
     }
 }
 
 #[cfg(test)]
-pub(crate) fn bootstrap_at(base: &Path) -> ConfigSnapshot {
-    bootstrap_prepared(base, settings::prepare_storage_locked(base), || {})
+pub(crate) fn bootstrap_at(base: &Path, migrate: bool) -> ConfigSnapshot {
+    bootstrap_prepared(base, settings::prepare_storage_locked(base), migrate, || {})
 }
 
 fn install_once(
@@ -277,10 +340,19 @@ pub(crate) fn bootstrap() -> Arc<ConfigSnapshot> {
                 bootstrap_prepared(
                     &base,
                     settings::prepare_storage_locked_recorded(&base),
+                    false,
                     || {},
                 )
             }
-            None => observe_folder(config_folder(), false),
+            None => {
+                let snapshot = observe_folder(config_folder(), false);
+                *snapshot
+                    .migration_report
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) =
+                    Some(MigrationReport::Fallback(FallbackReason::Unprepared));
+                snapshot
+            }
         };
         eprintln!("settings startup mode: {:?}", snapshot.mode);
         snapshot
@@ -361,6 +433,7 @@ fn observe_refresh(
         text,
         mode: refresh_mode(&observation, &inventory),
         storage_ready,
+        migration_report: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -376,6 +449,7 @@ fn install_refresh(
         if snapshot.text.is_none() {
             snapshot.text.clone_from(&current.text);
         }
+        snapshot.migration_report = Arc::clone(&current.migration_report);
         let snapshot = Arc::new(snapshot);
         *guard = Some(Arc::clone(&snapshot));
         return snapshot;
@@ -564,6 +638,7 @@ fn finish(
                 text: Some(text),
                 mode,
                 storage_ready: previous.storage_ready,
+                migration_report: Arc::clone(&previous.migration_report),
             });
             install_newer(slot, snapshot);
         }
@@ -668,7 +743,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let path = base.join("Islora/config.toml");
         let target = path.clone();
         super::super::config_commit::AFTER_PRIMARY_RENAME.with(|hook| {
@@ -722,7 +797,7 @@ mod tests {
         std::fs::create_dir(&folder).unwrap();
         let path = folder.join("config.toml");
         std::fs::write(&path, b"config_version = \"100\"\n").unwrap();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let bytes = std::fs::read(&path).unwrap();
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert!(is_mode_refused(
@@ -744,7 +819,7 @@ mod tests {
         let folder = base.join("Islora");
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("config.toml.bak"), b"invalid backup").unwrap();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let called = std::cell::Cell::new(false);
         let err = update_with_in(&slot, &folder.join("config.toml"), |_, _| {
             called.set(true);
@@ -761,7 +836,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let path = base.join("Islora/config.toml");
         let old = slot.lock().unwrap().clone().unwrap();
         update_in(&slot, &path, "media_layout", "compact").unwrap();
@@ -780,7 +855,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let path = base.join("Islora/config.toml");
         let result: io::Result<()> = update_with_in(&slot, &path, |_, save| {
             save("media_layout", "full")?;
@@ -799,7 +874,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let path = base.join("Islora/config.toml");
         let old = slot.lock().unwrap().clone().unwrap();
         let result: io::Result<()> =
@@ -844,7 +919,7 @@ mod tests {
             std::fs::create_dir(base.join("Islora")).unwrap();
             std::fs::write(base.join("Islora/config.toml"), b"config_version = \"1\"\n").unwrap();
         }
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&a))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&a, false))));
         let path = a.join("Islora/config.toml");
         let other = b.join("Islora/config.toml");
         update_in(&slot, &path, "media_layout", "compact").unwrap();
@@ -870,7 +945,7 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
         let slot = Mutex::new(None);
-        install_once(&slot, || bootstrap_at(&base));
+        install_once(&slot, || bootstrap_at(&base, false));
         let old = text_in(&slot).unwrap();
         std::fs::write(base.join("Islora/config.toml"), b"changed").unwrap();
         assert_eq!(text_in(&slot), Some(old));
@@ -883,7 +958,7 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
         let slot = Mutex::new(None);
-        let old = install_once(&slot, || bootstrap_at(&base));
+        let old = install_once(&slot, || bootstrap_at(&base, false));
         assert!(old.storage_ready && old.writes_allowed());
         let new_text = "config_version = \"1\"\n";
         std::fs::write(base.join("Islora/config.toml"), new_text).unwrap();
@@ -921,7 +996,7 @@ mod tests {
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("config.toml.bak"), b"invalid backup").unwrap();
         let slot = Mutex::new(None);
-        install_once(&slot, || bootstrap_at(&base));
+        install_once(&slot, || bootstrap_at(&base, false));
         std::fs::write(folder.join("config.toml"), b"config_version = \"1\"\n").unwrap();
         for _ in 0..2 {
             let snapshot = refresh_in(&slot, &base);
@@ -936,7 +1011,7 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
         let slot = Mutex::new(None);
-        install_once(&slot, || bootstrap_at(&base));
+        install_once(&slot, || bootstrap_at(&base, false));
         let old = text_in(&slot);
         std::fs::write(
             base.join("Islora/config.toml"),
@@ -953,7 +1028,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let path = base.join("Islora/config.toml");
         let future = "config_version = \"100\"\n";
         std::fs::write(&path, future).unwrap();
@@ -969,7 +1044,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let path = base.join("Islora/config.toml");
         let current = text_in(&slot).unwrap();
         std::fs::write(&path, "config_version = \"100\"\n").unwrap();
@@ -987,7 +1062,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let old = text_in(&slot).unwrap();
         let path = base.join("Islora/config.toml");
         std::fs::remove_file(&path).unwrap();
@@ -1022,7 +1097,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let old = text_in(&slot);
         std::fs::remove_file(base.join("Islora/config.toml")).unwrap();
         let snapshot = refresh_in(&slot, &base);
@@ -1037,7 +1112,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        bootstrap_at(&base);
+        bootstrap_at(&base, false);
         let slot = Mutex::new(None);
         let snapshot = refresh_in(&slot, &base);
         assert!(!snapshot.storage_ready);
@@ -1062,6 +1137,7 @@ mod tests {
             text: Some("previous".into()),
             mode: RuntimeMode::Normal,
             storage_ready: true,
+            migration_report: Arc::new(Mutex::new(None)),
         })));
         let refreshed = refresh_in(&slot, &file);
         assert!(!refreshed.storage_ready && !refreshed.writes_allowed());
@@ -1070,7 +1146,7 @@ mod tests {
 
     fn write_fixture() -> (settings::tests::Temp, Mutex<Option<Arc<ConfigSnapshot>>>) {
         let base = settings::tests::temp_base();
-        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         (base, slot)
     }
 
@@ -1151,7 +1227,7 @@ mod tests {
         let (base, slot) = write_fixture();
         let path = base.join("Islora/config.toml");
         let other = settings::tests::temp_base();
-        bootstrap_at(&other);
+        bootstrap_at(&other, false);
         let copy = other.join("Islora/config.toml");
         std::fs::copy(&path, &copy).unwrap();
         update_in(&slot, &path, "new_key", "value").unwrap();
@@ -1219,6 +1295,509 @@ mod tests {
             text: None,
             mode: RuntimeMode::Normal,
             storage_ready: true,
+            migration_report: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn opt_in_migrates_once_and_reports_once() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let path = folder.join("config.toml");
+        let legacy = b"ui_density = \"minimal\"\n";
+        std::fs::write(&path, legacy).unwrap();
+        let first = bootstrap_at(&base, true);
+        let report = first.take_migration_report().unwrap();
+        let MigrationReport::Migrated { backup } = report else {
+            panic!("expected migration")
+        };
+        assert_eq!(
+            std::fs::read(folder.join(backup.file_name())).unwrap(),
+            legacy
+        );
+        assert_eq!(first.mode(), &RuntimeMode::Normal);
+        assert_eq!(
+            first.text().unwrap().as_bytes(),
+            std::fs::read(&path).unwrap()
+        );
+        assert!(first.writes_allowed());
+        assert_eq!(first.take_migration_report(), None);
+        let migrated = std::fs::read(&path).unwrap();
+        let second = bootstrap_at(&base, true);
+        assert_eq!(
+            second.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), migrated);
+    }
+
+    #[test]
+    fn disabled_and_refresh_never_migrate() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("config.toml");
+        let legacy = b"ui_density = \"minimal\"\n";
+        std::fs::write(&path, legacy).unwrap();
+        let first = bootstrap_at(&base, false);
+        assert_eq!(
+            first.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(first.mode(), &RuntimeMode::LegacyCompatible);
+        assert!(first.writes_allowed());
+        let slot = Mutex::new(Some(Arc::new(first)));
+        let refreshed = refresh_in(&slot, &base);
+        assert_eq!(refreshed.text().unwrap().as_bytes(), legacy);
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
+        assert!(
+            inventory(&ConfigDir::open(&folder).unwrap())
+                .protected_backups
+                .is_empty()
+        );
+    }
+
+    // Protected backups are read-only on Windows; restore their attributes before
+    // the unique temporary directory is removed, including on a test failure.
+    struct RemoveProtectedReadOnly(PathBuf);
+    impl Drop for RemoveProtectedReadOnly {
+        fn drop(&mut self) {
+            if let Ok(entries) = std::fs::read_dir(&self.0) {
+                for entry in entries.flatten() {
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .and_then(ProtectedBackupName::parse)
+                        .is_some()
+                        && let Ok(metadata) = entry.metadata()
+                    {
+                        let mut permissions = metadata.permissions();
+                        #[allow(clippy::permissions_set_readonly_false)]
+                        permissions.set_readonly(false);
+                        let _ = std::fs::set_permissions(entry.path(), permissions);
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReobserveCase {
+        SourceChanged,
+        Verify,
+        Io,
+    }
+
+    fn assert_reobserved(case: ReobserveCase, unreadable: bool) {
+        use island_core::config_state::FailureStage;
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let path = folder.join("config.toml");
+        let original = b"ui_density = \"minimal\"\n";
+        std::fs::write(&path, original).unwrap();
+        let replacement = if unreadable {
+            vec![b'x'; island_core::migration::MAX_CONFIG_BYTES + 1]
+        } else {
+            b"config_version = \"100\"\n".to_vec()
+        };
+        let changed_path = path.clone();
+        let replacement_for_hook = replacement.clone();
+        match case {
+            ReobserveCase::SourceChanged => {
+                super::super::config_migrate::AFTER_BACKUP.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        std::fs::write(changed_path, replacement_for_hook).unwrap();
+                    }));
+                });
+            }
+            ReobserveCase::Verify => {
+                super::super::config_commit::AFTER_PRIMARY_RENAME.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        std::fs::write(changed_path, replacement_for_hook).unwrap();
+                    }));
+                });
+            }
+            ReobserveCase::Io => {}
+        }
+        let result = settings::prepare_storage_locked(&base);
+        assert!(result.is_ok());
+        let mut checkpoints = 0;
+        let snapshot = bootstrap_prepared(&base, result, true, || {
+            checkpoints += 1;
+            if matches!(case, ReobserveCase::Io) && checkpoints == 4 {
+                std::fs::remove_file(&path).unwrap();
+            }
+            if matches!(case, ReobserveCase::Io) && checkpoints == 5 {
+                std::fs::write(&path, &replacement).unwrap();
+            }
+            // Check both sides of the second inventory/read/snapshot sequence.
+            if checkpoints == 5 || checkpoints == 8 {
+                let contender = folder.clone();
+                assert!(
+                    std::thread::spawn(move || WriterLock::acquire(&contender).is_err())
+                        .join()
+                        .unwrap()
+                );
+            }
+        });
+        assert_eq!(checkpoints, 8);
+        let expected = match case {
+            ReobserveCase::SourceChanged => FallbackReason::SourceChanged,
+            ReobserveCase::Verify => FallbackReason::Failed(FailureStage::Verify),
+            ReobserveCase::Io => FallbackReason::Io(io::ErrorKind::NotFound),
+        };
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::Fallback(expected))
+        );
+        assert_eq!(snapshot.take_migration_report(), None);
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
+        if unreadable {
+            assert_eq!(snapshot.text(), None);
+        } else {
+            assert_eq!(snapshot.text().unwrap().as_bytes(), replacement);
+            assert_eq!(snapshot.mode(), &RuntimeMode::ReadOnly);
+        }
+        assert_ne!(
+            snapshot.text().map(str::as_bytes),
+            Some(original.as_slice())
+        );
+        assert!(!snapshot.writes_allowed());
+        let slot = Mutex::new(Some(Arc::new(snapshot)));
+        assert!(is_mode_refused(
+            &update_in(&slot, &path, "x", "y").unwrap_err()
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
+    }
+
+    #[test]
+    fn source_changed_reobserves_readable_and_unreadable_under_lock() {
+        assert_reobserved(ReobserveCase::SourceChanged, false);
+        assert_reobserved(ReobserveCase::SourceChanged, true);
+    }
+
+    #[test]
+    fn verify_failure_reobserves_readable_and_unreadable_under_lock() {
+        assert_reobserved(ReobserveCase::Verify, false);
+        assert_reobserved(ReobserveCase::Verify, true);
+    }
+
+    #[test]
+    fn source_removed_reobserves_new_protected_backup_inventory() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let path = folder.join("config.toml");
+        std::fs::write(&path, b"ui_density = \"minimal\"\n").unwrap();
+        let changed_path = path.clone();
+        super::super::config_migrate::AFTER_BACKUP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_file(changed_path).unwrap();
+            }));
+        });
+        let result = settings::prepare_storage_locked(&base);
+        assert!(result.is_ok());
+        let mut checkpoints = 0;
+        let snapshot = bootstrap_prepared(&base, result, true, || {
+            checkpoints += 1;
+            if checkpoints == 5 || checkpoints == 8 {
+                let contender = folder.clone();
+                assert!(
+                    std::thread::spawn(move || WriterLock::acquire(&contender).is_err())
+                        .join()
+                        .unwrap()
+                );
+            }
+        });
+        assert_eq!(checkpoints, 8);
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::Fallback(FallbackReason::SourceChanged))
+        );
+        assert_eq!(snapshot.mode(), &RuntimeMode::Recovery);
+        assert_eq!(snapshot.text(), None);
+        assert!(!snapshot.writes_allowed());
+        assert!(!path.exists());
+        assert_eq!(
+            inventory(&ConfigDir::open(&folder).unwrap())
+                .protected_backups
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn migration_io_error_reobserves_readable_and_unreadable_under_lock() {
+        assert_reobserved(ReobserveCase::Io, false);
+        assert_reobserved(ReobserveCase::Io, true);
+    }
+
+    #[test]
+    fn migration_report_follows_installed_snapshots_and_is_one_shot() {
+        for consume_before in [false, true] {
+            let initial = Arc::new(sample());
+            *initial.migration_report.lock().unwrap() =
+                Some(MigrationReport::Fallback(FallbackReason::Busy));
+            let slot = Mutex::new(Some(Arc::clone(&initial)));
+            if consume_before {
+                assert_eq!(
+                    initial.take_migration_report(),
+                    Some(MigrationReport::Fallback(FallbackReason::Busy))
+                );
+            }
+            let observed = observe_refresh(Err(io::ErrorKind::NotFound.into()), Some(&initial), 1);
+            let refreshed = install_refresh(&slot, observed);
+            finish(
+                &slot,
+                Path::new("config.toml"),
+                &refreshed,
+                Committed::Text("config_version = \"2\"\n".into(), 2),
+            );
+            let updated = slot.lock().unwrap().as_ref().unwrap().clone();
+            assert!(!Arc::ptr_eq(&initial, &refreshed));
+            assert!(!Arc::ptr_eq(&refreshed, &updated));
+            if !consume_before {
+                assert_eq!(
+                    initial.take_migration_report(),
+                    Some(MigrationReport::Fallback(FallbackReason::Busy))
+                );
+            }
+            assert_eq!(initial.take_migration_report(), None);
+            assert_eq!(refreshed.take_migration_report(), None);
+            assert_eq!(updated.take_migration_report(), None);
+        }
+    }
+
+    #[test]
+    fn distinct_snapshots_do_not_share_bootstrap_report() {
+        let first = sample();
+        let second = sample();
+        *first.migration_report.lock().unwrap() = Some(MigrationReport::NotNeeded);
+        *second.migration_report.lock().unwrap() = Some(MigrationReport::NotNeeded);
+        assert_eq!(
+            first.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(first.take_migration_report(), None);
+        assert_eq!(
+            second.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(second.take_migration_report(), None);
+    }
+
+    #[test]
+    fn migration_report_survives_refresh_and_is_shared_with_old_snapshot() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for consume_before in [false, true] {
+            let base = settings::tests::temp_base();
+            let first = Arc::new(bootstrap_at(&base, false));
+            let slot = Mutex::new(Some(Arc::clone(&first)));
+            if consume_before {
+                assert_eq!(
+                    first.take_migration_report(),
+                    Some(MigrationReport::NotNeeded)
+                );
+            }
+            let refreshed = refresh_in(&slot, &base);
+            assert!(!Arc::ptr_eq(&first, &refreshed));
+            if !consume_before {
+                assert_eq!(
+                    refreshed.take_migration_report(),
+                    Some(MigrationReport::NotNeeded)
+                );
+            }
+            assert_eq!(first.take_migration_report(), None);
+            assert_eq!(refreshed.take_migration_report(), None);
+        }
+    }
+
+    #[test]
+    fn migration_report_survives_update_and_is_shared_with_old_snapshot() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for consume_before in [false, true] {
+            let base = settings::tests::temp_base();
+            let first = Arc::new(bootstrap_at(&base, false));
+            let path = base.join("Islora/config.toml");
+            let slot = Mutex::new(Some(Arc::clone(&first)));
+            if consume_before {
+                assert_eq!(
+                    first.take_migration_report(),
+                    Some(MigrationReport::NotNeeded)
+                );
+            }
+            update_in(&slot, &path, "media_layout", "compact").unwrap();
+            let updated = slot.lock().unwrap().as_ref().unwrap().clone();
+            assert!(!Arc::ptr_eq(&first, &updated));
+            if !consume_before {
+                assert_eq!(
+                    updated.take_migration_report(),
+                    Some(MigrationReport::NotNeeded)
+                );
+            }
+            assert_eq!(first.take_migration_report(), None);
+            assert_eq!(updated.take_migration_report(), None);
+        }
+    }
+
+    #[test]
+    fn migration_report_survives_failed_refresh_and_update() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let first = Arc::new(bootstrap_at(&base, false));
+        let slot = Mutex::new(Some(Arc::clone(&first)));
+        let missing = base.join("missing");
+        let refreshed = refresh_in(&slot, &missing);
+        assert!(!refreshed.writes_allowed());
+        assert!(update_in(&slot, &missing.join("config.toml"), "x", "y").is_err());
+        assert_eq!(
+            refreshed.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(first.take_migration_report(), None);
+        assert_eq!(refreshed.take_migration_report(), None);
+    }
+
+    #[test]
+    fn migration_report_survives_unverified_update_refresh() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let first = Arc::new(bootstrap_at(&base, false));
+        let path = base.join("Islora/config.toml");
+        let slot = Mutex::new(Some(Arc::clone(&first)));
+        let target = path.clone();
+        super::super::config_commit::AFTER_PRIMARY_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(target, b"config_version = \"100\"\n").unwrap();
+            }));
+        });
+        let error = update_in(&slot, &path, "media_layout", "compact").unwrap_err();
+        assert!(config_commit::is_commit_unverified(&error));
+        let refreshed = slot.lock().unwrap().as_ref().unwrap().clone();
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+        assert_eq!(
+            refreshed.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(first.take_migration_report(), None);
+        assert_eq!(refreshed.take_migration_report(), None);
+    }
+
+    #[test]
+    fn matching_and_corrupt_failure_records_report_suppressed_only_when_enabled() {
+        use island_core::config_state::{FailureRecord, FailureStage};
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let legacy = b"ui_density = \"minimal\"\n";
+        let record = FailureRecord {
+            source: ChangeFingerprint::of(legacy),
+            from_schema: 1,
+            stage: FailureStage::Backup,
+            attempts: 1,
+        }
+        .encode();
+        for failure in [record.as_bytes(), b"corrupt".as_slice()] {
+            for migrate in [false, true] {
+                let base = settings::tests::temp_base();
+                let folder = base.join("Islora");
+                std::fs::create_dir(&folder).unwrap();
+                let path = folder.join("config.toml");
+                let record_path = folder.join(config_commit::FAILURE_RECORD_NAME);
+                std::fs::write(&path, legacy).unwrap();
+                std::fs::write(&record_path, failure).unwrap();
+                let snapshot = bootstrap_at(&base, migrate);
+                let expected = if migrate {
+                    MigrationReport::Fallback(FallbackReason::Suppressed)
+                } else {
+                    MigrationReport::NotNeeded
+                };
+                assert_eq!(snapshot.take_migration_report(), Some(expected));
+                assert_eq!(snapshot.take_migration_report(), None);
+                assert_eq!(snapshot.text().unwrap().as_bytes(), legacy);
+                assert_eq!(snapshot.mode(), &RuntimeMode::LegacyCompatible);
+                assert!(snapshot.writes_allowed());
+                assert_eq!(std::fs::read(&path).unwrap(), legacy);
+                assert_eq!(std::fs::read(&record_path).unwrap(), failure);
+                let mut names: Vec<_> = std::fs::read_dir(&folder)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                names.sort();
+                let mut expected_names: Vec<std::ffi::OsString> = vec![
+                    settings::PRIMARY_NAME.into(),
+                    config_commit::FAILURE_RECORD_NAME.into(),
+                ];
+                expected_names.sort();
+                assert_eq!(names, expected_names);
+            }
+        }
+    }
+
+    #[test]
+    fn matching_failure_does_not_override_future_or_invalid_precedence() {
+        use island_core::config_state::{FailureRecord, FailureStage};
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for (source, mode) in [
+            (
+                b"config_version = \"100\"\n".as_slice(),
+                RuntimeMode::ReadOnly,
+            ),
+            (
+                b"config_version = \"invalid\"\n".as_slice(),
+                RuntimeMode::LegacyCompatible,
+            ),
+        ] {
+            let base = settings::tests::temp_base();
+            let folder = base.join("Islora");
+            std::fs::create_dir(&folder).unwrap();
+            let path = folder.join("config.toml");
+            let record_path = folder.join(config_commit::FAILURE_RECORD_NAME);
+            let record = FailureRecord {
+                source: ChangeFingerprint::of(source),
+                from_schema: 1,
+                stage: FailureStage::Backup,
+                attempts: 1,
+            }
+            .encode();
+            std::fs::write(&path, source).unwrap();
+            std::fs::write(&record_path, &record).unwrap();
+            let snapshot = bootstrap_at(&base, true);
+            assert_eq!(
+                snapshot.take_migration_report(),
+                Some(MigrationReport::NotNeeded)
+            );
+            assert_eq!(snapshot.take_migration_report(), None);
+            assert_eq!(snapshot.mode(), &mode);
+            assert_eq!(std::fs::read(&path).unwrap(), source);
+            assert_eq!(std::fs::read(&record_path).unwrap(), record.as_bytes());
         }
     }
 
@@ -1228,7 +1807,7 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let base = settings::tests::temp_base();
-        let snap = bootstrap_at(&base);
+        let snap = bootstrap_at(&base, false);
         assert_eq!(snap.mode(), &RuntimeMode::Normal);
         assert!(snap.storage_ready && snap.writes_allowed());
         assert!(snap.text().is_some());
@@ -1243,7 +1822,7 @@ mod tests {
         let result = settings::prepare_storage_locked(&base);
         let folder = base.join("Islora");
         let mut checkpoints = 0;
-        let snapshot = bootstrap_prepared(&base, result, || {
+        let snapshot = bootstrap_prepared(&base, result, false, || {
             checkpoints += 1;
             let contender = folder.clone();
             assert!(
@@ -1274,12 +1853,16 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let lock = WriterLock::acquire(&folder).unwrap();
         let other = base.to_path_buf();
-        let snapshot = std::thread::spawn(move || bootstrap_at(&other))
+        let snapshot = std::thread::spawn(move || bootstrap_at(&other, true))
             .join()
             .unwrap();
         assert_eq!(snapshot.text(), Some(std::str::from_utf8(bytes).unwrap()));
         assert_eq!(snapshot.mode(), &RuntimeMode::LegacyCompatible);
         assert!(!snapshot.storage_ready && !snapshot.writes_allowed());
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::Fallback(FallbackReason::Busy))
+        );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         drop(lock);
     }
@@ -1331,7 +1914,7 @@ mod tests {
             inventory(&ConfigDir::open(&folder).unwrap()).recorded_failure,
             None
         );
-        let snapshot = bootstrap_at(&base);
+        let snapshot = bootstrap_at(&base, false);
         assert_eq!(snapshot.mode(), &RuntimeMode::Recovery);
         assert!(!folder.join("config.toml").exists());
     }
@@ -1359,7 +1942,7 @@ mod tests {
         let path = folder.join("config.toml");
         let bytes = b"config_version = \"1\"\n";
         std::fs::write(&path, bytes).unwrap();
-        let snap = bootstrap_at(&base);
+        let snap = bootstrap_at(&base, false);
         assert_eq!(snap.mode(), &RuntimeMode::LegacyCompatible);
         assert!(snap.writes_allowed());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
@@ -1376,7 +1959,7 @@ mod tests {
         let path = folder.join("config.toml");
         let bytes = b"config_version = \"100\"\n";
         std::fs::write(&path, bytes).unwrap();
-        let snap = bootstrap_at(&base);
+        let snap = bootstrap_at(&base, false);
         assert_eq!(snap.mode(), &RuntimeMode::ReadOnly);
         assert!(!snap.writes_allowed());
         assert!(snap.text().is_some());
@@ -1394,7 +1977,7 @@ mod tests {
         let path = folder.join("config.toml");
         let bytes = vec![b'x'; island_core::migration::MAX_CONFIG_BYTES + 1];
         std::fs::write(&path, &bytes).unwrap();
-        let snap = bootstrap_at(&base);
+        let snap = bootstrap_at(&base, false);
         assert_eq!(snap.mode(), &RuntimeMode::LegacyCompatible);
         assert!(snap.text().is_none());
         assert!(snap.storage_ready);
@@ -1413,8 +1996,12 @@ mod tests {
         let path = folder.join("config.toml.bak");
         let bytes = b"invalid backup";
         std::fs::write(&path, bytes).unwrap();
-        let snap = bootstrap_at(&base);
+        let snap = bootstrap_at(&base, true);
         assert!(!snap.storage_ready);
+        assert_eq!(
+            snap.take_migration_report(),
+            Some(MigrationReport::Fallback(FallbackReason::Unprepared))
+        );
         assert!(!snap.writes_allowed());
         assert_eq!(snap.mode(), &RuntimeMode::Recovery);
         assert_eq!(std::fs::read(path).unwrap(), bytes);
@@ -1433,7 +2020,7 @@ mod tests {
             .file_name();
         let path = folder.join(name);
         std::fs::write(&path, b"backup").unwrap();
-        let snap = bootstrap_at(&base);
+        let snap = bootstrap_at(&base, false);
         assert!(!snap.storage_ready && !snap.writes_allowed());
         assert_eq!(snap.mode(), &RuntimeMode::Recovery);
         assert!(!folder.join("config.toml").exists());

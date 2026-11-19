@@ -31,6 +31,8 @@ pub(crate) enum FallbackReason {
     Busy,
     #[allow(dead_code, reason = "constructed by bootstrap in 2C-3 S6")]
     Unprepared,
+    /// Migration could not read its source; the kind carries no configuration data.
+    Io(io::ErrorKind),
     SourceChanged,
     Suppressed,
     Unpreparable,
@@ -111,7 +113,7 @@ fn preflight(lock: &WriterLock, path: &Path, bytes: &[u8]) -> io::Result<Preflig
 
 #[cfg(test)]
 thread_local! {
-    static AFTER_BACKUP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    pub(crate) static AFTER_BACKUP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
 
 // Called from bootstrap in 2C-3 S6.

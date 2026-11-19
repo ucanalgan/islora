@@ -842,6 +842,10 @@ S5 complete: failure records for Backup/Commit/Verify use the original source fi
 
 S6a complete: bootstrap retains the same WriterLock through preparation, inventory, verified read and snapshot construction; preparation failure and busy fall back to lock-free observation with writes refused. A snapshot without readable text also refuses writes. Production first-run/storage state recording is preserved and tested with local atomics; migration remains off. Independent Codex and Gemini reviews approved; 642 workspace tests and Clippy passed. Next S6b: opt-in migration and one-shot report, re-observe under the lock on Migrated, SourceChanged, Verify and any untrustworthy read; never enable production migration before S9.
 
+S6b complete: opt-in test bootstrap migrates under the held lock and re-observes disk and inventory before snapshot; production flag remains false. Busy/unprepared and retry suppression have explicit reports; the one-shot report survives refresh and writes until consumed. Unreadable re-observation forbids writes. Codex and Gemini reviews approved; review corrections covered report retention and suppression consistency. 656 workspace tests and Clippy passed. Next S7: isolated acceptance scenarios A-I, production switch remains off.
+
+Budget update (Umut, 2026-11-19): both Claude and Codex 5-hour windows may be used through their next resets. Keep enough reserve for a safe stop and second-brain update; weekly windows remain separate and monitored. Claude current readings are unknown.
+
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
 Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:
