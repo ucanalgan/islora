@@ -382,7 +382,7 @@ pub fn run() -> Result<()> {
     if std::env::args().any(|a| a == "--local-timers") {
         island.offer_only_timers();
     }
-    // Before the calendar thread, which reads the same file.
+    // Apply the snapshot's settings before the calendar thread starts.
     apply_settings(&mut island);
     start_with_windows_by_default();
     let reported = fullscreen::fullscreen_now();

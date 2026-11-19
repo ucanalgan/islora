@@ -182,6 +182,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2C-2 S5 | done: `SaveFailure.read_only` (from `is_mode_refused`, wins over `conflict`); two read-only settings texts and one calendar text; the interactive autostart outer refusal reports the read-only text (restored, no autostart change); startup stays silent; Enzo and Nino approve (Giulia timed out); 590 tests | see `git log` |
 | 2C-2 S6 | done: refresh keeps the text installed at install time on any read failure (resolved under the slot mutex after the sequence check, so a newer write-through is never overwritten); mode reclassified on every refresh (future -> `ReadOnly`, current -> `Normal`, missing primary on refresh -> `Recovery`, never new install); `storage_ready` sticky; bootstrap unchanged; Enzo (critical race found, fixed) and Lucia approve after one correction; 595 tests | see `git log` |
 | 2C-2 S7 | done: writes expect the snapshot's bytes: right after the locked read and before any action or commit, a mismatch returns the `PrimaryChanged` error (nothing written, no action, no autostart change); later saves in one transaction expect the last committed text; a conflict anywhere in the transaction (also one an action swallows) makes the global `update` / `update_with` set a reload request, and `mute_shown_app`, `choose_start_mode` and `on_settings_action` reload after the rollback and message; acceptance row #22 done; Giulia approves after one correction, Lucia approves; 603 tests | see `git log` |
+| 2C-2 S8 | done: dead `settings::read` removed, `try_read_path` / `verified_file` / `read_bounded` now `#[cfg(test)]` (only tests use them), stale calendar comment in app.rs fixed; `CONFIG_MIGRATION.md` Phase 2 status rewritten, acceptance rows #43 done and #48 partial, #22 risk text sharpened; Enzo and Nino found overstated doc claims (owner kept only for the current user, no snapshot comparison when the snapshot has no text), fixed, Enzo approves; 2C-2 complete; 603 tests | see `git log` |
 
 ## Resume here
 
@@ -721,9 +722,26 @@ Budget record for 2C-2 S7: Claude 5-hour 10 -> 23, weekly 26 -> 27; Codex
 5-hour 8 -> (reset) 2, weekly 28 -> 29 (two Paolo runs, three agy runs, two
 of them network errors, two Sonnet runs, one a network error).
 
-First step next: S8 cleanup and docs (drop dead `settings::read`, the stale
-comment Sofia names, `CONFIG_MIGRATION.md` "Not yet done", acceptance rows
-#43 and #48), then the Phase B cleanup commit(s) with every collected minor.
+2C-2 S8 is committed; 2C-2 is complete. Paolo stopped once, correctly:
+removing `read` left `verified_file` and `read_bounded` used only by tests;
+lead decision: mark them `#[cfg(test)]` like `try_read_path` (their tests
+still cover `VerifiedFile` through a path). `calendar.rs` does not exist (the
+calendar code lives elsewhere), so Sofia's calendar doc line was dropped.
+
+Budget record for 2C-2 S8: Claude 5-hour 23 -> 31, weekly 27 -> 28; Codex
+5-hour 2 -> 4, weekly 29 (two Paolo runs, two Enzo runs, one Nino run).
+
+Phase B cleanup: every collected minor is listed, grouped into three narrow
+steps by file, in `scratchpad/phaseb-cleanup-minors.md` (CL1 config_store.rs
+tests and comments, C1-C10; CL2 config_fs.rs and config_commit.rs, A1-A5;
+CL3 settings.rs and app.rs, B1 and D1), with the lead decisions on what is
+not in it. The `prepare_storage` by-path boundary moves to 2C-3 (a real
+change to startup preparation, not a minor).
+
+First step next: Phase B cleanup step CL1 (Paolo writes; reviewers by kind:
+Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:
+Enzo plus Giulia), then CL3. Hand-over at 2026-11-19 ~10:05 UTC: lead context
+46%, Claude 5-hour 31 / weekly 28, Codex 5-hour 4 / weekly 29.
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.

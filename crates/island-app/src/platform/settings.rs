@@ -104,6 +104,7 @@ fn inspect_in(dir: &ConfigDir, name: &str) -> io::Result<bool> {
         }
     }
 }
+#[cfg(test)]
 fn verified_file(path: &Path) -> io::Result<VerifiedFile> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
@@ -143,19 +144,7 @@ pub(crate) fn path() -> Option<PathBuf> {
     Some(folder.join("config.toml"))
 }
 
-/// Reads the existing settings file without creating it.
-#[allow(dead_code, reason = "removed in 2C-2 S8")]
-pub fn read() -> Option<String> {
-    let path = path()?;
-    match try_read_path(&path) {
-        Ok(text) => Some(text),
-        Err(error) => {
-            eprintln!("settings could not be read: {error}");
-            None
-        }
-    }
-}
-
+#[cfg(test)]
 fn try_read_path(path: &Path) -> io::Result<String> {
     read_bounded(path)
 }
@@ -270,6 +259,7 @@ pub(crate) fn prepare_storage_at(base: &Path) -> io::Result<bool> {
 
 /// Refuse oversized or non-UTF-8 settings without replacing or truncating
 /// the file. Read one byte beyond the limit to detect oversized input.
+#[cfg(test)]
 fn read_bounded(path: &Path) -> io::Result<String> {
     let mut file = verified_file(path)?;
     read_verified(&mut file)
