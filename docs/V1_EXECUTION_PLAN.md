@@ -828,7 +828,11 @@ Budget record for S2: Claude 5-hour 65 -> 78 (lead turns plus one Sonnet review;
 
 Budget record for S3: Claude 5-hour 78 -> 85, weekly 35 -> 36 (lead turns only; reviews on Giulia and Enzo); Codex 5-hour 12 -> 16, weekly 31 (two Paolo runs, two Enzo runs).
 
-First step next: 2C-3 S4 (`config_migrate.rs`: report types, `migrate_locked`, D-D).
+Parked at 11:55 UTC on 2026-11-19: Claude 5-hour 85% (resets 14:10 UTC), weekly 36%; Codex 5-hour 16%, weekly 31%. Working tree clean (only the untracked `docs/V1_STABLE_CHECKLIST.md`, `docs/WAVE_MEASUREMENTS.md`). Lead context 40%. Parked before S4 because it is critical persistence work that needs a careful spec and likely a correction round, which would not fit the rest of the Claude window.
+
+S4 spec draft (not yet checked by a lead): Enzo wrote `scratchpad/spec-2c3-s4-draft.md` read-only from the design and the code. He splits S4 into S4a (locked preflight in new `config_migrate.rs`: report types, exact-byte compare under the lock, record read plus `retry_decision`, strict prepare, D-D fallback) and S4b (protected backup, `commit_primary(Some(bytes))`, clear record, retention; no recording, that is S5). The lead must check it against D-A..D-J before handing it to Paolo. Collected minors (S1, S2, S3): `scratchpad/2c3-minors.md`.
+
+First step next: check and finalise `scratchpad/spec-2c3-s4-draft.md` as `scratchpad/spec-2c3-s4a.md`, then 2C-3 S4a (Paolo writes; Giulia plus Lucia or Enzo review).
 
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
