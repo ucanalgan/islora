@@ -160,7 +160,7 @@ fn inventory(dir: &ConfigDir) -> ArtifactInventory {
     let mut inventory = ArtifactInventory::default();
     if let Ok(entries) = dir.entries() {
         for name in entries {
-            if name == "config.toml.bak" {
+            if name.eq_ignore_ascii_case("config.toml.bak") {
                 inventory.rolling_backup = true;
             }
             if let Some(parsed) = name.to_str().and_then(ProtectedBackupName::parse) {
@@ -225,6 +225,8 @@ fn install_once(
     if let Some(snapshot) = slot.lock().unwrap_or_else(PoisonError::into_inner).clone() {
         return snapshot;
     }
+    // make runs outside the slot mutex; startup calls bootstrap once on one thread,
+    // so two preparations cannot overlap.
     let snapshot = Arc::new(make());
     let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
     Arc::clone(guard.get_or_insert(snapshot))
@@ -368,6 +370,8 @@ fn refresh_in(slot: &Mutex<Option<Arc<ConfigSnapshot>>>, base: &Path) -> Arc<Con
 }
 
 /// Refresh the installed snapshot; bootstrap must run first.
+// The store is used only on the UI thread, so refreshes cannot overlap.
+// Installs are still ordered by the write sequence.
 pub(crate) fn refresh() -> Arc<ConfigSnapshot> {
     refresh_folder(&STORE, config_folder())
 }
@@ -804,6 +808,10 @@ mod tests {
         let path = a.join("Islora/config.toml");
         let other = b.join("Islora/config.toml");
         update_in(&slot, &path, "media_layout", "compact").unwrap();
+        assert_eq!(
+            slot.lock().unwrap().as_ref().unwrap().mode,
+            RuntimeMode::LegacyCompatible
+        );
         try_remember_path(&other, "media_layout", "compact").unwrap();
         assert_eq!(std::fs::read(path).unwrap(), std::fs::read(other).unwrap());
     }
@@ -843,6 +851,24 @@ mod tests {
         assert!(new.storage_ready && new.writes_allowed());
         assert!(!Arc::ptr_eq(&old, &new));
         assert_eq!(text_in(&slot).as_deref(), Some(new_text));
+    }
+
+    #[test]
+    fn older_refresh_does_not_replace_newer_install() {
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let slot = Mutex::new(Some(Arc::new(sample())));
+        let newer = install_newer(
+            &slot,
+            Arc::new(ConfigSnapshot {
+                sequence: 2,
+                ..sample()
+            }),
+        );
+        let refreshed = refresh_folder_at(&slot, Ok(folder), 1);
+        assert!(Arc::ptr_eq(&newer, &refreshed));
+        assert!(Arc::ptr_eq(&newer, slot.lock().unwrap().as_ref().unwrap()));
     }
 
     #[test]
@@ -986,6 +1012,7 @@ mod tests {
     #[test]
     fn folder_open_failure_clears_storage_ready() {
         let base = settings::tests::temp_base();
+        // Opening a regular file as the configuration folder fails.
         let file = base.join("not_a_folder");
         std::fs::write(&file, b"file").unwrap();
         let snapshot = observe_folder(Ok(file.clone()), true);
@@ -1169,6 +1196,33 @@ mod tests {
     }
 
     #[test]
+    fn empty_folder_observes_missing_before_preparation() {
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let read = VerifiedFile::open(&dir, "config.toml".as_ref())
+            .map_err(io::Error::from)
+            .and_then(|mut file| settings::read_verified(&mut file));
+        assert_eq!(observe(read), PrimaryObservation::Missing);
+        let snapshot = observe_folder(Ok(folder), true);
+        assert_eq!(snapshot.mode(), &RuntimeMode::Normal);
+        assert!(snapshot.text().is_none());
+    }
+
+    #[test]
+    fn inventory_rolling_backup_is_case_insensitive() {
+        let lower = settings::tests::temp_base();
+        let upper = settings::tests::temp_base();
+        std::fs::write(lower.join("config.toml.bak"), b"backup").unwrap();
+        std::fs::write(upper.join("CONFIG.TOML.BAK"), b"backup").unwrap();
+        let lower_inventory = inventory(&ConfigDir::open(&lower).unwrap());
+        let upper_inventory = inventory(&ConfigDir::open(&upper).unwrap());
+        assert!(lower_inventory.rolling_backup);
+        assert_eq!(upper_inventory, lower_inventory);
+    }
+
+    #[test]
     fn bootstrap_v1_is_legacy_fallback_bytes_unchanged() {
         let _serial = super::super::config_fs::TEST_WRITER_SERIAL
             .lock()
@@ -1211,14 +1265,15 @@ mod tests {
         let base = settings::tests::temp_base();
         let folder = base.join("Islora");
         std::fs::create_dir(&folder).unwrap();
-        std::fs::write(
-            folder.join("config.toml"),
-            vec![b'x'; island_core::migration::MAX_CONFIG_BYTES + 1],
-        )
-        .unwrap();
+        let path = folder.join("config.toml");
+        let bytes = vec![b'x'; island_core::migration::MAX_CONFIG_BYTES + 1];
+        std::fs::write(&path, &bytes).unwrap();
         let snap = bootstrap_at(&base);
         assert_eq!(snap.mode(), &RuntimeMode::LegacyCompatible);
         assert!(snap.text().is_none());
+        assert!(snap.storage_ready);
+        assert!(snap.writes_allowed());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 
     #[test]
@@ -1340,7 +1395,12 @@ mod tests {
 
     #[test]
     fn observe_future_is_read_only() {
-        for (version, schema) in [(100_u64, 100), (u64::MAX, u32::MAX)] {
+        for (version, schema) in [
+            (100_u64, 100),
+            (u64::from(u32::MAX), u32::MAX),
+            (u64::from(u32::MAX) + 1, u32::MAX),
+            (u64::MAX, u32::MAX),
+        ] {
             let text = format!("unsupported line\nconfig_version = \"{version}\"\n");
             let observation = observe(Ok(text.clone()));
             assert_eq!(
@@ -1410,18 +1470,42 @@ mod tests {
     fn migrate_never_returned() {
         let fingerprint = ChangeFingerprint::of(b"source");
         let observations = [
-            PrimaryObservation::Missing,
-            PrimaryObservation::Unreadable,
-            PrimaryObservation::Invalid { fingerprint },
-            PrimaryObservation::Future {
-                schema: 3,
-                fingerprint,
-            },
-            PrimaryObservation::Current { fingerprint },
-            PrimaryObservation::Legacy {
-                schema: 1,
-                fingerprint,
-            },
+            (
+                PrimaryObservation::Missing,
+                [
+                    RuntimeMode::Normal,
+                    RuntimeMode::Recovery,
+                    RuntimeMode::Recovery,
+                    RuntimeMode::Recovery,
+                    RuntimeMode::Recovery,
+                ],
+            ),
+            (
+                PrimaryObservation::Unreadable,
+                [const { RuntimeMode::LegacyCompatible }; 5],
+            ),
+            (
+                PrimaryObservation::Invalid { fingerprint },
+                [const { RuntimeMode::LegacyCompatible }; 5],
+            ),
+            (
+                PrimaryObservation::Future {
+                    schema: 3,
+                    fingerprint,
+                },
+                [const { RuntimeMode::ReadOnly }; 5],
+            ),
+            (
+                PrimaryObservation::Current { fingerprint },
+                [const { RuntimeMode::Normal }; 5],
+            ),
+            (
+                PrimaryObservation::Legacy {
+                    schema: 1,
+                    fingerprint,
+                },
+                [const { RuntimeMode::LegacyCompatible }; 5],
+            ),
         ];
         let inventories = [
             ArtifactInventory::default(),
@@ -1442,17 +1526,16 @@ mod tests {
                 ..Default::default()
             },
         ];
-        for observation in &observations {
-            for inventory in &inventories {
+        let mut saw_migrate = false;
+        for (observation, expected_modes) in &observations {
+            for (inventory, expected) in inventories.iter().zip(expected_modes) {
                 let plan = plan_startup(observation, inventory);
-                let expected = if matches!(plan, StartupOutcome::Migrate { .. }) {
-                    RuntimeMode::LegacyCompatible
-                } else {
-                    plan.mode()
-                };
-                assert_eq!(effective_outcome(plan), expected);
+                saw_migrate |= matches!(observation, PrimaryObservation::Legacy { .. })
+                    && matches!(plan, StartupOutcome::Migrate { .. });
+                assert_eq!(&effective_outcome(plan), expected);
             }
         }
+        assert!(saw_migrate);
     }
 
     #[test]

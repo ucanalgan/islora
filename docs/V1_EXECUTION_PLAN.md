@@ -183,6 +183,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2C-2 S6 | done: refresh keeps the text installed at install time on any read failure (resolved under the slot mutex after the sequence check, so a newer write-through is never overwritten); mode reclassified on every refresh (future -> `ReadOnly`, current -> `Normal`, missing primary on refresh -> `Recovery`, never new install); `storage_ready` sticky; bootstrap unchanged; Enzo (critical race found, fixed) and Lucia approve after one correction; 595 tests | see `git log` |
 | 2C-2 S7 | done: writes expect the snapshot's bytes: right after the locked read and before any action or commit, a mismatch returns the `PrimaryChanged` error (nothing written, no action, no autostart change); later saves in one transaction expect the last committed text; a conflict anywhere in the transaction (also one an action swallows) makes the global `update` / `update_with` set a reload request, and `mute_shown_app`, `choose_start_mode` and `on_settings_action` reload after the rollback and message; acceptance row #22 done; Giulia approves after one correction, Lucia approves; 603 tests | see `git log` |
 | 2C-2 S8 | done: dead `settings::read` removed, `try_read_path` / `verified_file` / `read_bounded` now `#[cfg(test)]` (only tests use them), stale calendar comment in app.rs fixed; `CONFIG_MIGRATION.md` Phase 2 status rewritten, acceptance rows #43 done and #48 partial, #22 risk text sharpened; Enzo and Nino found overstated doc claims (owner kept only for the current user, no snapshot comparison when the snapshot has no text), fixed, Enzo approves; 2C-2 complete; 603 tests | see `git log` |
+| Phase B cleanup CL1 | done: config_store.rs minors C1-C10 (explicit expected modes and a real migrate-arm assertion, saturation bounds, pinned bootstrap-unreadable state, case-insensitive `config.toml.bak` inventory match, threading comments, low-sequence refresh test, empty-folder observe test); Lucia and Enzo: no findings; 606 tests | see `git log` |
 
 ## Resume here
 
@@ -738,7 +739,8 @@ CL3 settings.rs and app.rs, B1 and D1), with the lead decisions on what is
 not in it. The `prepare_storage` by-path boundary moves to 2C-3 (a real
 change to startup preparation, not a minor).
 
-First step next: Phase B cleanup step CL1 (Paolo writes; reviewers by kind:
+Phase B cleanup CL1 is committed (one Paolo run, Lucia and Enzo: no findings).
+First step next: Phase B cleanup step CL2 (earlier note: CL1 Paolo writes; reviewers by kind:
 Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:
 Enzo plus Giulia), then CL3. Hand-over at 2026-11-19 ~10:05 UTC: lead context
 46%, Claude 5-hour 31 / weekly 28, Codex 5-hour 4 / weekly 29.
