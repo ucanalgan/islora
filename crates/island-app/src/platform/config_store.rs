@@ -83,7 +83,7 @@ pub(crate) fn is_mode_refused(error: &io::Error) -> bool {
 }
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::config_fs::{ConfigDir, VerifiedFile, WriterLock};
@@ -94,6 +94,12 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn next_sequence() -> u64 {
     SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+static RELOAD_REQUEST: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn take_reload_request() -> bool {
+    RELOAD_REQUEST.swap(false, Ordering::SeqCst)
 }
 
 static STORE: Mutex<Option<Arc<ConfigSnapshot>>> = Mutex::new(None);
@@ -378,10 +384,16 @@ fn read_locked(lock: &WriterLock, path: &Path) -> io::Result<String> {
 
 #[cfg(test)]
 pub(crate) fn try_remember_path(path: &Path, key: &str, value: &str) -> io::Result<()> {
-    remember_core(path, key, value).0
+    remember_core(path, key, value, None).0
 }
 
-fn remember_core(path: &Path, key: &str, value: &str) -> (io::Result<()>, Committed) {
+fn remember_core(
+    path: &Path,
+    key: &str,
+    value: &str,
+    expected_snapshot: Option<&str>,
+) -> (io::Result<()>, Committed, bool) {
+    let mut conflict = false;
     let mut committed = Committed::None;
     let result = (|| {
         let parent = path.parent().ok_or_else(|| {
@@ -389,6 +401,10 @@ fn remember_core(path: &Path, key: &str, value: &str) -> (io::Result<()>, Commit
         })?;
         let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
         let text = read_locked(&lock, path)?;
+        if expected_snapshot.is_some_and(|expected| expected.as_bytes() != text.as_bytes()) {
+            conflict = true;
+            return Err(io::Error::other(super::config_fs::PrimaryChanged));
+        }
         let updated = prepared_write(&text, key, value)?;
         match config_commit::commit_primary(lock.directory(), path, &updated, Some(text.as_bytes()))
         {
@@ -397,6 +413,7 @@ fn remember_core(path: &Path, key: &str, value: &str) -> (io::Result<()>, Commit
                 Ok(())
             }
             Err(error) => {
+                conflict |= config_commit::is_primary_changed(&error);
                 if config_commit::is_commit_unverified(&error) {
                     committed = Committed::Unverified(next_sequence());
                 }
@@ -404,7 +421,7 @@ fn remember_core(path: &Path, key: &str, value: &str) -> (io::Result<()>, Commit
             }
         }
     })();
-    (result, committed)
+    (result, committed, conflict)
 }
 
 #[cfg(test)]
@@ -412,7 +429,7 @@ pub(crate) fn locked_update_at<T>(
     path: &Path,
     action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
 ) -> io::Result<T> {
-    locked_update_core(path, action).0
+    locked_update_core(path, None, action).0
 }
 
 enum Committed {
@@ -423,8 +440,10 @@ enum Committed {
 
 fn locked_update_core<T>(
     path: &Path,
+    expected_snapshot: Option<&str>,
     action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
-) -> (io::Result<T>, Committed) {
+) -> (io::Result<T>, Committed, bool) {
+    let mut conflict = false;
     let mut committed = Committed::None;
     let result = (|| {
         let parent = path.parent().ok_or_else(|| {
@@ -432,6 +451,10 @@ fn locked_update_core<T>(
         })?;
         let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
         let text = read_locked(&lock, path)?;
+        if expected_snapshot.is_some_and(|expected| expected.as_bytes() != text.as_bytes()) {
+            conflict = true;
+            return Err(io::Error::other(super::config_fs::PrimaryChanged));
+        }
         let mut current = text.clone();
         let mut unverified = false;
         let result = action(&text, &mut |key, value| {
@@ -445,6 +468,7 @@ fn locked_update_core<T>(
                 &updated,
                 Some(current.as_bytes()),
             ) {
+                conflict |= config_commit::is_primary_changed(&error);
                 unverified = config_commit::is_commit_unverified(&error);
                 return Err(error);
             }
@@ -457,7 +481,7 @@ fn locked_update_core<T>(
         }
         result
     })();
-    (result, committed)
+    (result, committed, conflict)
 }
 
 fn gate(slot: &Mutex<Option<Arc<ConfigSnapshot>>>) -> io::Result<Arc<ConfigSnapshot>> {
@@ -505,13 +529,18 @@ fn finish(
 fn run_update<T>(
     slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
     path: impl FnOnce() -> io::Result<PathBuf>,
-    write: impl FnOnce(&Path) -> (io::Result<T>, Committed),
-) -> io::Result<T> {
-    let previous = gate(slot)?;
-    let path = path()?;
-    let (result, committed) = write(&path);
-    finish(slot, &path, &previous, committed);
-    result
+    write: impl FnOnce(&Path, Option<&str>) -> (io::Result<T>, Committed, bool),
+) -> (io::Result<T>, bool) {
+    let mut conflict = false;
+    let result = (|| {
+        let previous = gate(slot)?;
+        let path = path()?;
+        let (result, committed, write_conflict) = write(&path, previous.text());
+        conflict = write_conflict;
+        finish(slot, &path, &previous, committed);
+        result
+    })();
+    (result, conflict)
 }
 
 /// Instance form skips the global storage_writable check.
@@ -525,8 +554,9 @@ fn update_in(
     run_update(
         slot,
         || Ok(path.to_path_buf()),
-        |path| remember_core(path, key, value),
+        |path, expected| remember_core(path, key, value, expected),
     )
+    .0
 }
 
 /// Instance form skips the global storage_writable check.
@@ -539,8 +569,9 @@ fn update_with_in<T>(
     run_update(
         slot,
         || Ok(path.to_path_buf()),
-        |path| locked_update_core(path, action),
+        |path, expected| locked_update_core(path, expected, action),
     )
+    .0
 }
 
 fn writable_path() -> io::Result<PathBuf> {
@@ -554,18 +585,32 @@ fn writable_path() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))
 }
 
+fn request_reload_on_conflict<T>(flag: &AtomicBool, result: &io::Result<T>, conflict: bool) {
+    if conflict
+        || result
+            .as_ref()
+            .is_err_and(config_commit::is_primary_changed)
+    {
+        flag.store(true, Ordering::SeqCst);
+    }
+}
+
 pub(crate) fn update(key: &str, value: &str) -> io::Result<()> {
-    run_update(&STORE, writable_path, |path| {
-        remember_core(path, key, value)
-    })
+    let (result, conflict) = run_update(&STORE, writable_path, |path, expected| {
+        remember_core(path, key, value, expected)
+    });
+    request_reload_on_conflict(&RELOAD_REQUEST, &result, conflict);
+    result
 }
 
 pub(crate) fn update_with<T>(
     action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
 ) -> io::Result<T> {
-    run_update(&STORE, writable_path, |path| {
-        locked_update_core(path, action)
-    })
+    let (result, conflict) = run_update(&STORE, writable_path, |path, expected| {
+        locked_update_core(path, expected, action)
+    });
+    request_reload_on_conflict(&RELOAD_REQUEST, &result, conflict);
+    result
 }
 
 #[cfg(test)]
@@ -954,6 +999,152 @@ mod tests {
         let refreshed = refresh_in(&slot, &file);
         assert!(!refreshed.storage_ready && !refreshed.writes_allowed());
         assert_eq!(refreshed.text(), Some("previous"));
+    }
+
+    fn write_fixture() -> (settings::tests::Temp, Mutex<Option<Arc<ConfigSnapshot>>>) {
+        let base = settings::tests::temp_base();
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        (base, slot)
+    }
+
+    #[test]
+    fn update_after_external_edit_is_conflict() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, slot) = write_fixture();
+        let path = base.join("Islora/config.toml");
+        let old = slot.lock().unwrap().clone().unwrap();
+        let external = "config_version = \"2\"\nexternal = \"yes\"\n";
+        std::fs::write(&path, external).unwrap();
+        let error = update_in(&slot, &path, "new_key", "value").unwrap_err();
+        assert!(config_commit::is_primary_changed(&error));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+        assert!(Arc::ptr_eq(&old, slot.lock().unwrap().as_ref().unwrap()));
+    }
+
+    #[test]
+    fn update_with_conflict_runs_no_action() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, slot) = write_fixture();
+        let path = base.join("Islora/config.toml");
+        std::fs::write(&path, "config_version = \"2\"\nexternal = \"yes\"\n").unwrap();
+        let mut called = false;
+        let error = update_with_in(&slot, &path, |_, _| {
+            called = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(config_commit::is_primary_changed(&error));
+        assert!(!called);
+    }
+
+    #[test]
+    fn conflict_then_reload_then_retry_succeeds() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, slot) = write_fixture();
+        let path = base.join("Islora/config.toml");
+        std::fs::write(&path, "config_version = \"2\"\nexternal = \"yes\"\n").unwrap();
+        assert!(config_commit::is_primary_changed(
+            &update_in(&slot, &path, "new_key", "value").unwrap_err()
+        ));
+        refresh_in(&slot, &base);
+        update_in(&slot, &path, "new_key", "value").unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("external = \"yes\""));
+        assert!(text.contains("new_key = \"value\""));
+    }
+
+    #[test]
+    fn multi_save_uses_last_committed() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, slot) = write_fixture();
+        let path = base.join("Islora/config.toml");
+        update_with_in(&slot, &path, |_, save| {
+            save("first", "one")?;
+            save("second", "two")
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("first = \"one\"") && text.contains("second = \"two\""));
+        assert_eq!(text_in(&slot).as_deref(), Some(text.as_str()));
+    }
+
+    #[test]
+    fn unchanged_file_writes_as_before() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, slot) = write_fixture();
+        let path = base.join("Islora/config.toml");
+        let other = settings::tests::temp_base();
+        bootstrap_at(&other);
+        let copy = other.join("Islora/config.toml");
+        std::fs::copy(&path, &copy).unwrap();
+        update_in(&slot, &path, "new_key", "value").unwrap();
+        try_remember_path(&copy, "new_key", "value").unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), std::fs::read(copy).unwrap());
+    }
+
+    #[test]
+    fn no_snapshot_text_skips_check() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, _) = write_fixture();
+        let slot = Mutex::new(Some(Arc::new(sample())));
+        let path = base.join("Islora/config.toml");
+        update_in(&slot, &path, "new_key", "value").unwrap();
+        assert!(
+            std::fs::read_to_string(path)
+                .unwrap()
+                .contains("new_key = \"value\"")
+        );
+    }
+
+    #[test]
+    fn conflict_inside_action_reports_conflict() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, slot) = write_fixture();
+        let path = base.join("Islora/config.toml");
+        let (result, conflict) = run_update(
+            &slot,
+            || Ok(path.clone()),
+            |path, expected| {
+                locked_update_core(path, expected, |_, save| {
+                    std::fs::write(path, "config_version = \"2\"\nexternal = \"yes\"\n")?;
+                    let error = save("new_key", "value").unwrap_err();
+                    assert!(config_commit::is_primary_changed(&error));
+                    Ok(())
+                })
+            },
+        );
+        assert!(result.is_ok());
+        assert!(conflict);
+    }
+
+    #[test]
+    fn reload_request_helper_records_conflicts_once() {
+        let flag = AtomicBool::new(false);
+        request_reload_on_conflict(&flag, &Ok::<(), io::Error>(()), true);
+        assert!(flag.swap(false, Ordering::SeqCst));
+        assert!(!flag.swap(false, Ordering::SeqCst));
+        request_reload_on_conflict(&flag, &Err::<(), _>(io::Error::other("ordinary")), false);
+        assert!(!flag.swap(false, Ordering::SeqCst));
+        request_reload_on_conflict(
+            &flag,
+            &Err::<(), _>(io::Error::other(super::super::config_fs::PrimaryChanged)),
+            false,
+        );
+        assert!(flag.swap(false, Ordering::SeqCst));
     }
 
     fn sample() -> ConfigSnapshot {

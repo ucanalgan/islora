@@ -27,7 +27,7 @@ Evidence abbreviations: **M** = `crates/island-core/src/migration.rs` and its `t
 | 19 | Validated Legacy Detection | Partial — M classification (Unit) | App lacks safe fallback/bootstrap. |
 | 20 | Single-Writer Migration Protection | Missing — A's single-instance mutex is not a config lock | Normal writes and external editors can race. |
 | 21 | Unique Protected Backups | Missing — no protected backup implementation | Collision/reuse not tested. |
-| 22 | Optimistic Concurrency Validation | Missing — S `try_remember_path` reads then replaces | A file can change after validation. |
+| 22 | Optimistic Concurrency Validation | Done — `platform/config_store.rs`: every write compares the locked read with the snapshot bytes before any action or commit (`PrimaryChanged`, conflict message, then a reload); `commit_primary` re-checks the expected bytes on the held handle before the rename (2B-2c); tests `update_after_external_edit_is_conflict`, `update_with_conflict_runs_no_action`, `conflict_then_reload_then_retry_succeeds`, `multi_save_uses_last_committed`, `conflict_inside_action_reports_conflict` (Unit) | A change in the short window between the last byte check and the atomic rename is not detected. |
 | 23 | Conservative Crash Recovery | Partial — S interruption and invalid-backup tests (FS) | `.new` is ignored; path-based copy has race and ACL risks. |
 | 24 | Validated Recovery Selection | Partial — S rejects invalid/future rolling backups and ambiguous protected artifacts (FS) | No provenance-based protected-backup selection or handle-based validation. |
 | 25 | Non-Destructive Recovery Mode | Missing — no runtime recovery mode | Existing read may create/restore before validation. |

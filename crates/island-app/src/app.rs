@@ -1576,8 +1576,14 @@ impl App {
                 true
             }) {
                 self.active_notification = Some((notice, until));
+                if config_store::take_reload_request() {
+                    self.reload();
+                }
                 self.refresh();
                 return;
+            }
+            if config_store::take_reload_request() {
+                self.reload();
             }
         }
         self.island.remove(Kind::ExternalNotification);
@@ -2091,6 +2097,9 @@ impl App {
                 return;
             }
         }
+        if config_store::take_reload_request() {
+            self.reload();
+        }
         let state = SettingsState {
             calendar_note,
             ..self.settings_state(page)
@@ -2108,6 +2117,9 @@ impl App {
         };
         if let Err(restored) = result {
             settings::report_persistence_failure(restored);
+        }
+        if config_store::take_reload_request() {
+            self.reload();
         }
         self.refresh();
         self.sync_settings_window();

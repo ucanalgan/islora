@@ -181,6 +181,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2C-2 S4b | done: `config_store::update` / `update_with` (and `_in` forms sharing `run_update`): mode gate first (`ModeRefused` for `ReadOnly`, `Recovery`, `storage_ready` false or no snapshot; no lock, no action), then `storage_writable`, lock and commit as before; write-through of the last committed text (also after a later action error), mode reclassified from a folder listing, `CommitUnverified` -> one re-read; a write sequence taken under the writer lock so an older install never replaces a newer one; settings.rs wrappers are one-line calls; Lucia and Giulia approve after one correction; 589 tests | see `git log` |
 | 2C-2 S5 | done: `SaveFailure.read_only` (from `is_mode_refused`, wins over `conflict`); two read-only settings texts and one calendar text; the interactive autostart outer refusal reports the read-only text (restored, no autostart change); startup stays silent; Enzo and Nino approve (Giulia timed out); 590 tests | see `git log` |
 | 2C-2 S6 | done: refresh keeps the text installed at install time on any read failure (resolved under the slot mutex after the sequence check, so a newer write-through is never overwritten); mode reclassified on every refresh (future -> `ReadOnly`, current -> `Normal`, missing primary on refresh -> `Recovery`, never new install); `storage_ready` sticky; bootstrap unchanged; Enzo (critical race found, fixed) and Lucia approve after one correction; 595 tests | see `git log` |
+| 2C-2 S7 | done: writes expect the snapshot's bytes: right after the locked read and before any action or commit, a mismatch returns the `PrimaryChanged` error (nothing written, no action, no autostart change); later saves in one transaction expect the last committed text; a conflict anywhere in the transaction (also one an action swallows) makes the global `update` / `update_with` set a reload request, and `mute_shown_app`, `choose_start_mode` and `on_settings_action` reload after the rollback and message; acceptance row #22 done; Giulia approves after one correction, Lucia approves; 603 tests | see `git log` |
 
 ## Resume here
 
@@ -703,11 +704,26 @@ Budget record for 2C-2 S5 and S6: Claude 5-hour 94 -> 96 (S5, Nino only),
 then (reset 02:20 UTC) 0 -> 13, weekly 22 -> 24; Codex 5-hour 2 -> 7, weekly
 27 -> 28.
 
-First step next: S7 expected bytes = snapshot bytes (behaviour change,
-acceptance row #22): an external edit without Reload gives `PrimaryChanged`,
-rollback, the conflict message and a reload. Sofia marked it optional (it
-may move to 2C-3); decide first whether to do it in 2C-2. Then S8 cleanup and
-docs, then the Phase B cleanup commit with every collected minor.
+2C-2 S7 is committed. Lead decision (2026-11-19, previous lead): S7 is part
+of 2C-2, because acceptance row #22 was still Missing. A first attempt
+stopped twice for placement (there is no single dispatch) and once on a
+network error; the spec then named the three app.rs places. Paolo wrote it,
+one correction round: Giulia's major (an action such as
+`autostart_transaction` can catch a save's `PrimaryChanged` and return
+`Ok(SaveFailed { conflict: true })`, so no reload was requested) fixed by
+tracking a conflict flag through the transaction. Lucia approves; minors for
+the Phase B cleanup: a startup conflict (`start_with_windows_by_default`,
+which has no reload check) leaves the reload request set, so the next
+settings action reloads once (harmless; clear it after the startup write if
+unwanted). Spec `scratchpad/spec-2c2-s7.md` and `-s7-r1.md`.
+
+Budget record for 2C-2 S7: Claude 5-hour 10 -> 23, weekly 26 -> 27; Codex
+5-hour 8 -> (reset) 2, weekly 28 -> 29 (two Paolo runs, three agy runs, two
+of them network errors, two Sonnet runs, one a network error).
+
+First step next: S8 cleanup and docs (drop dead `settings::read`, the stale
+comment Sofia names, `CONFIG_MIGRATION.md` "Not yet done", acceptance rows
+#43 and #48), then the Phase B cleanup commit(s) with every collected minor.
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.
