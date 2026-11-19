@@ -197,7 +197,7 @@ fn observe_folder_at(
         }
     };
     let inventory = inventory(&dir);
-    let read = VerifiedFile::open(&dir, "config.toml".as_ref())
+    let read = VerifiedFile::open(&dir, settings::PRIMARY_NAME.as_ref())
         .map_err(io::Error::from)
         .and_then(|mut file| settings::read_verified(&mut file));
     let (observation, text) = match read {
@@ -299,7 +299,7 @@ fn observe_refresh(
     let (read, inventory) = match result {
         Ok(dir) => {
             let inventory = inventory(&dir);
-            let read = VerifiedFile::open(&dir, "config.toml".as_ref())
+            let read = VerifiedFile::open(&dir, settings::PRIMARY_NAME.as_ref())
                 .map_err(io::Error::from)
                 .and_then(|mut file| settings::read_verified(&mut file));
             (read, inventory)

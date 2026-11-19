@@ -17,6 +17,7 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, w};
 
+/// The primary configuration file name, whose security a protected backup copies.
 pub(crate) const PRIMARY_NAME: &str = "config.toml";
 
 const TEMPLATE: &str = "\
@@ -2048,6 +2049,33 @@ pub(crate) mod tests {
         assert!(!folder.join("config.toml.1-2-3.tmp").exists());
         assert!(!folder.join("config.toml.bak.1-2-3.tmp").exists());
         assert!(folder.join("config.toml.other.tmp").exists());
+    }
+
+    #[test]
+    fn preparation_preserves_protected_backups() {
+        use island_core::config_state::{ChangeFingerprint, ProtectedBackupName};
+
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let bytes = b"protected backup";
+        let backup_name = ProtectedBackupName::new(1, 2, ChangeFingerprint::of(bytes))
+            .unwrap()
+            .file_name();
+        let backup = folder.join(&backup_name);
+        let stale = folder.join("config.toml.1-2-3.tmp");
+        std::fs::write(&backup, bytes).unwrap();
+        std::fs::write(&stale, b"draft").unwrap();
+        assert!(!is_stale_draft_name(backup_name.as_ref()));
+
+        prepare_storage_at(&base).unwrap();
+
+        assert!(!stale.exists());
+        assert!(backup.exists());
+        assert_eq!(std::fs::read(backup).unwrap(), bytes);
     }
 
     #[test]

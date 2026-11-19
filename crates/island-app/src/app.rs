@@ -3719,6 +3719,9 @@ fn start_with_windows_by_default() {
         eprintln!("default Windows startup setting skipped: {error}");
         return;
     }
+    if matches!(&result, Ok(AutostartOutcome::SaveFailed(failure)) if failure.read_only) {
+        return;
+    }
     report_autostart_result(result);
 }
 

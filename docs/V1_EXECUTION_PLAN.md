@@ -185,6 +185,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2C-2 S8 | done: dead `settings::read` removed, `try_read_path` / `verified_file` / `read_bounded` now `#[cfg(test)]` (only tests use them), stale calendar comment in app.rs fixed; `CONFIG_MIGRATION.md` Phase 2 status rewritten, acceptance rows #43 done and #48 partial, #22 risk text sharpened; Enzo and Nino found overstated doc claims (owner kept only for the current user, no snapshot comparison when the snapshot has no text), fixed, Enzo approves; 2C-2 complete; 603 tests | see `git log` |
 | Phase B cleanup CL1 | done: config_store.rs minors C1-C10 (explicit expected modes and a real migrate-arm assertion, saturation bounds, pinned bootstrap-unreadable state, case-insensitive `config.toml.bak` inventory match, threading comments, low-sequence refresh test, empty-folder observe test); Lucia and Enzo: no findings; 606 tests | see `git log` |
 | Phase B cleanup CL2 | done: config_fs.rs / config_commit.rs minors A1-A5 (the two `NtCreateFile` paths stay separate, with a comment saying why: security retries vs. directory mapping; restore errors after a failed delete or a failed protected backup log their kind only; the retention failure test checks sharing violation 32; one `PRIMARY_NAME` in settings.rs); Enzo and Nino approve; 606 tests | see `git log` |
+| Phase B cleanup CL3 | done: test that the startup draft sweep leaves protected backups; startup autostart silent on a read-only `SaveFailed`; `PRIMARY_NAME` doc line back and used for the two non-test opens in config_store.rs; Enzo and Nino approve; Phase B cleanup complete; 607 tests | see `git log` |
 
 ## Resume here
 
@@ -742,7 +743,21 @@ change to startup preparation, not a minor).
 
 Phase B cleanup CL1 is committed (one Paolo run, Lucia and Enzo: no findings).
 Phase B cleanup CL2 is committed; Nino's two minors (restore the dropped `PRIMARY_NAME` doc line; two `"config.toml"` literals in config_store.rs) join CL3.
-First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
+Phase B cleanup CL3 is committed; the Phase B cleanup is complete (CL1
+`b579989`, CL2 `ff77a9b`, CL3 next commit). Nino's CL3 minor (the test
+backup has placeholder bytes) rejected: the sweep decides by name only.
+
+Budget record for 2C-2 S8 hand-over through CL3: Claude 5-hour 31 -> 39,
+weekly 28 -> 29; Codex 5-hour 4 -> 9, weekly 29 -> 30 (three Paolo runs,
+three Enzo runs, one Lucia, two Nino).
+
+Still open from Phase B, moved to 2C-3: `prepare_storage` creates the folder
+and renames the legacy folder by path before the directory handle exists;
+preparation must treat protected backups as recovery evidence before
+migration creates any (2C-2 S2 note).
+
+First step next: 2C-3 (see the Phase B table), in a new lead session: this
+lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
 Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:
 Enzo plus Giulia), then CL3. Hand-over at 2026-11-19 ~10:05 UTC: lead context
 46%, Claude 5-hour 31 / weekly 28, Codex 5-hour 4 / weekly 29.
