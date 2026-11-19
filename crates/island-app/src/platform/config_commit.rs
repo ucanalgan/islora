@@ -6,6 +6,57 @@ use std::path::Path;
 use super::config_fs::{ConfigDir, Draft, VerifiedFile};
 use super::settings::{PRIMARY_NAME, name, read_verified};
 
+pub(crate) const FAILURE_RECORD_NAME: &str = "config.toml.failure";
+
+pub(crate) fn read_failure(dir: &ConfigDir) -> island_core::config_state::StoredFailure {
+    use island_core::config_state::{FAILURE_RECORD_MAX_BYTES, FailureRecord, StoredFailure};
+    let mut file = match VerifiedFile::open(dir, FAILURE_RECORD_NAME.as_ref()) {
+        Ok(file) => file,
+        Err(super::config_fs::ConfigFsError::Io(error))
+            if error.kind() == io::ErrorKind::NotFound =>
+        {
+            return StoredFailure::None;
+        }
+        Err(_) => return StoredFailure::Corrupt,
+    };
+    match file.read_bounded(FAILURE_RECORD_MAX_BYTES) {
+        Ok(bytes) => FailureRecord::decode(&bytes)
+            .map(StoredFailure::Valid)
+            .unwrap_or(StoredFailure::Corrupt),
+        Err(_) => StoredFailure::Corrupt,
+    }
+}
+
+// Used by migration from 2C-3 S5.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn write_failure(
+    dir: &ConfigDir,
+    record: &island_core::config_state::FailureRecord,
+) -> io::Result<()> {
+    let target = std::ffi::OsStr::new(FAILURE_RECORD_NAME);
+    let bytes = record.encode();
+    let mut draft = Draft::create(dir, target, None).map_err(io::Error::from)?;
+    draft.write(bytes.as_bytes()).map_err(io::Error::from)?;
+    verify_draft(&mut draft, bytes.as_bytes())?;
+    draft
+        .rename(dir, target, None, None, true, None)
+        .map_err(io::Error::from)
+}
+
+// Used by migration from 2C-3 S5.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn clear_failure(dir: &ConfigDir) -> io::Result<()> {
+    match VerifiedFile::delete_verified(dir, FAILURE_RECORD_NAME.as_ref()) {
+        Ok(()) => Ok(()),
+        Err(super::config_fs::ConfigFsError::Io(error))
+            if error.kind() == io::ErrorKind::NotFound =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(crate) fn is_primary_changed(error: &io::Error) -> bool {
     error
         .get_ref()
@@ -291,6 +342,97 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn failure_record() -> island_core::config_state::FailureRecord {
+        use island_core::config_state::{ChangeFingerprint, FailureRecord, FailureStage};
+        FailureRecord {
+            source: ChangeFingerprint::of(b"source"),
+            from_schema: 1,
+            stage: FailureStage::Commit,
+            attempts: 1,
+        }
+    }
+
+    #[test]
+    fn failure_record_round_trips() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let record = failure_record();
+        write_failure(&dir, &record).unwrap();
+        assert_eq!(
+            read_failure(&dir),
+            island_core::config_state::StoredFailure::Valid(record)
+        );
+    }
+
+    #[test]
+    fn missing_record_is_none() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        assert_eq!(
+            read_failure(&dir),
+            island_core::config_state::StoredFailure::None
+        );
+    }
+
+    #[test]
+    fn oversized_record_is_corrupt() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        for bytes in [vec![b'x'; 257], vec![0xff], b"garbage".to_vec()] {
+            std::fs::write(temp.0.join(FAILURE_RECORD_NAME), bytes).unwrap();
+            assert_eq!(
+                read_failure(&dir),
+                island_core::config_state::StoredFailure::Corrupt
+            );
+        }
+    }
+
+    #[test]
+    fn write_failure_replaces_previous() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let mut record = failure_record();
+        write_failure(&dir, &record).unwrap();
+        record.attempts = 2;
+        write_failure(&dir, &record).unwrap();
+        assert_eq!(
+            read_failure(&dir),
+            island_core::config_state::StoredFailure::Valid(record)
+        );
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn clear_failure_removes_and_is_idempotent() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        std::fs::write(temp.0.join("other"), b"unchanged").unwrap();
+        write_failure(&dir, &failure_record()).unwrap();
+        clear_failure(&dir).unwrap();
+        assert_eq!(
+            read_failure(&dir),
+            island_core::config_state::StoredFailure::None
+        );
+        clear_failure(&dir).unwrap();
+        assert_eq!(std::fs::read(temp.0.join("other")).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failure_write_verification_error_preserves_previous() {
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let record = failure_record();
+        write_failure(&dir, &record).unwrap();
+        FAIL_VERIFICATION_AT.with(|count| count.set(1));
+        assert!(write_failure(&dir, &record).is_err());
+        assert_eq!(
+            read_failure(&dir),
+            island_core::config_state::StoredFailure::Valid(record)
+        );
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
     }
 
     #[test]

@@ -167,13 +167,18 @@ fn inventory(dir: &ConfigDir) -> ArtifactInventory {
                 inventory.protected_backups.push(parsed);
             }
             // Count failure-record presence as evidence without interpreting its contents.
-            if name.eq_ignore_ascii_case("config.toml.failure") {
+            if name.eq_ignore_ascii_case(config_commit::FAILURE_RECORD_NAME) {
                 inventory.leftover_drafts += 1;
             }
             if settings::is_stale_draft_name(&name) {
                 inventory.leftover_drafts += 1;
             }
         }
+    }
+    if let island_core::config_state::StoredFailure::Valid(record) =
+        config_commit::read_failure(dir)
+    {
+        inventory.recorded_failure = Some(record.source);
     }
     inventory
 }
@@ -1212,6 +1217,43 @@ mod tests {
         let snapshot = observe_folder(Ok(folder), true);
         assert_eq!(snapshot.mode(), &RuntimeMode::Normal);
         assert!(snapshot.text().is_none());
+    }
+
+    #[test]
+    fn inventory_reports_recorded_failure() {
+        use island_core::config_state::{ChangeFingerprint, FailureRecord, FailureStage};
+        let base = settings::tests::temp_base();
+        let record = FailureRecord {
+            source: ChangeFingerprint::of(b"source"),
+            from_schema: 1,
+            stage: FailureStage::Backup,
+            attempts: 1,
+        };
+        std::fs::write(
+            base.join(config_commit::FAILURE_RECORD_NAME),
+            record.encode(),
+        )
+        .unwrap();
+        let found = inventory(&ConfigDir::open(&base).unwrap());
+        assert_eq!(found.recorded_failure, Some(record.source));
+    }
+
+    #[test]
+    fn corrupt_record_not_a_fingerprint() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), b"corrupt").unwrap();
+        assert_eq!(
+            inventory(&ConfigDir::open(&folder).unwrap()).recorded_failure,
+            None
+        );
+        let snapshot = bootstrap_at(&base);
+        assert_eq!(snapshot.mode(), &RuntimeMode::Recovery);
+        assert!(!folder.join("config.toml").exists());
     }
 
     #[test]
