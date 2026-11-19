@@ -130,9 +130,14 @@ fn artifacts(dir: &ConfigDir, ambiguous: bool) -> io::Result<bool> {
         let Some(name) = name.to_str() else {
             return Ok(true);
         };
+        let protected = island_core::config_state::ProtectedBackupName::parse(name).is_some();
         let name = name.to_ascii_lowercase();
         if matches!(name.as_str(), "config.toml.bak.new" | "config.toml.recover")
-            || (!ambiguous && matches!(name.as_str(), "config.toml.bak" | "config.toml.new"))
+            || (!ambiguous
+                && (matches!(
+                    name.as_str(),
+                    "config.toml.bak" | "config.toml.new" | "config.toml.failure"
+                ) || protected))
             || (name.starts_with("config.pre-migration") && name.ends_with(".bak"))
         {
             return Ok(true);
@@ -200,7 +205,10 @@ pub(crate) fn is_stale_draft_name(name: &std::ffi::OsStr) -> bool {
         .strip_prefix("config.toml.")
         .and_then(|s| s.strip_suffix(".tmp"))
     {
-        let unique = unique.strip_prefix("bak.").unwrap_or(unique);
+        let unique = unique
+            .strip_prefix("bak.")
+            .or_else(|| unique.strip_prefix("failure."))
+            .unwrap_or(unique);
         let parts: Vec<_> = unique.split('-').collect();
         parts.len() == 3
             && parts
@@ -2052,6 +2060,60 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn failure_record_draft_is_stale() {
+        assert!(is_stale_draft_name(
+            "config.toml.failure.1-2-3.tmp".as_ref()
+        ));
+        for name in [
+            "config.toml.failure",
+            "config.protected.000001.v3.0000000000000000.bak",
+            "config.toml.failure.tmp",
+        ] {
+            assert!(!is_stale_draft_name(name.as_ref()));
+        }
+    }
+
+    #[test]
+    fn missing_primary_with_failure_record_refuses_template() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let failure = folder.join("config.toml.failure");
+        let draft = folder.join("config.toml.failure.1-2-3.tmp");
+        std::fs::write(&failure, b"failure").unwrap();
+        std::fs::write(&draft, b"draft").unwrap();
+        let snap = super::super::config_store::bootstrap_at(&base);
+        assert_eq!(
+            snap.mode(),
+            &island_core::config_state::RuntimeMode::Recovery
+        );
+        assert!(!folder.join("config.toml").exists());
+        assert_eq!(std::fs::read(failure).unwrap(), b"failure");
+        assert!(!draft.exists());
+    }
+
+    #[test]
+    fn protected_backup_next_to_valid_rolling_backup_restores() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let protected = folder.join("config.protected.000001.v3.0000000000000000.bak");
+        let rolling = b"config_version = \"2\"\n";
+        std::fs::write(&protected, b"protected").unwrap();
+        std::fs::write(folder.join("config.toml.bak"), rolling).unwrap();
+        let snap = super::super::config_store::bootstrap_at(&base);
+        assert_eq!(snap.mode(), &island_core::config_state::RuntimeMode::Normal);
+        assert_eq!(std::fs::read(folder.join("config.toml")).unwrap(), rolling);
+        assert_eq!(std::fs::read(protected).unwrap(), b"protected");
+    }
+
+    #[test]
     fn preparation_preserves_protected_backups() {
         use island_core::config_state::{ChangeFingerprint, ProtectedBackupName};
 
@@ -2071,7 +2133,10 @@ pub(crate) mod tests {
         std::fs::write(&stale, b"draft").unwrap();
         assert!(!is_stale_draft_name(backup_name.as_ref()));
 
-        prepare_storage_at(&base).unwrap();
+        assert_eq!(
+            prepare_storage_at(&base).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
 
         assert!(!stale.exists());
         assert!(backup.exists());

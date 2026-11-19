@@ -186,6 +186,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | Phase B cleanup CL1 | done: config_store.rs minors C1-C10 (explicit expected modes and a real migrate-arm assertion, saturation bounds, pinned bootstrap-unreadable state, case-insensitive `config.toml.bak` inventory match, threading comments, low-sequence refresh test, empty-folder observe test); Lucia and Enzo: no findings; 606 tests | see `git log` |
 | Phase B cleanup CL2 | done: config_fs.rs / config_commit.rs minors A1-A5 (the two `NtCreateFile` paths stay separate, with a comment saying why: security retries vs. directory mapping; restore errors after a failed delete or a failed protected backup log their kind only; the retention failure test checks sharing violation 32; one `PRIMARY_NAME` in settings.rs); Enzo and Nino approve; 606 tests | see `git log` |
 | Phase B cleanup CL3 | done: test that the startup draft sweep leaves protected backups; startup autostart silent on a read-only `SaveFailed`; `PRIMARY_NAME` doc line back and used for the two non-test opens in config_store.rs; Enzo and Nino approve; Phase B cleanup complete; 607 tests | see `git log` |
+| 2C-3 S1 | done: protected backups and `config.toml.failure` are non-ambiguous recovery evidence (no fresh template for a missing primary, bootstrap `Recovery`; a valid rolling `.bak` still restores next to them); the sweep also removes `config.toml.failure.<a>-<b>-<c>.tmp` drafts and nothing else; pin test flipped; Giulia and Lucia approve (minors in `scratchpad/2c3-minors.md`); 610 tests | see `git log` |
 
 ## Resume here
 
@@ -806,7 +807,9 @@ the migrate flag off in production (D-G, D-J). S7 e2e A-I. S8 e2e J-S (R
 per D-H). S9 the switch. S10 docs (config_state.rs text, acceptance rows and
 gate). Test names per step in `scratchpad/2c3-compare.md` section 3.
 
-First step next: 2C-3 S1.
+2C-3 S1 is committed (one Paolo run, no correction).
+
+First step next: 2C-3 S2 (failure record I/O).
 
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:

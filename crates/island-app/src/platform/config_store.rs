@@ -166,6 +166,10 @@ fn inventory(dir: &ConfigDir) -> ArtifactInventory {
             if let Some(parsed) = name.to_str().and_then(ProtectedBackupName::parse) {
                 inventory.protected_backups.push(parsed);
             }
+            // Count failure-record presence as evidence without interpreting its contents.
+            if name.eq_ignore_ascii_case("config.toml.failure") {
+                inventory.leftover_drafts += 1;
+            }
             if settings::is_stale_draft_name(&name) {
                 inventory.leftover_drafts += 1;
             }
@@ -1295,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_missing_primary_with_protected_backup_records_current_behaviour() {
+    fn missing_primary_with_protected_backup_refuses_template() {
         let _serial = super::super::config_fs::TEST_WRITER_SERIAL
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -1307,11 +1311,11 @@ mod tests {
             .file_name();
         let path = folder.join(name);
         std::fs::write(&path, b"backup").unwrap();
-        // 2C-3: preparation must treat protected backups as recovery evidence
         let snap = bootstrap_at(&base);
-        assert!(snap.storage_ready && snap.writes_allowed());
-        assert_eq!(snap.mode(), &RuntimeMode::Normal);
-        assert!(snap.text().is_some());
+        assert!(!snap.storage_ready && !snap.writes_allowed());
+        assert_eq!(snap.mode(), &RuntimeMode::Recovery);
+        assert!(!folder.join("config.toml").exists());
+        assert!(snap.text().is_none());
         assert_eq!(std::fs::read(path).unwrap(), b"backup");
     }
 
