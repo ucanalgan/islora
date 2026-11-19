@@ -11,7 +11,6 @@ use super::config_commit;
 use super::settings::{classify_ignoring_unsupported, prepared_write, read_verified};
 
 /// Classify the result of reading the primary configuration.
-#[allow(dead_code, reason = "wired at startup in 2C-2 S2")]
 pub(crate) fn observe(read: io::Result<String>) -> PrimaryObservation {
     let text = match read {
         Ok(text) => text,
@@ -44,7 +43,6 @@ pub(crate) fn observe(read: io::Result<String>) -> PrimaryObservation {
 }
 
 /// Select the runtime mode with migration disabled.
-#[allow(dead_code, reason = "wired at startup in 2C-2 S2")]
 pub(crate) fn effective_outcome(outcome: StartupOutcome) -> RuntimeMode {
     match outcome {
         StartupOutcome::Migrate { .. } => RuntimeMode::LegacyCompatible,
@@ -53,7 +51,6 @@ pub(crate) fn effective_outcome(outcome: StartupOutcome) -> RuntimeMode {
 }
 
 /// Return whether the runtime mode permits settings writes.
-#[allow(dead_code, reason = "wired at startup in 2C-2 S2")]
 pub(crate) fn writes_allowed(mode: &RuntimeMode) -> bool {
     match mode {
         RuntimeMode::Normal | RuntimeMode::LegacyCompatible => true,
@@ -62,7 +59,6 @@ pub(crate) fn writes_allowed(mode: &RuntimeMode) -> bool {
 }
 
 /// Identifies a write refused by the runtime mode.
-#[allow(dead_code, reason = "wired at startup in 2C-2 S2")]
 #[derive(Debug)]
 pub(crate) struct ModeRefused;
 
@@ -75,13 +71,12 @@ impl fmt::Display for ModeRefused {
 impl std::error::Error for ModeRefused {}
 
 /// Construct a typed runtime-mode refusal.
-#[allow(dead_code, reason = "wired at startup in 2C-2 S2")]
 pub(crate) fn mode_refused() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, ModeRefused)
 }
 
 /// Recognize a typed runtime-mode refusal.
-#[allow(dead_code, reason = "wired at startup in 2C-2 S2")]
+#[allow(dead_code, reason = "the UI will use this in 2C-2 S5")]
 pub(crate) fn is_mode_refused(error: &io::Error) -> bool {
     error
         .get_ref()
@@ -89,26 +84,35 @@ pub(crate) fn is_mode_refused(error: &io::Error) -> bool {
 }
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::config_fs::{ConfigDir, VerifiedFile, WriterLock};
 use super::settings;
 use island_core::config_state::{ArtifactInventory, ProtectedBackupName, plan_startup};
 
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_sequence() -> u64 {
+    SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 static STORE: Mutex<Option<Arc<ConfigSnapshot>>> = Mutex::new(None);
 
 pub(crate) struct ConfigSnapshot {
+    sequence: u64,
     text: Option<String>,
     mode: RuntimeMode,
     storage_ready: bool,
 }
 
 // Readers and writers switch to these accessors in 2C-2 S3.
-#[allow(dead_code, reason = "readers switch in 2C-2 S3")]
 impl ConfigSnapshot {
+    #[allow(dead_code, reason = "readers will use this in 2C-2 S5")]
     pub(crate) fn text(&self) -> Option<&str> {
         self.text.as_deref()
     }
+    #[allow(dead_code, reason = "readers will use this in 2C-2 S5")]
     pub(crate) fn mode(&self) -> &RuntimeMode {
         &self.mode
     }
@@ -147,19 +151,7 @@ fn prepared(result: io::Result<bool>) -> bool {
     }
 }
 
-fn observe_folder(folder: io::Result<PathBuf>, storage_ready: bool) -> ConfigSnapshot {
-    let result = folder.and_then(|path| ConfigDir::open(&path).map_err(io::Error::from));
-    let dir = match result {
-        Ok(dir) => dir,
-        Err(error) => {
-            let observation = observe(Err(error));
-            return ConfigSnapshot {
-                text: None,
-                mode: effective_outcome(plan_startup(&observation, &ArtifactInventory::default())),
-                storage_ready: false,
-            };
-        }
-    };
+fn inventory(dir: &ConfigDir) -> ArtifactInventory {
     let mut inventory = ArtifactInventory::default();
     if let Ok(entries) = dir.entries() {
         for name in entries {
@@ -174,6 +166,32 @@ fn observe_folder(folder: io::Result<PathBuf>, storage_ready: bool) -> ConfigSna
             }
         }
     }
+    inventory
+}
+
+fn observe_folder(folder: io::Result<PathBuf>, storage_ready: bool) -> ConfigSnapshot {
+    observe_folder_at(folder, storage_ready, next_sequence())
+}
+
+fn observe_folder_at(
+    folder: io::Result<PathBuf>,
+    storage_ready: bool,
+    sequence: u64,
+) -> ConfigSnapshot {
+    let result = folder.and_then(|path| ConfigDir::open(&path).map_err(io::Error::from));
+    let dir = match result {
+        Ok(dir) => dir,
+        Err(error) => {
+            let observation = observe(Err(error));
+            return ConfigSnapshot {
+                sequence,
+                text: None,
+                mode: effective_outcome(plan_startup(&observation, &ArtifactInventory::default())),
+                storage_ready: false,
+            };
+        }
+    };
+    let inventory = inventory(&dir);
     let read = VerifiedFile::open(&dir, "config.toml".as_ref())
         .map_err(io::Error::from)
         .and_then(|mut file| settings::read_verified(&mut file));
@@ -182,30 +200,29 @@ fn observe_folder(folder: io::Result<PathBuf>, storage_ready: bool) -> ConfigSna
         Err(error) => (observe(Err(error)), None),
     };
     ConfigSnapshot {
+        sequence,
         text,
         mode: effective_outcome(plan_startup(&observation, &inventory)),
         storage_ready,
     }
 }
 
-#[allow(dead_code, reason = "instance bootstrap is used by isolated tests")]
+#[cfg(test)]
 pub(crate) fn bootstrap_at(base: &Path) -> ConfigSnapshot {
     let storage_ready = prepared(settings::prepare_storage_at(base));
     observe_folder(Ok(base.join("Islora")), storage_ready)
 }
 
-// make runs under the slot mutex and must not access the store.
 fn install_once(
     slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
     make: impl FnOnce() -> ConfigSnapshot,
 ) -> Arc<ConfigSnapshot> {
-    let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(snapshot) = guard.as_ref() {
-        return Arc::clone(snapshot);
+    if let Some(snapshot) = slot.lock().unwrap_or_else(PoisonError::into_inner).clone() {
+        return snapshot;
     }
     let snapshot = Arc::new(make());
-    *guard = Some(Arc::clone(&snapshot));
-    snapshot
+    let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(guard.get_or_insert(snapshot))
 }
 
 fn config_folder() -> io::Result<PathBuf> {
@@ -223,7 +240,7 @@ pub(crate) fn bootstrap() -> Arc<ConfigSnapshot> {
     })
 }
 
-#[allow(dead_code, reason = "readers switch in 2C-2 S3")]
+#[allow(dead_code, reason = "readers will use this in 2C-2 S5")]
 pub(crate) fn snapshot() -> Option<Arc<ConfigSnapshot>> {
     STORE.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
@@ -239,19 +256,43 @@ pub(crate) fn text() -> Option<String> {
     text_in(&STORE)
 }
 
-fn refresh_folder(
+fn install_newer(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    snapshot: Arc<ConfigSnapshot>,
+) -> Arc<ConfigSnapshot> {
+    let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(current) = guard.as_ref() {
+        if snapshot.sequence > current.sequence {
+            *guard = Some(Arc::clone(&snapshot));
+            return snapshot;
+        }
+        return Arc::clone(current);
+    }
+    snapshot
+}
+
+fn refresh_folder_at(
     slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
     folder: io::Result<PathBuf>,
+    sequence: u64,
 ) -> Arc<ConfigSnapshot> {
     let previous = slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let storage_ready = previous
         .as_ref()
         .is_some_and(|snapshot| snapshot.storage_ready);
-    let snapshot = Arc::new(observe_folder(folder, storage_ready));
+    let snapshot = Arc::new(observe_folder_at(folder, storage_ready, sequence));
     if previous.is_some() {
-        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&snapshot));
+        install_newer(slot, snapshot)
+    } else {
+        snapshot
     }
-    snapshot
+}
+
+fn refresh_folder(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    folder: io::Result<PathBuf>,
+) -> Arc<ConfigSnapshot> {
+    refresh_folder_at(slot, folder, next_sequence())
 }
 
 #[cfg(test)]
@@ -274,43 +315,195 @@ fn read_locked(lock: &WriterLock, path: &Path) -> io::Result<String> {
     read_verified(&mut file)
 }
 
+#[cfg(test)]
 pub(crate) fn try_remember_path(path: &Path, key: &str, value: &str) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
-    })?;
-    let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
-    let text = read_locked(&lock, path)?;
-    let updated = prepared_write(&text, key, value)?;
-    config_commit::commit_primary(lock.directory(), path, &updated, Some(text.as_bytes()))
+    remember_core(path, key, value).0
 }
 
+fn remember_core(path: &Path, key: &str, value: &str) -> (io::Result<()>, Committed) {
+    let mut committed = Committed::None;
+    let result = (|| {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
+        })?;
+        let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
+        let text = read_locked(&lock, path)?;
+        let updated = prepared_write(&text, key, value)?;
+        match config_commit::commit_primary(lock.directory(), path, &updated, Some(text.as_bytes()))
+        {
+            Ok(()) => {
+                committed = Committed::Text(updated, next_sequence());
+                Ok(())
+            }
+            Err(error) => {
+                if config_commit::is_commit_unverified(&error) {
+                    committed = Committed::Unverified(next_sequence());
+                }
+                Err(error)
+            }
+        }
+    })();
+    (result, committed)
+}
+
+#[cfg(test)]
 pub(crate) fn locked_update_at<T>(
     path: &Path,
     action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
 ) -> io::Result<T> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
-    })?;
-    let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
-    let text = read_locked(&lock, path)?;
-    let mut current = text.clone();
-    let mut unverified = false;
-    action(&text, &mut |key, value| {
+    locked_update_core(path, action).0
+}
+
+enum Committed {
+    None,
+    Text(String, u64),
+    Unverified(u64),
+}
+
+fn locked_update_core<T>(
+    path: &Path,
+    action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
+) -> (io::Result<T>, Committed) {
+    let mut committed = Committed::None;
+    let result = (|| {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
+        })?;
+        let lock = WriterLock::acquire(parent).map_err(io::Error::from)?;
+        let text = read_locked(&lock, path)?;
+        let mut current = text.clone();
+        let mut unverified = false;
+        let result = action(&text, &mut |key, value| {
+            if unverified {
+                return Err(io::Error::other(config_commit::CommitUnverified));
+            }
+            let updated = prepared_write(&current, key, value)?;
+            if let Err(error) = config_commit::commit_primary(
+                lock.directory(),
+                path,
+                &updated,
+                Some(current.as_bytes()),
+            ) {
+                unverified = config_commit::is_commit_unverified(&error);
+                return Err(error);
+            }
+            current = updated;
+            committed = Committed::Text(current.clone(), next_sequence());
+            Ok(())
+        });
         if unverified {
-            return Err(io::Error::other(config_commit::CommitUnverified));
+            committed = Committed::Unverified(next_sequence());
         }
-        let updated = prepared_write(&current, key, value)?;
-        if let Err(error) = config_commit::commit_primary(
-            lock.directory(),
-            path,
-            &updated,
-            Some(current.as_bytes()),
-        ) {
-            unverified = config_commit::is_commit_unverified(&error);
-            return Err(error);
+        result
+    })();
+    (result, committed)
+}
+
+fn gate(slot: &Mutex<Option<Arc<ConfigSnapshot>>>) -> io::Result<Arc<ConfigSnapshot>> {
+    slot.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .filter(|snapshot| snapshot.writes_allowed())
+        .ok_or_else(mode_refused)
+}
+
+fn finish(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    path: &Path,
+    previous: &ConfigSnapshot,
+    committed: Committed,
+) {
+    match committed {
+        Committed::None => {}
+        Committed::Unverified(sequence) => {
+            refresh_folder_at(
+                slot,
+                path.parent()
+                    .map(Path::to_path_buf)
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound)),
+                sequence,
+            );
         }
-        current = updated;
-        Ok(())
+        Committed::Text(text, sequence) => {
+            let inventory = path
+                .parent()
+                .and_then(|p| ConfigDir::open(p).ok())
+                .map_or_else(ArtifactInventory::default, |dir| inventory(&dir));
+            let mode = effective_outcome(plan_startup(&observe(Ok(text.clone())), &inventory));
+            let snapshot = Arc::new(ConfigSnapshot {
+                sequence,
+                text: Some(text),
+                mode,
+                storage_ready: previous.storage_ready,
+            });
+            install_newer(slot, snapshot);
+        }
+    }
+}
+
+fn run_update<T>(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    path: impl FnOnce() -> io::Result<PathBuf>,
+    write: impl FnOnce(&Path) -> (io::Result<T>, Committed),
+) -> io::Result<T> {
+    let previous = gate(slot)?;
+    let path = path()?;
+    let (result, committed) = write(&path);
+    finish(slot, &path, &previous, committed);
+    result
+}
+
+/// Instance form skips the global storage_writable check.
+#[cfg(test)]
+fn update_in(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    path: &Path,
+    key: &str,
+    value: &str,
+) -> io::Result<()> {
+    run_update(
+        slot,
+        || Ok(path.to_path_buf()),
+        |path| remember_core(path, key, value),
+    )
+}
+
+/// Instance form skips the global storage_writable check.
+#[cfg(test)]
+fn update_with_in<T>(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    path: &Path,
+    action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
+) -> io::Result<T> {
+    run_update(
+        slot,
+        || Ok(path.to_path_buf()),
+        |path| locked_update_core(path, action),
+    )
+}
+
+fn writable_path() -> io::Result<PathBuf> {
+    if !settings::storage_writable() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "configuration storage is read-only",
+        ));
+    }
+    settings::path()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))
+}
+
+pub(crate) fn update(key: &str, value: &str) -> io::Result<()> {
+    run_update(&STORE, writable_path, |path| {
+        remember_core(path, key, value)
+    })
+}
+
+pub(crate) fn update_with<T>(
+    action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
+) -> io::Result<T> {
+    run_update(&STORE, writable_path, |path| {
+        locked_update_core(path, action)
     })
 }
 
@@ -318,6 +511,196 @@ pub(crate) fn locked_update_at<T>(
 mod tests {
     use super::*;
     use island_core::config_state::{ArtifactInventory, ProtectedBackupName, plan_startup};
+
+    #[test]
+    fn unverified_commit_rereads_disk() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let path = base.join("Islora/config.toml");
+        let target = path.clone();
+        super::super::config_commit::AFTER_PRIMARY_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(target, b"config_version = \"100\"\n").unwrap()
+            }));
+        });
+        let error = update_in(&slot, &path, "media_layout", "compact").unwrap_err();
+        assert!(config_commit::is_commit_unverified(&error));
+        assert_eq!(
+            text_in(&slot).unwrap().as_bytes(),
+            std::fs::read(path).unwrap()
+        );
+        assert_eq!(
+            slot.lock().unwrap().as_ref().unwrap().mode,
+            RuntimeMode::ReadOnly
+        );
+    }
+
+    #[test]
+    fn refused_on_empty_slot() {
+        let slot = Mutex::new(None);
+        assert!(is_mode_refused(
+            &update_in(&slot, Path::new("unused"), "x", "y").unwrap_err()
+        ));
+    }
+
+    #[test]
+    fn refused_when_storage_not_ready() {
+        let slot = Mutex::new(Some(Arc::new(ConfigSnapshot {
+            storage_ready: false,
+            ..sample()
+        })));
+        let called = std::cell::Cell::new(false);
+        let err = update_with_in(&slot, Path::new("unused"), |_, _| {
+            called.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(is_mode_refused(&err));
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn refused_in_read_only_writes_nothing() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, b"config_version = \"100\"\n").unwrap();
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let bytes = std::fs::read(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(is_mode_refused(
+            &update_in(&slot, &path, "x", "y").unwrap_err()
+        ));
+        assert_eq!(bytes, std::fs::read(&path).unwrap());
+        assert_eq!(
+            modified,
+            std::fs::metadata(&path).unwrap().modified().unwrap()
+        );
+    }
+
+    #[test]
+    fn refused_in_recovery_runs_no_action() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("config.toml.bak"), b"invalid backup").unwrap();
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let called = std::cell::Cell::new(false);
+        let err = update_with_in(&slot, &folder.join("config.toml"), |_, _| {
+            called.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(is_mode_refused(&err));
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn write_through_sets_committed_text() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let path = base.join("Islora/config.toml");
+        let old = slot.lock().unwrap().clone().unwrap();
+        update_in(&slot, &path, "media_layout", "compact").unwrap();
+        let new = slot.lock().unwrap().clone().unwrap();
+        assert!(!Arc::ptr_eq(&old, &new));
+        assert_eq!(new.mode, RuntimeMode::Normal);
+        assert_eq!(
+            text_in(&slot).unwrap().as_bytes(),
+            std::fs::read(&path).unwrap()
+        );
+    }
+
+    #[test]
+    fn write_through_after_partial_transaction() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let path = base.join("Islora/config.toml");
+        let result: io::Result<()> = update_with_in(&slot, &path, |_, save| {
+            save("media_layout", "full")?;
+            Err(io::Error::other("after save"))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            text_in(&slot).unwrap().as_bytes(),
+            std::fs::read(&path).unwrap()
+        );
+    }
+
+    #[test]
+    fn failed_write_keeps_snapshot() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base))));
+        let path = base.join("Islora/config.toml");
+        let old = slot.lock().unwrap().clone().unwrap();
+        let result: io::Result<()> =
+            update_with_in(&slot, &path, |_, _| Err(io::Error::other("before save")));
+        assert!(result.is_err());
+        assert!(Arc::ptr_eq(&old, slot.lock().unwrap().as_ref().unwrap()));
+        let error = update_with_in(&slot, &path, |_, save| {
+            std::fs::write(&path, b"external change").unwrap();
+            save("media_layout", "compact")
+        })
+        .unwrap_err();
+        assert!(config_commit::is_primary_changed(&error));
+        assert!(Arc::ptr_eq(&old, slot.lock().unwrap().as_ref().unwrap()));
+    }
+
+    #[test]
+    fn older_write_through_never_replaces_newer() {
+        let slot = Mutex::new(Some(Arc::new(sample())));
+        let newer = Arc::new(ConfigSnapshot {
+            sequence: 2,
+            text: Some("new".into()),
+            ..sample()
+        });
+        let older = Arc::new(ConfigSnapshot {
+            sequence: 1,
+            text: Some("old".into()),
+            ..sample()
+        });
+        install_newer(&slot, newer);
+        install_newer(&slot, older);
+        assert_eq!(text_in(&slot).as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn legacy_compatible_still_writes() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let a = settings::tests::temp_base();
+        let b = settings::tests::temp_base();
+        for base in [&a, &b] {
+            std::fs::create_dir(base.join("Islora")).unwrap();
+            std::fs::write(base.join("Islora/config.toml"), b"config_version = \"1\"\n").unwrap();
+        }
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&a))));
+        let path = a.join("Islora/config.toml");
+        let other = b.join("Islora/config.toml");
+        update_in(&slot, &path, "media_layout", "compact").unwrap();
+        try_remember_path(&other, "media_layout", "compact").unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), std::fs::read(other).unwrap());
+    }
 
     #[test]
     fn app_never_reads_config_directly() {
@@ -415,6 +798,7 @@ mod tests {
         let snapshot = observe_folder(Ok(file.clone()), true);
         assert!(!snapshot.storage_ready && !snapshot.writes_allowed());
         let slot = Mutex::new(Some(Arc::new(ConfigSnapshot {
+            sequence: 0,
             text: None,
             mode: RuntimeMode::Normal,
             storage_ready: true,
@@ -425,6 +809,7 @@ mod tests {
 
     fn sample() -> ConfigSnapshot {
         ConfigSnapshot {
+            sequence: 0,
             text: None,
             mode: RuntimeMode::Normal,
             storage_ready: true,
@@ -567,6 +952,7 @@ mod tests {
     #[test]
     fn snapshot_debug_hides_text() {
         let snap = ConfigSnapshot {
+            sequence: 0,
             text: Some("https://example.invalid/secret.ics".into()),
             ..sample()
         };

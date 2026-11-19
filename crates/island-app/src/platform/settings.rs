@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use super::config_commit;
 use super::config_fs::{ConfigDir, Draft, VerifiedFile, WriterLock, WriterMutex};
+#[cfg(test)]
 pub(crate) use super::config_store::locked_update_at;
+#[cfg(test)]
 use super::config_store::try_remember_path;
 use island_core::config::write_value;
 use island_core::migration::{CriticalKey, MigrationError, MigrationOutcome, prepare};
@@ -135,7 +137,7 @@ fn artifacts(dir: &ConfigDir, ambiguous: bool) -> io::Result<bool> {
     Ok(false)
 }
 
-fn path() -> Option<PathBuf> {
+pub(crate) fn path() -> Option<PathBuf> {
     let roaming = PathBuf::from(std::env::var_os("APPDATA")?);
     let folder = roaming.join("Islora");
     Some(folder.join("config.toml"))
@@ -296,18 +298,7 @@ pub fn storage_writable() -> bool {
 
 /// Applies a complete update through the same backup and recovery path.
 pub fn try_remember(key: &str, value: &str) -> io::Result<()> {
-    if !storage_writable() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "configuration storage is read-only",
-        ));
-    }
-    let path =
-        path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))?;
-    let result = try_remember_path(&path, key, value);
-    // 2C-2 S4b replaces this re-read with write-through of committed text.
-    crate::platform::config_store::refresh();
-    result
+    super::config_store::update(key, value)
 }
 
 /// Why an ordinary write must leave the configuration alone. Variants name a
@@ -436,18 +427,7 @@ pub(crate) fn prepared_write(text: &str, key: &str, value: &str) -> Result<Strin
 pub(crate) fn locked_update<T>(
     action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
 ) -> io::Result<T> {
-    if !storage_writable() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "configuration storage is read-only",
-        ));
-    }
-    let path =
-        path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))?;
-    let result = locked_update_at(&path, action);
-    // 2C-2 S4b replaces this re-read with write-through of committed text.
-    crate::platform::config_store::refresh();
-    result
+    super::config_store::update_with(action)
 }
 
 /// Details of a failed settings save and its rollback.

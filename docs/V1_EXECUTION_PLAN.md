@@ -178,6 +178,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2C-2 S2 | done: `ConfigSnapshot` (text, mode, `storage_ready`; `Debug` hides the text), `bootstrap_at` / `bootstrap` sharing one observe path (preparation once as before, inventory from `dir.entries()`, lock-free verified read relative to the held `ConfigDir`), `install_once` slot with poison recovery; app startup calls `config_store::bootstrap()`; settings.rs gains `is_stale_draft_name` (pure extraction) and visibility changes only; readers not switched; Lucia and Enzo approve (Giulia unavailable twice); 572 tests | see `git log` |
 | 2C-2 S3 | done: the 17 `settings::read()` call sites in app.rs read `config_store::text()` (parsing, defaults, `--notch`, presentation fallback unchanged); `reload()` refreshes first; `refresh` shares the observe path, does not re-prepare, copies `storage_ready`, installs nothing on an empty slot; `try_remember` / `locked_update` refresh after every write attempt (interim re-read until S4b); Lucia approves after one correction, Enzo's two majors rejected by the lead; 579 tests | see `git log` |
 | 2C-2 S4a | done: `read_locked`, `try_remember_path`, `locked_update_at` moved from settings.rs to config_store.rs, pure move (mechanical removed/added check: only `use` lines and one `pub(crate)` differ); settings.rs wrappers resolve through `use`; Nino (Haiku) approves; 579 tests | see `git log` |
+| 2C-2 S4b | done: `config_store::update` / `update_with` (and `_in` forms sharing `run_update`): mode gate first (`ModeRefused` for `ReadOnly`, `Recovery`, `storage_ready` false or no snapshot; no lock, no action), then `storage_writable`, lock and commit as before; write-through of the last committed text (also after a later action error), mode reclassified from a folder listing, `CommitUnverified` -> one re-read; a write sequence taken under the writer lock so an older install never replaces a newer one; settings.rs wrappers are one-line calls; Lucia and Giulia approve after one correction; 589 tests | see `git log` |
 
 ## Resume here
 
@@ -649,12 +650,30 @@ Budget record for 2C-2 S3: Claude 5-hour 73 -> 81, weekly 19 -> 20; Codex
 mechanically, then Nino checked bodies, wrappers and name resolution: no
 findings). Spec `scratchpad/spec-2c2-s4a.md`.
 
-First step next: S4b mode gate and write-through; spec ready in
-`scratchpad/spec-2c2-s4b.md` (gate before `storage_writable` and the lock;
-write-through of the last committed text with the mode reclassified from a
-folder listing, no primary re-read; `CommitUnverified` falls back to one
-re-read; no commit -> snapshot unchanged). Critical step (persistence):
-reviewers Lucia plus Giulia, or Enzo if agy is down.
+2C-2 S4b is committed. Paolo wrote it, one correction round: Lucia's major
+(two overlapping in-process writers could swap an older text in after a newer
+one) fixed with a write sequence taken under the writer lock; bootstrap,
+refresh, write-through and the unverified re-read all install only when
+newer. Tests split into the spec names, plus a `PrimaryChanged` conflict case
+and `older_write_through_never_replaces_newer`. Giulia: one minor, then no
+findings; Lucia approves. Minors for the Phase B cleanup: `install_once` now
+runs `make` outside the slot mutex, so two concurrent `bootstrap()` calls
+would both prepare (startup is single-threaded; say so in a comment or guard
+with a `OnceLock`); a test that a low-sequence `refresh` after a newer install
+leaves the slot unchanged; `legacy_compatible_still_writes` should assert the
+mode stays `LegacyCompatible`. Behaviour change for S5: a refused write now
+returns `ModeRefused` (`PermissionDenied`), callers roll back and show the
+generic failure text until S5 adds the distinct one.
+
+Budget record for 2C-2 S4a and S4b: Claude 5-hour 81 -> 94, weekly 20 -> 22;
+Codex 5-hour 73 -> (reset at 23:48 UTC) 2, weekly 27.
+
+Parked at 00:20 UTC on 2026-11-19: Claude 5-hour at 94%, resets 02:20 UTC.
+The lead waits for the reset, then continues with S5.
+
+First step next: S5 refusal message (`SaveFailure` gains `read_only`;
+settings and calendar texts; startup autostart silent on refusal). Reviewers
+by kind: Lucia (message/API shape) plus Enzo or Giulia.
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.
