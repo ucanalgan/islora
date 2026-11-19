@@ -2,6 +2,7 @@ pub mod autostart;
 pub mod browser;
 pub mod config_commit;
 pub mod config_fs;
+pub(crate) mod config_migrate;
 pub(crate) mod config_store;
 pub mod drop_target;
 pub mod hotkey;
