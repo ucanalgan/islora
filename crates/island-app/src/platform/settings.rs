@@ -220,6 +220,14 @@ pub(crate) fn is_stale_draft_name(name: &std::ffi::OsStr) -> bool {
 }
 
 pub(crate) fn prepare_storage_at(base: &Path) -> io::Result<bool> {
+    prepare_storage_locked(base).map(|(first_run, _lock)| first_run)
+}
+
+/// The caller holds the per-user writer lock until the returned WriterLock is dropped.
+/// Folder rename and creation by path occur under the WriterMutex before a folder handle exists.
+// used by bootstrap from 2C-3 S6
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn prepare_storage_locked(base: &Path) -> io::Result<(bool, WriterLock)> {
     let folder = base.join("Islora");
     let mutex = WriterMutex::acquire().map_err(io::Error::from)?;
     if !folder.exists() {
@@ -265,7 +273,7 @@ pub(crate) fn prepare_storage_at(base: &Path) -> io::Result<bool> {
         text.push_str("config_version = \"2\"\n");
         config_commit::commit_primary(dir, &path, &text, None)?;
     }
-    Ok(first_run)
+    Ok((first_run, lock))
 }
 
 /// Refuse oversized or non-UTF-8 settings without replacing or truncating
@@ -786,6 +794,92 @@ pub(crate) mod tests {
             island_core::config::read_value(&text, "sound_wave").as_deref(),
             Some("off")
         );
+    }
+
+    #[test]
+    fn locked_prepare_holds_writer_lock_until_drop() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let other = temp_base();
+        let (_, lock) = prepare_storage_locked(&base).unwrap();
+        let contender = other.to_path_buf();
+        let error = std::thread::spawn(move || prepare_storage_at(&contender).unwrap_err())
+            .join()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        drop(lock);
+        let contender = other.to_path_buf();
+        assert!(
+            std::thread::spawn(move || prepare_storage_at(&contender))
+                .join()
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn prepare_storage_at_drops_lock_on_return() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        prepare_storage_at(&base).unwrap();
+        let folder = base.join("Islora");
+        std::thread::spawn(move || {
+            let _lock = WriterLock::acquire(&folder).unwrap();
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn locked_prepare_matches_unlocked_result() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let locked_base = temp_base();
+        let unlocked_base = temp_base();
+        let (locked_first, lock) = prepare_storage_locked(&locked_base).unwrap();
+        drop(lock);
+        let contender = unlocked_base.to_path_buf();
+        let unlocked_first = std::thread::spawn(move || prepare_storage_at(&contender).unwrap())
+            .join()
+            .unwrap();
+        assert_eq!(locked_first, unlocked_first);
+        let names = |base: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(base.join("Islora"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&locked_base), names(&unlocked_base));
+        assert_eq!(
+            std::fs::read(locked_base.join("Islora/config.toml")).unwrap(),
+            std::fs::read(unlocked_base.join("Islora/config.toml")).unwrap()
+        );
+    }
+
+    #[test]
+    fn preparation_failure_disables_writes() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("config.toml.failure"), b"failure").unwrap();
+        let result = prepare_storage_at(&base);
+        assert!(result.is_err());
+        assert!(!preparation_is_busy(result.as_ref().unwrap_err()));
+        let state = std::sync::atomic::AtomicU8::new(0);
+        let first = std::sync::atomic::AtomicBool::new(false);
+        record_preparation(&result, &state, &first);
+        assert_eq!(state.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(!first.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]
