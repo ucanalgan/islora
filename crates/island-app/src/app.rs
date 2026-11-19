@@ -3658,7 +3658,9 @@ fn stored_progress_style() -> ProgressStyle {
 }
 
 fn calendar_save_note(error: &std::io::Error) -> &'static str {
-    if crate::platform::config_commit::is_primary_changed(error) {
+    if config_store::is_mode_refused(error) {
+        "Takvim adresi kaydedilmedi: ayarlar \u{15f}u anda salt okunur (config.toml bu s\u{fc}r\u{fc}mden yeni ya da kurtarma bekliyor)."
+    } else if crate::platform::config_commit::is_primary_changed(error) {
         "Takvim adresi kaydedilemedi; config.toml baska bir program tarafindan degistirildi"
     } else {
         "Takvim adresi kaydedilemedi; dosya erisimini kontrol edin"
@@ -3764,10 +3766,7 @@ fn report_autostart_result(result: std::io::Result<AutostartOutcome>) {
         }
         Err(error) => {
             eprintln!("could not lock Windows startup setting: {error}");
-            settings::report_persistence_failure(settings::SaveFailure {
-                restored: true,
-                conflict: false,
-            });
+            settings::report_persistence_failure(settings::SaveFailure::from_error(&error, true));
         }
     }
 }
@@ -4280,7 +4279,8 @@ mod tests {
             outcome,
             AutostartOutcome::SaveFailed(settings::SaveFailure {
                 restored: true,
-                conflict: false
+                conflict: false,
+                read_only: false,
             })
         );
         std::fs::remove_dir_all(base).unwrap();
@@ -4288,6 +4288,10 @@ mod tests {
 
     #[test]
     fn calendar_save_note_distinguishes_conflict() {
+        assert_eq!(
+            calendar_save_note(&config_store::mode_refused()),
+            "Takvim adresi kaydedilmedi: ayarlar \u{15f}u anda salt okunur (config.toml bu s\u{fc}r\u{fc}mden yeni ya da kurtarma bekliyor)."
+        );
         let conflict = std::io::Error::other(crate::platform::config_fs::PrimaryChanged);
         assert_eq!(
             calendar_save_note(&conflict),
@@ -4324,7 +4328,8 @@ mod tests {
             outcome,
             AutostartOutcome::SaveFailed(settings::SaveFailure {
                 restored: false,
-                conflict: false
+                conflict: false,
+                read_only: false,
             })
         );
     }
@@ -4496,7 +4501,8 @@ mod tests {
             ))),
             Some(Err(settings::SaveFailure {
                 restored: true,
-                conflict: false
+                conflict: false,
+                read_only: false,
             }))
         );
         assert_eq!(island.start_mode(), previous);

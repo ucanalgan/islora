@@ -76,7 +76,6 @@ pub(crate) fn mode_refused() -> io::Error {
 }
 
 /// Recognize a typed runtime-mode refusal.
-#[allow(dead_code, reason = "the UI will use this in 2C-2 S5")]
 pub(crate) fn is_mode_refused(error: &io::Error) -> bool {
     error
         .get_ref()

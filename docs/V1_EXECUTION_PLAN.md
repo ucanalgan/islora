@@ -179,6 +179,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2C-2 S3 | done: the 17 `settings::read()` call sites in app.rs read `config_store::text()` (parsing, defaults, `--notch`, presentation fallback unchanged); `reload()` refreshes first; `refresh` shares the observe path, does not re-prepare, copies `storage_ready`, installs nothing on an empty slot; `try_remember` / `locked_update` refresh after every write attempt (interim re-read until S4b); Lucia approves after one correction, Enzo's two majors rejected by the lead; 579 tests | see `git log` |
 | 2C-2 S4a | done: `read_locked`, `try_remember_path`, `locked_update_at` moved from settings.rs to config_store.rs, pure move (mechanical removed/added check: only `use` lines and one `pub(crate)` differ); settings.rs wrappers resolve through `use`; Nino (Haiku) approves; 579 tests | see `git log` |
 | 2C-2 S4b | done: `config_store::update` / `update_with` (and `_in` forms sharing `run_update`): mode gate first (`ModeRefused` for `ReadOnly`, `Recovery`, `storage_ready` false or no snapshot; no lock, no action), then `storage_writable`, lock and commit as before; write-through of the last committed text (also after a later action error), mode reclassified from a folder listing, `CommitUnverified` -> one re-read; a write sequence taken under the writer lock so an older install never replaces a newer one; settings.rs wrappers are one-line calls; Lucia and Giulia approve after one correction; 589 tests | see `git log` |
+| 2C-2 S5 | done: `SaveFailure.read_only` (from `is_mode_refused`, wins over `conflict`); two read-only settings texts and one calendar text; the interactive autostart outer refusal reports the read-only text (restored, no autostart change); startup stays silent; Enzo and Nino approve (Giulia timed out); 590 tests | see `git log` |
 
 ## Resume here
 
@@ -671,9 +672,22 @@ Codex 5-hour 73 -> (reset at 23:48 UTC) 2, weekly 27.
 Parked at 00:20 UTC on 2026-11-19: Claude 5-hour at 94%, resets 02:20 UTC.
 The lead waits for the reset, then continues with S5.
 
-First step next: S5 refusal message (`SaveFailure` gains `read_only`;
-settings and calendar texts; startup autostart silent on refusal). Reviewers
-by kind: Lucia (message/API shape) plus Enzo or Giulia.
+2C-2 S5 is committed. Paolo wrote it in one pass while Claude was parked;
+reviewed without Claude-heavy runs: Enzo (fresh read-only Codex) no findings;
+Giulia failed twice (empty output when run in parallel with Codex, then a
+9-minute timeout); Nino (Haiku) checked the decoded texts and literals and
+approves. Not tested (need the global store): a pre-action autostart refusal
+and the silent startup path; both checked by reading. Minors for the Phase B
+cleanup: `start_with_windows_by_default` should also return silently on
+`Ok(SaveFailed)` with `read_only` set (unreachable today); the interactive
+refusal goes through the existing outer-`Err` branch, not
+`AutostartOutcome::SaveFailed` (same text and rollback). Run agy alone, never
+in parallel with another CLI.
+
+First step next: S6 refresh semantics (failed refresh keeps the snapshot;
+reclassify on refresh: v3 -> ReadOnly, back to v2 -> Normal, deleted primary
+-> Recovery; a preparation failure stays refused until restart; decide
+whether `open_settings` refreshes first). Reviewers: Lucia plus Enzo.
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.
