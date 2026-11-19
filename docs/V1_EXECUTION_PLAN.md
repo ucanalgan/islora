@@ -836,6 +836,10 @@ S4 spec draft (not yet checked by a lead): Enzo wrote `scratchpad/spec-2c3-s4-dr
 
 First step next: 2C-3 S5, failure recording and post-rename handling (D-E), with an explicit spec and tests before production integration.
 
+Budget override (Umut, 2026-11-19): continue Codex work until approximately 15% remains (85% used), keeping a reserve for hand-over and second-brain update. Starting Codex readings: 5-hour 31%, weekly 33%; Claude readings unknown, so no Claude delegation until known. Recheck before each task and park earlier if the next task and hand-over would cross the limit.
+
+S5 complete: failure records for Backup/Commit/Verify use the original source fingerprint and schema; prior valid attempts increment with saturation. SourceChanged does not record; a record-write error does not replace the migration failure. Independent Codex and Gemini reviews approved; tests for failed record cleanup and retention after verified success were added and independently reviewed. 639 workspace tests and Clippy passed (Windows filesystem tests outside sandbox). Production migration remains off. First step next: S6 bootstrap under one lock, including disk re-observation on SourceChanged or Verify; keep production switch off. Untracked docs/V1_STABLE_CHECKLIST.md and docs/WAVE_MEASUREMENTS.md are pre-existing; preserve them.
+
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
 Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:
