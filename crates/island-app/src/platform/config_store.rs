@@ -122,7 +122,7 @@ impl ConfigSnapshot {
         &self.mode
     }
     pub(crate) fn writes_allowed(&self) -> bool {
-        self.storage_ready && writes_allowed(&self.mode)
+        self.storage_ready && self.text.is_some() && writes_allowed(&self.mode)
     }
 }
 
@@ -143,16 +143,6 @@ impl fmt::Debug for ConfigSnapshot {
             .field("text", &TextPresence(self.text.as_ref().map(String::len)))
             .field("storage_ready", &self.storage_ready)
             .finish()
-    }
-}
-
-fn prepared(result: io::Result<bool>) -> bool {
-    match result {
-        Ok(_) => true,
-        Err(error) => {
-            eprintln!("settings storage could not be prepared: {:?}", error.kind());
-            false
-        }
     }
 }
 
@@ -205,26 +195,58 @@ fn observe_folder_at(
             };
         }
     };
-    let inventory = inventory(&dir);
-    let read = VerifiedFile::open(&dir, settings::PRIMARY_NAME.as_ref())
+    observe_directory(&dir, storage_ready, sequence, &mut || {})
+}
+
+fn observe_directory(
+    dir: &ConfigDir,
+    storage_ready: bool,
+    sequence: u64,
+    checkpoint: &mut impl FnMut(),
+) -> ConfigSnapshot {
+    checkpoint();
+    let inventory = inventory(dir);
+    checkpoint();
+    let read = VerifiedFile::open(dir, settings::PRIMARY_NAME.as_ref())
         .map_err(io::Error::from)
         .and_then(|mut file| settings::read_verified(&mut file));
     let (observation, text) = match read {
         Ok(text) => (observe(Ok(text.clone())), Some(text)),
         Err(error) => (observe(Err(error)), None),
     };
-    ConfigSnapshot {
+    checkpoint();
+    let snapshot = ConfigSnapshot {
         sequence,
         text,
         mode: effective_outcome(plan_startup(&observation, &inventory)),
         storage_ready,
+    };
+    checkpoint();
+    snapshot
+}
+
+fn bootstrap_prepared(
+    base: &Path,
+    result: io::Result<(bool, WriterLock)>,
+    mut checkpoint: impl FnMut(),
+) -> ConfigSnapshot {
+    match result {
+        Ok((_first_run, lock)) => {
+            let snapshot =
+                observe_directory(lock.directory(), true, next_sequence(), &mut checkpoint);
+            drop(lock);
+            snapshot
+        }
+        Err(error) => {
+            eprintln!("settings storage could not be prepared: {:?}", error.kind());
+            observe_folder(Ok(base.join("Islora")), false)
+        }
     }
 }
 
 #[cfg(test)]
 pub(crate) fn bootstrap_at(base: &Path) -> ConfigSnapshot {
-    let storage_ready = prepared(settings::prepare_storage_at(base));
-    observe_folder(Ok(base.join("Islora")), storage_ready)
+    bootstrap_prepared(base, settings::prepare_storage_locked(base), || {})
 }
 
 fn install_once(
@@ -249,8 +271,17 @@ fn config_folder() -> io::Result<PathBuf> {
 
 pub(crate) fn bootstrap() -> Arc<ConfigSnapshot> {
     install_once(&STORE, || {
-        let storage_ready = prepared(settings::prepare_storage());
-        let snapshot = observe_folder(config_folder(), storage_ready);
+        let snapshot = match std::env::var_os("APPDATA") {
+            Some(base) => {
+                let base = PathBuf::from(base);
+                bootstrap_prepared(
+                    &base,
+                    settings::prepare_storage_locked_recorded(&base),
+                    || {},
+                )
+            }
+            None => observe_folder(config_folder(), false),
+        };
         eprintln!("settings startup mode: {:?}", snapshot.mode);
         snapshot
     })
@@ -1129,19 +1160,18 @@ mod tests {
     }
 
     #[test]
-    fn no_snapshot_text_skips_check() {
+    fn no_snapshot_text_refuses_write_even_if_file_is_readable() {
         let _serial = super::super::config_fs::TEST_WRITER_SERIAL
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let (base, _) = write_fixture();
         let slot = Mutex::new(Some(Arc::new(sample())));
         let path = base.join("Islora/config.toml");
-        update_in(&slot, &path, "new_key", "value").unwrap();
-        assert!(
-            std::fs::read_to_string(path)
-                .unwrap()
-                .contains("new_key = \"value\"")
-        );
+        let before = std::fs::read(&path).unwrap();
+        assert!(is_mode_refused(
+            &update_in(&slot, &path, "new_key", "value").unwrap_err()
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
     #[test]
@@ -1202,6 +1232,56 @@ mod tests {
         assert_eq!(snap.mode(), &RuntimeMode::Normal);
         assert!(snap.storage_ready && snap.writes_allowed());
         assert!(snap.text().is_some());
+    }
+
+    #[test]
+    fn bootstrap_holds_one_lock_through_snapshot() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let result = settings::prepare_storage_locked(&base);
+        let folder = base.join("Islora");
+        let mut checkpoints = 0;
+        let snapshot = bootstrap_prepared(&base, result, || {
+            checkpoints += 1;
+            let contender = folder.clone();
+            assert!(
+                std::thread::spawn(move || WriterLock::acquire(&contender).is_err())
+                    .join()
+                    .unwrap()
+            );
+        });
+        assert_eq!(checkpoints, 4);
+        assert!(snapshot.writes_allowed());
+        assert!(
+            std::thread::spawn(move || WriterLock::acquire(&folder).is_ok())
+                .join()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn busy_bootstrap_observes_without_preparation_or_writes() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("config.toml");
+        let bytes = b"config_version = \"1\"\n";
+        std::fs::write(&path, bytes).unwrap();
+        let lock = WriterLock::acquire(&folder).unwrap();
+        let other = base.to_path_buf();
+        let snapshot = std::thread::spawn(move || bootstrap_at(&other))
+            .join()
+            .unwrap();
+        assert_eq!(snapshot.text(), Some(std::str::from_utf8(bytes).unwrap()));
+        assert_eq!(snapshot.mode(), &RuntimeMode::LegacyCompatible);
+        assert!(!snapshot.storage_ready && !snapshot.writes_allowed());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        drop(lock);
     }
 
     #[test]
@@ -1318,7 +1398,7 @@ mod tests {
         assert_eq!(snap.mode(), &RuntimeMode::LegacyCompatible);
         assert!(snap.text().is_none());
         assert!(snap.storage_ready);
-        assert!(snap.writes_allowed());
+        assert!(!snap.writes_allowed());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 

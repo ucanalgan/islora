@@ -174,9 +174,17 @@ fn record_preparation(
     state: &std::sync::atomic::AtomicU8,
     first: &std::sync::atomic::AtomicBool,
 ) {
+    record_preparation_result(result.as_ref().copied(), state, first);
+}
+
+fn record_preparation_result(
+    result: Result<bool, &io::Error>,
+    state: &std::sync::atomic::AtomicU8,
+    first: &std::sync::atomic::AtomicBool,
+) {
     match result {
         Ok(first_run) => {
-            if *first_run {
+            if first_run {
                 first.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             state.store(1, std::sync::atomic::Ordering::Relaxed);
@@ -184,6 +192,20 @@ fn record_preparation(
         Err(error) if preparation_is_busy(error) => {}
         Err(_) => state.store(2, std::sync::atomic::Ordering::Relaxed),
     }
+}
+
+pub(crate) fn prepare_storage_locked_recorded(base: &Path) -> io::Result<(bool, WriterLock)> {
+    prepare_storage_locked_recorded_with(base, &STORAGE_STATE, &FIRST_RUN)
+}
+
+fn prepare_storage_locked_recorded_with(
+    base: &Path,
+    state: &std::sync::atomic::AtomicU8,
+    first: &std::sync::atomic::AtomicBool,
+) -> io::Result<(bool, WriterLock)> {
+    let result = prepare_storage_locked(base);
+    record_preparation_result(result.as_ref().map(|(first, _)| *first), state, first);
+    result
 }
 
 fn preparation_is_busy(error: &io::Error) -> bool {
@@ -225,8 +247,6 @@ pub(crate) fn prepare_storage_at(base: &Path) -> io::Result<bool> {
 
 /// The caller holds the per-user writer lock until the returned WriterLock is dropped.
 /// Folder rename and creation by path occur under the WriterMutex before a folder handle exists.
-// used by bootstrap from 2C-3 S6
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_storage_locked(base: &Path) -> io::Result<(bool, WriterLock)> {
     let folder = base.join("Islora");
     let mutex = WriterMutex::acquire().map_err(io::Error::from)?;
@@ -903,6 +923,58 @@ pub(crate) mod tests {
         assert!(first.load(std::sync::atomic::Ordering::Relaxed));
         record_preparation(&prepare_storage_at(&base), &state, &first);
         assert!(first.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn locked_recorded_preparation_preserves_state_semantics() {
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let state = AtomicU8::new(0);
+        let first = AtomicBool::new(false);
+        let (is_first, lock) = prepare_storage_locked_recorded_with(&base, &state, &first).unwrap();
+        assert!(is_first);
+        assert_eq!(state.load(Ordering::Relaxed), 1);
+        assert!(first.load(Ordering::Relaxed));
+
+        let busy_base = temp_base();
+        let busy_state = AtomicU8::new(0);
+        let busy_first = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let result = scope
+                .spawn(|| {
+                    prepare_storage_locked_recorded_with(&busy_base, &busy_state, &busy_first)
+                        .err()
+                        .unwrap()
+                })
+                .join()
+                .unwrap();
+            assert!(preparation_is_busy(&result));
+        });
+        assert_eq!(busy_state.load(Ordering::Relaxed), 0);
+        assert!(!busy_first.load(Ordering::Relaxed));
+        assert!(!busy_base.join("Islora").exists());
+        drop(lock);
+
+        let (is_first, lock) = prepare_storage_locked_recorded_with(&base, &state, &first).unwrap();
+        assert!(!is_first);
+        assert_eq!(state.load(Ordering::Relaxed), 1);
+        assert!(first.load(Ordering::Relaxed));
+        drop(lock);
+
+        let failed_base = temp_base();
+        let folder = failed_base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("config.toml.failure"), b"failure").unwrap();
+        let error = prepare_storage_locked_recorded_with(&failed_base, &state, &first)
+            .err()
+            .unwrap();
+        assert!(!preparation_is_busy(&error));
+        assert_eq!(state.load(Ordering::Relaxed), 2);
+        assert!(first.load(Ordering::Relaxed));
     }
 
     #[test]
