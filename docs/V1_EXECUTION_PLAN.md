@@ -180,6 +180,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | 2C-2 S4a | done: `read_locked`, `try_remember_path`, `locked_update_at` moved from settings.rs to config_store.rs, pure move (mechanical removed/added check: only `use` lines and one `pub(crate)` differ); settings.rs wrappers resolve through `use`; Nino (Haiku) approves; 579 tests | see `git log` |
 | 2C-2 S4b | done: `config_store::update` / `update_with` (and `_in` forms sharing `run_update`): mode gate first (`ModeRefused` for `ReadOnly`, `Recovery`, `storage_ready` false or no snapshot; no lock, no action), then `storage_writable`, lock and commit as before; write-through of the last committed text (also after a later action error), mode reclassified from a folder listing, `CommitUnverified` -> one re-read; a write sequence taken under the writer lock so an older install never replaces a newer one; settings.rs wrappers are one-line calls; Lucia and Giulia approve after one correction; 589 tests | see `git log` |
 | 2C-2 S5 | done: `SaveFailure.read_only` (from `is_mode_refused`, wins over `conflict`); two read-only settings texts and one calendar text; the interactive autostart outer refusal reports the read-only text (restored, no autostart change); startup stays silent; Enzo and Nino approve (Giulia timed out); 590 tests | see `git log` |
+| 2C-2 S6 | done: refresh keeps the text installed at install time on any read failure (resolved under the slot mutex after the sequence check, so a newer write-through is never overwritten); mode reclassified on every refresh (future -> `ReadOnly`, current -> `Normal`, missing primary on refresh -> `Recovery`, never new install); `storage_ready` sticky; bootstrap unchanged; Enzo (critical race found, fixed) and Lucia approve after one correction; 595 tests | see `git log` |
 
 ## Resume here
 
@@ -684,10 +685,29 @@ refusal goes through the existing outer-`Err` branch, not
 `AutostartOutcome::SaveFailed` (same text and rollback). Run agy alone, never
 in parallel with another CLI.
 
-First step next: S6 refresh semantics (failed refresh keeps the snapshot;
-reclassify on refresh: v3 -> ReadOnly, back to v2 -> Normal, deleted primary
--> Recovery; a preparation failure stays refused until restart; decide
-whether `open_settings` refreshes first). Reviewers: Lucia plus Enzo.
+2C-2 S6 is committed (after the Claude 5-hour reset at 02:20 UTC). Lead
+decisions: a missing primary on refresh is `Recovery` whatever the inventory
+(the file existed at startup; live recovery is acceptance row #26, not done);
+`open_settings` does NOT refresh first (the window would show values the
+running island does not use; the user presses Reload), so the S3 note is
+closed as intended behaviour. One correction round: Enzo found a critical
+race (a failed refresh carried a text captured before observing and could
+overwrite a newer write-through); fixed by resolving the kept text at install
+time under the slot mutex after the sequence check; tests for that order, a
+directory named `config.toml`, and folder-open keep-text. Minor for the Phase
+B cleanup: `bootstrap_missing_primary_still_new_install` goes through
+preparation, which creates the file first, so it does not exercise the
+`Missing` observation; test the observe path on an empty folder directly.
+
+Budget record for 2C-2 S5 and S6: Claude 5-hour 94 -> 96 (S5, Nino only),
+then (reset 02:20 UTC) 0 -> 13, weekly 22 -> 24; Codex 5-hour 2 -> 7, weekly
+27 -> 28.
+
+First step next: S7 expected bytes = snapshot bytes (behaviour change,
+acceptance row #22): an external edit without Reload gives `PrimaryChanged`,
+rollback, the conflict message and a reload. Sofia marked it optional (it
+may move to 2C-3); decide first whether to do it in 2C-2. Then S8 cleanup and
+docs, then the Phase B cleanup commit with every collected minor.
 
 Budget record for 2A-3: Claude 5-hour window 59 → 84 (lead turns grew costly as the
 context grew), Codex 40 → 56.
