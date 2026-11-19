@@ -737,7 +737,10 @@ mod tests {
     use super::super::config_fs::TEST_WRITER_SERIAL;
     use super::*;
     use island_core::config::{contains_setting, read_value};
-    use island_core::config_state::{ArtifactInventory, ProtectedBackupName, plan_startup};
+    use island_core::config_state::{
+        ArtifactInventory, ChangeFingerprint, FailureRecord, FailureStage, MAX_PROTECTED_SEQUENCE,
+        ProtectedBackupName, plan_startup,
+    };
     use std::fs;
 
     #[test]
@@ -1578,6 +1581,362 @@ mod tests {
             "ui_density = \"minimal\"\r\nui_density = \"minimal\"\r\n",
             RuntimeMode::LegacyCompatible,
             |_, _| {},
+        );
+    }
+
+    const ACCEPTANCE_LEGACY: &str = "ui_density = \"minimal\"\r\ncustom_setting = \"before\"\r\n";
+    const ACCEPTANCE_EDITED: &str = "ui_density = \"minimal\"\r\ncustom_setting = \"after\"\r\n";
+    const ACCEPTANCE_ROLLING: &str = "# Previous save\r\nui_density = \"detailed\"\r\n";
+
+    fn acceptance_legacy_fixture() -> (settings::tests::Temp, PathBuf) {
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join(settings::PRIMARY_NAME), ACCEPTANCE_LEGACY).unwrap();
+        fs::write(folder.join("config.toml.bak"), ACCEPTANCE_ROLLING).unwrap();
+        (base, folder)
+    }
+
+    fn acceptance_backup(sequence: u32, source: &str) -> ProtectedBackupName {
+        ProtectedBackupName::new(sequence, 1, ChangeFingerprint::of(source.as_bytes())).unwrap()
+    }
+
+    fn assert_acceptance_files(folder: &Path, expected: &[(&str, &str)]) {
+        use std::collections::BTreeSet;
+        let actual: BTreeSet<_> = fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let names: BTreeSet<_> = expected
+            .iter()
+            .map(|(name, _)| std::ffi::OsString::from(*name))
+            .collect();
+        assert_eq!(actual, names);
+        for (name, text) in expected {
+            let path = folder.join(name);
+            assert_eq!(fs::read(&path).unwrap(), text.as_bytes(), "{name}");
+            if ProtectedBackupName::parse(name).is_some() {
+                assert!(fs::metadata(path).unwrap().permissions().readonly(), "{name}");
+            }
+        }
+    }
+
+    fn assert_acceptance_snapshot(
+        snapshot: &ConfigSnapshot,
+        mode: RuntimeMode,
+        source: &str,
+        report: MigrationReport,
+        writes_allowed: bool,
+    ) {
+        assert_eq!(snapshot.mode(), &mode);
+        assert_eq!(snapshot.text(), Some(source));
+        assert_eq!(snapshot.take_migration_report(), Some(report));
+        assert_eq!(snapshot.take_migration_report(), None);
+        assert_eq!(snapshot.writes_allowed(), writes_allowed);
+    }
+
+    fn acceptance_failure(stage: FailureStage, source: &str, attempts: u32) -> String {
+        FailureRecord {
+            source: ChangeFingerprint::of(source.as_bytes()),
+            from_schema: 1,
+            stage,
+            attempts,
+        }
+        .encode()
+    }
+
+    fn assert_acceptance_failed_then_suppressed(
+        base: &Path,
+        folder: &Path,
+        stage: FailureStage,
+        backup: (&str, &str),
+    ) -> ConfigSnapshot {
+        let record = acceptance_failure(stage, ACCEPTANCE_LEGACY, 1);
+        let expected = [
+            (settings::PRIMARY_NAME, ACCEPTANCE_LEGACY),
+            ("config.toml.bak", ACCEPTANCE_ROLLING),
+            (config_commit::FAILURE_RECORD_NAME, &record),
+            backup,
+        ];
+        let start = |reason| {
+            let snapshot = bootstrap_at(base, true);
+            assert_acceptance_snapshot(
+                &snapshot,
+                RuntimeMode::LegacyCompatible,
+                ACCEPTANCE_LEGACY,
+                MigrationReport::Fallback(reason),
+                true,
+            );
+            assert_acceptance_files(folder, &expected);
+            snapshot
+        };
+        start(FallbackReason::Failed(stage));
+        start(FallbackReason::Suppressed)
+    }
+
+    fn assert_acceptance_migrated(
+        snapshot: &ConfigSnapshot,
+        source: &str,
+        backup: ProtectedBackupName,
+    ) -> String {
+        let island_core::migration::MigrationOutcome::Prepared { text } =
+            island_core::migration::prepare(source).unwrap()
+        else {
+            panic!("expected a migratable fixture");
+        };
+        assert_acceptance_snapshot(
+            snapshot,
+            RuntimeMode::Normal,
+            &text,
+            MigrationReport::Migrated { backup },
+            true,
+        );
+        text
+    }
+
+    #[test]
+    fn acceptance_j_protected_backup_failure_preserves_source() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_legacy_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let backup = acceptance_backup(MAX_PROTECTED_SEQUENCE, ACCEPTANCE_ROLLING).file_name();
+        let backup_path = folder.join(&backup);
+        fs::write(&backup_path, ACCEPTANCE_ROLLING).unwrap();
+        let mut permissions = fs::metadata(&backup_path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&backup_path, permissions).unwrap();
+
+        let snapshot = assert_acceptance_failed_then_suppressed(
+            &base,
+            &folder,
+            FailureStage::Backup,
+            (&backup, ACCEPTANCE_ROLLING),
+        );
+        let slot = Mutex::new(Some(Arc::new(snapshot)));
+        update_in(
+            &slot,
+            &folder.join(settings::PRIMARY_NAME),
+            "custom_setting",
+            "after",
+        )
+        .unwrap();
+        assert_eq!(text_in(&slot).as_deref(), Some(ACCEPTANCE_EDITED));
+
+        // The edit permits a retry while the exhausted backup sequence still fails.
+        let retry = bootstrap_at(&base, true);
+        assert_acceptance_snapshot(
+            &retry,
+            RuntimeMode::LegacyCompatible,
+            ACCEPTANCE_EDITED,
+            MigrationReport::Fallback(FallbackReason::Failed(FailureStage::Backup)),
+            true,
+        );
+        let record = acceptance_failure(FailureStage::Backup, ACCEPTANCE_EDITED, 2);
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, ACCEPTANCE_EDITED),
+                ("config.toml.bak", ACCEPTANCE_LEGACY),
+                (config_commit::FAILURE_RECORD_NAME, &record),
+                (&backup, ACCEPTANCE_ROLLING),
+            ],
+        );
+    }
+
+    #[test]
+    fn acceptance_k_primary_draft_sync_failure_keeps_backups() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_legacy_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let original_backup = acceptance_backup(1, ACCEPTANCE_LEGACY).file_name();
+        config_migrate::AFTER_BACKUP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|| {
+                super::super::config_fs::FAIL_DRAFT_SYNC.with(|flag| flag.set(true));
+            }));
+        });
+
+        let snapshot = assert_acceptance_failed_then_suppressed(
+            &base,
+            &folder,
+            FailureStage::Commit,
+            (&original_backup, ACCEPTANCE_LEGACY),
+        );
+        let slot = Mutex::new(Some(Arc::new(snapshot)));
+        update_in(
+            &slot,
+            &folder.join(settings::PRIMARY_NAME),
+            "custom_setting",
+            "after",
+        )
+        .unwrap();
+        assert_eq!(text_in(&slot).as_deref(), Some(ACCEPTANCE_EDITED));
+
+        let retry = bootstrap_at(&base, true);
+        let backup = acceptance_backup(2, ACCEPTANCE_EDITED);
+        let migrated = assert_acceptance_migrated(&retry, ACCEPTANCE_EDITED, backup.clone());
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, &migrated),
+                ("config.toml.bak", ACCEPTANCE_EDITED),
+                (&original_backup, ACCEPTANCE_LEGACY),
+                (&backup.file_name(), ACCEPTANCE_EDITED),
+            ],
+        );
+    }
+
+    #[test]
+    fn acceptance_l_interrupted_migration_never_promotes_a_draft() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for primary_survived in [true, false] {
+            let (base, folder) = acceptance_legacy_fixture();
+            let _cleanup = RemoveProtectedReadOnly(folder.clone());
+            let earlier_backup = {
+                let lock = WriterLock::acquire(&folder).unwrap();
+                config_commit::create_protected_backup(lock.directory(), ACCEPTANCE_LEGACY, 1)
+                    .unwrap()
+            };
+            let uncommitted = "config_version = \"2\"\r\ncustom_setting = \"uncommitted\"\r\n";
+            fs::write(folder.join("config.toml.new"), uncommitted).unwrap();
+            fs::write(folder.join("config.toml.9-8-7.tmp"), uncommitted).unwrap();
+            let source = if primary_survived {
+                ACCEPTANCE_LEGACY
+            } else {
+                fs::remove_file(folder.join(settings::PRIMARY_NAME)).unwrap();
+                ACCEPTANCE_ROLLING
+            };
+
+            let restarted = bootstrap_at(&base, true);
+            let backup = acceptance_backup(2, source);
+            let migrated = assert_acceptance_migrated(&restarted, source, backup.clone());
+            assert_acceptance_files(
+                &folder,
+                &[
+                    (settings::PRIMARY_NAME, &migrated),
+                    ("config.toml.bak", source),
+                    ("config.toml.new", uncommitted),
+                    (&earlier_backup.file_name(), ACCEPTANCE_LEGACY),
+                    (&backup.file_name(), source),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn acceptance_m_contenders_cannot_write_during_migration() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_legacy_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let writer = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
+        let contender_base = base.to_path_buf();
+        let contender_folder = folder.clone();
+        let backup = acceptance_backup(1, ACCEPTANCE_LEGACY);
+        let protected = contender_folder.join(backup.file_name());
+        config_migrate::AFTER_BACKUP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    let busy = bootstrap_at(&contender_base, true);
+                    assert_acceptance_snapshot(
+                        &busy,
+                        RuntimeMode::LegacyCompatible,
+                        ACCEPTANCE_LEGACY,
+                        MigrationReport::Fallback(FallbackReason::Busy),
+                        false,
+                    );
+                    let path = contender_folder.join(settings::PRIMARY_NAME);
+                    let error = update_with_in(&writer, &path, |_, _| -> io::Result<()> {
+                        panic!("the contending writer must never start its action");
+                    })
+                    .unwrap_err();
+                    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+                    assert_eq!(text_in(&writer).as_deref(), Some(ACCEPTANCE_LEGACY));
+                    assert_eq!(fs::read(path).unwrap(), ACCEPTANCE_LEGACY.as_bytes());
+                    assert_eq!(
+                        fs::read(contender_folder.join("config.toml.bak")).unwrap(),
+                        ACCEPTANCE_ROLLING.as_bytes()
+                    );
+                    assert_eq!(fs::read(protected).unwrap(), ACCEPTANCE_LEGACY.as_bytes());
+                    assert!(
+                        !contender_folder
+                            .join(config_commit::FAILURE_RECORD_NAME)
+                            .try_exists()
+                            .unwrap()
+                    );
+                })
+                .join()
+                .unwrap();
+            }));
+        });
+
+        let first = bootstrap_at(&base, true);
+        let migrated = assert_acceptance_migrated(&first, ACCEPTANCE_LEGACY, backup.clone());
+        let backup_name = backup.file_name();
+        let expected = [
+            (settings::PRIMARY_NAME, migrated.as_str()),
+            ("config.toml.bak", ACCEPTANCE_LEGACY),
+            (backup_name.as_str(), ACCEPTANCE_LEGACY),
+        ];
+        assert_acceptance_files(&folder, &expected);
+        let retry = bootstrap_at(&base, true);
+        assert_acceptance_snapshot(
+            &retry,
+            RuntimeMode::Normal,
+            &migrated,
+            MigrationReport::NotNeeded,
+            true,
+        );
+        assert_acceptance_files(&folder, &expected);
+    }
+
+    #[test]
+    fn acceptance_n_edit_during_migration_aborts_and_can_retry() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_legacy_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let path = folder.join(settings::PRIMARY_NAME);
+        let earlier_backup = acceptance_backup(1, ACCEPTANCE_LEGACY).file_name();
+        config_migrate::AFTER_BACKUP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || fs::write(path, ACCEPTANCE_EDITED).unwrap()));
+        });
+
+        let first = bootstrap_at(&base, true);
+        assert_acceptance_snapshot(
+            &first,
+            RuntimeMode::LegacyCompatible,
+            ACCEPTANCE_EDITED,
+            MigrationReport::Fallback(FallbackReason::SourceChanged),
+            true,
+        );
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, ACCEPTANCE_EDITED),
+                ("config.toml.bak", ACCEPTANCE_ROLLING),
+                (&earlier_backup, ACCEPTANCE_LEGACY),
+            ],
+        );
+
+        let retry = bootstrap_at(&base, true);
+        let backup = acceptance_backup(2, ACCEPTANCE_EDITED);
+        let migrated = assert_acceptance_migrated(&retry, ACCEPTANCE_EDITED, backup.clone());
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, &migrated),
+                ("config.toml.bak", ACCEPTANCE_EDITED),
+                (&earlier_backup, ACCEPTANCE_LEGACY),
+                (&backup.file_name(), ACCEPTANCE_EDITED),
+            ],
         );
     }
 

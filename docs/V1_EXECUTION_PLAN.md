@@ -848,6 +848,8 @@ Budget update (Umut, 2026-11-19): both Claude and Codex 5-hour windows may be us
 
 S7 complete: isolated acceptance scenarios A-I cover fresh install, three legacy mappings, modern preference precedence in both directions, current and future schema, invalid value and duplicate critical key. Protected backups, unchanged bytes and no unintended failure records are checked. Independent Codex review approved after correction; 665 workspace tests and Clippy passed. Next S8: isolated scenarios J-S, including R's restart-only recovery; production migration remains off.
 
+S8a complete: isolated acceptance J-N cover backup failure, draft sync failure, interrupted migration, competing writer and external edit with retry. Independent Codex review approved after sync-error injection was moved into Draft::write's error path; 670 workspace tests and Clippy passed. Minor follow-ups: test hook targets the next draft rather than a named target, and log capture is not tested. Next S8b: scenarios O-S, including R restart-only recovery. Production migration remains off.
+
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
 Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:

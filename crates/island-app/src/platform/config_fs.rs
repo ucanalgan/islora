@@ -1356,6 +1356,12 @@ pub struct Draft {
     file: File,
     renamed: bool,
 }
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_DRAFT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl Drop for Draft {
     fn drop(&mut self) {
         if !self.renamed {
@@ -1505,7 +1511,14 @@ impl Draft {
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), ConfigFsError> {
         use std::io::Write;
         self.file.write_all(bytes)?;
-        self.file.sync_all()?;
+        let sync_result = self.file.sync_all();
+        #[cfg(test)]
+        let sync_result = if FAIL_DRAFT_SYNC.with(|flag| flag.replace(false)) {
+            sync_result.and(Err(io::ErrorKind::StorageFull.into()))
+        } else {
+            sync_result
+        };
+        sync_result?;
         Ok(())
     }
     pub fn read_back(&mut self) -> Result<Vec<u8>, ConfigFsError> {
