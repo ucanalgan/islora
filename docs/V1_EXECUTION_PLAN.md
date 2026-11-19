@@ -187,6 +187,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | Phase B cleanup CL2 | done: config_fs.rs / config_commit.rs minors A1-A5 (the two `NtCreateFile` paths stay separate, with a comment saying why: security retries vs. directory mapping; restore errors after a failed delete or a failed protected backup log their kind only; the retention failure test checks sharing violation 32; one `PRIMARY_NAME` in settings.rs); Enzo and Nino approve; 606 tests | see `git log` |
 | Phase B cleanup CL3 | done: test that the startup draft sweep leaves protected backups; startup autostart silent on a read-only `SaveFailed`; `PRIMARY_NAME` doc line back and used for the two non-test opens in config_store.rs; Enzo and Nino approve; Phase B cleanup complete; 607 tests | see `git log` |
 | 2C-3 S1 | done: protected backups and `config.toml.failure` are non-ambiguous recovery evidence (no fresh template for a missing primary, bootstrap `Recovery`; a valid rolling `.bak` still restores next to them); the sweep also removes `config.toml.failure.<a>-<b>-<c>.tmp` drafts and nothing else; pin test flipped; Giulia and Lucia approve (minors in `scratchpad/2c3-minors.md`); 610 tests | see `git log` |
+| 2C-3 S2 | done: `config_commit.rs` `read_failure` (bounded 257-byte read through the folder handle; absent -> `None`, anything unreadable, oversized, undecodable or not a regular file -> `Corrupt`), `write_failure` (Draft, verify, rename; replaces; no draft left and the old record kept on failure), `clear_failure` (idempotent); `FAILURE_RECORD_NAME`; inventory fills `recorded_failure` for `Valid` only; write / clear unused until S5; Giulia and Lucia approve in one pass; 618 tests | see `git log` |
 
 ## Resume here
 
@@ -818,7 +819,11 @@ Parked at 11:40 UTC on 2026-11-19: lead context 65%, Claude 5-hour 62%
 `docs/V1_STABLE_CHECKLIST.md`, `docs/WAVE_MEASUREMENTS.md`). Collected 2C-3
 minors: `scratchpad/2c3-minors.md`.
 
-First step next: 2C-3 S2 (failure record I/O), in a new lead session.
+2C-3 S2 is committed (one Paolo run, no correction; Lucia's minor in `scratchpad/2c3-minors.md`).
+
+Budget record for S2: Claude 5-hour 65 -> 78 (lead turns plus one Sonnet review; lead turns are most of it), weekly 33 -> 35; Codex 5-hour 11 -> 12, weekly 30 (one Paolo run); Giulia one agy run.
+
+First step next: 2C-3 S3 (`prepare_storage_locked` returns the WriterLock).
 
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
