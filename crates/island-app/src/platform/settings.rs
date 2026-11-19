@@ -17,6 +17,8 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, w};
 
+pub(crate) const PRIMARY_NAME: &str = "config.toml";
+
 const TEMPLATE: &str = "\
 # Islora ayarları
 #
@@ -88,7 +90,7 @@ fn is_new_install(path: &Path) -> bool {
     is_new_install_in(&dir)
 }
 fn is_new_install_in(dir: &ConfigDir) -> bool {
-    matches!(inspect_in(dir, "config.toml"), Ok(false))
+    matches!(inspect_in(dir, PRIMARY_NAME), Ok(false))
         && !has_recovery_artifacts(dir).unwrap_or(true)
 }
 fn inspect_in(dir: &ConfigDir, name: &str) -> io::Result<bool> {
@@ -141,7 +143,7 @@ fn artifacts(dir: &ConfigDir, ambiguous: bool) -> io::Result<bool> {
 pub(crate) fn path() -> Option<PathBuf> {
     let roaming = PathBuf::from(std::env::var_os("APPDATA")?);
     let folder = roaming.join("Islora");
-    Some(folder.join("config.toml"))
+    Some(folder.join(PRIMARY_NAME))
 }
 
 #[cfg(test)]
@@ -220,7 +222,7 @@ pub(crate) fn prepare_storage_at(base: &Path) -> io::Result<bool> {
     }
     std::fs::create_dir_all(&folder)?;
     let lock = WriterLock::with_mutex(&folder, mutex).map_err(io::Error::from)?;
-    let path = folder.join("config.toml");
+    let path = folder.join(PRIMARY_NAME);
     let dir = lock.directory();
     if let Ok(entries) = dir.entries() {
         for entry in entries {
@@ -230,13 +232,13 @@ pub(crate) fn prepare_storage_at(base: &Path) -> io::Result<bool> {
         }
     }
     let first_run = is_new_install_in(dir);
-    if !inspect_in(dir, "config.toml")? && has_ambiguous_recovery_artifacts(dir)? {
+    if !inspect_in(dir, PRIMARY_NAME)? && has_ambiguous_recovery_artifacts(dir)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "configuration recovery artifacts need review",
         ));
     }
-    if !inspect_in(dir, "config.toml")?
+    if !inspect_in(dir, PRIMARY_NAME)?
         && !inspect_in(dir, "config.toml.bak")?
         && has_recovery_artifacts(dir)?
     {
@@ -246,7 +248,7 @@ pub(crate) fn prepare_storage_at(base: &Path) -> io::Result<bool> {
         ));
     }
     recover_in(dir, &path)?;
-    if !inspect_in(dir, "config.toml")? {
+    if !inspect_in(dir, PRIMARY_NAME)? {
         let template = format!(
             "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
         );

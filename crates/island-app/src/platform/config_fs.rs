@@ -987,6 +987,7 @@ fn open_relative(
 /// without following a final reparse point, with only the access needed to read and write its
 /// attributes and to delete it. A directory with that name is refused as `IsDirectory`.
 #[allow(dead_code, reason = "called by migration in 2C-3")]
+// Kept separate from open_relative: it has distinct directory errors and no security retries.
 fn open_for_delete(dir: &ConfigDir, name: &[u16]) -> Result<File, ConfigFsError> {
     use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows::Wdk::Storage::FileSystem::{
@@ -1289,8 +1290,11 @@ impl VerifiedFile {
             .map_err(io::Error::from)
         };
         if let Err(error) = deleted {
-            if was_read_only {
-                let _ = set_attributes(original);
+            if was_read_only && let Err(restore_error) = set_attributes(original) {
+                eprintln!(
+                    "Failed to restore file attributes: {:?}",
+                    restore_error.kind()
+                );
             }
             return Err(error.into());
         }
@@ -1484,7 +1488,12 @@ impl Draft {
         if let Err(error) = applied {
             // A read-only file cannot be deleted, so restore the original attributes first
             // (best effort) and let the drop delete the file this call created.
-            let _ = set_attributes(&self.file, current);
+            if let Err(restore_error) = set_attributes(&self.file, current) {
+                eprintln!(
+                    "Failed to restore file attributes: {:?}",
+                    restore_error.kind()
+                );
+            }
             return Err(error.into());
         }
         self.renamed = true;

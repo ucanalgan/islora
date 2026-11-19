@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 
 use super::config_fs::{ConfigDir, Draft, VerifiedFile};
-use super::settings::{name, read_verified};
+use super::settings::{PRIMARY_NAME, name, read_verified};
 
 pub(crate) fn is_primary_changed(error: &io::Error) -> bool {
     error
@@ -190,10 +190,6 @@ pub(crate) fn commit_primary_with_hook(
     }
     Ok(())
 }
-
-/// The primary configuration file name, whose security a protected backup copies.
-#[allow(dead_code, reason = "called by migration in 2C-3")]
-const PRIMARY_NAME: &str = "config.toml";
 
 /// Writes one protected backup of `text` next to the primary under a core-built unique name.
 /// The file is created exclusively (an existing name is an `AlreadyExists` error, never
@@ -747,6 +743,7 @@ mod tests {
             .unwrap();
         let result = apply_protected_retention(&dir, &backups[4], 3);
         assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(32));
         assert!(is_readonly(&path_of(&temp, &backups[0])));
         assert_eq!(snapshot(&temp.0), before);
         drop(held);
