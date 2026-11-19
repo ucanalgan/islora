@@ -188,6 +188,7 @@ restart. Nothing is called release-ready while a critical item is open.
 | Phase B cleanup CL3 | done: test that the startup draft sweep leaves protected backups; startup autostart silent on a read-only `SaveFailed`; `PRIMARY_NAME` doc line back and used for the two non-test opens in config_store.rs; Enzo and Nino approve; Phase B cleanup complete; 607 tests | see `git log` |
 | 2C-3 S1 | done: protected backups and `config.toml.failure` are non-ambiguous recovery evidence (no fresh template for a missing primary, bootstrap `Recovery`; a valid rolling `.bak` still restores next to them); the sweep also removes `config.toml.failure.<a>-<b>-<c>.tmp` drafts and nothing else; pin test flipped; Giulia and Lucia approve (minors in `scratchpad/2c3-minors.md`); 610 tests | see `git log` |
 | 2C-3 S2 | done: `config_commit.rs` `read_failure` (bounded 257-byte read through the folder handle; absent -> `None`, anything unreadable, oversized, undecodable or not a regular file -> `Corrupt`), `write_failure` (Draft, verify, rename; replaces; no draft left and the old record kept on failure), `clear_failure` (idempotent); `FAILURE_RECORD_NAME`; inventory fills `recorded_failure` for `Valid` only; write / clear unused until S5; Giulia and Lucia approve in one pass; 618 tests | see `git log` |
+| 2C-3 S3 | done: `settings::prepare_storage_locked(base) -> io::Result<(bool, WriterLock)>` (the old body, returns the lock built from the mutex taken at the start); `prepare_storage_at` wraps it and releases the lock before returning; no production caller until S6; tests prove held-until-drop and released-on-return from another thread (Windows mutexes are recursive per thread); Giulia approves, Enzo approves after one correction (his busy-instance point rejected: existing tests behave the same, noted in minors); 622 tests | see `git log` |
 
 ## Resume here
 
@@ -823,7 +824,11 @@ minors: `scratchpad/2c3-minors.md`.
 
 Budget record for S2: Claude 5-hour 65 -> 78 (lead turns plus one Sonnet review; lead turns are most of it), weekly 33 -> 35; Codex 5-hour 11 -> 12, weekly 30 (one Paolo run); Giulia one agy run.
 
-First step next: 2C-3 S3 (`prepare_storage_locked` returns the WriterLock).
+2C-3 S3 is committed (one Paolo run plus one correction).
+
+Budget record for S3: Claude 5-hour 78 -> 85, weekly 35 -> 36 (lead turns only; reviews on Giulia and Enzo); Codex 5-hour 12 -> 16, weekly 31 (two Paolo runs, two Enzo runs).
+
+First step next: 2C-3 S4 (`config_migrate.rs`: report types, `migrate_locked`, D-D).
 
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
