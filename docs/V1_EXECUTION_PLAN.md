@@ -809,7 +809,16 @@ gate). Test names per step in `scratchpad/2c3-compare.md` section 3.
 
 2C-3 S1 is committed (one Paolo run, no correction).
 
-First step next: 2C-3 S2 (failure record I/O).
+Budget record for the 2C-3 design round and S1: Claude 5-hour 39 -> 62
+(Sonnet scout, Opus design, Haiku runners, Sonnet compare: about 20 points;
+S1 reviews about 3), weekly 29 -> 32; Codex 5-hour 9 -> 11, weekly 30.
+
+Parked at 11:40 UTC on 2026-11-19: lead context 65%, Claude 5-hour 62%
+(resets 14:10 UTC), Codex 11%. Working tree clean (only the untracked
+`docs/V1_STABLE_CHECKLIST.md`, `docs/WAVE_MEASUREMENTS.md`). Collected 2C-3
+minors: `scratchpad/2c3-minors.md`.
+
+First step next: 2C-3 S2 (failure record I/O), in a new lead session.
 
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
