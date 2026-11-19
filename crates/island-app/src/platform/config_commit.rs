@@ -81,7 +81,7 @@ pub(crate) fn is_commit_unverified(error: &io::Error) -> bool {
 #[cfg(test)]
 thread_local! {
     pub(crate) static AFTER_PRIMARY_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
-    static FAIL_VERIFICATION_AT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static FAIL_VERIFICATION_AT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn verify_draft(draft: &mut Draft, expected: &[u8]) -> io::Result<()> {

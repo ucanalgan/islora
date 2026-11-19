@@ -102,6 +102,66 @@ fn preflight(lock: &WriterLock, path: &Path, bytes: &[u8]) -> io::Result<Preflig
 }
 
 #[cfg(test)]
+thread_local! {
+    static AFTER_BACKUP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
+// Called from bootstrap in 2C-3 S6.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn migrate_locked(
+    lock: &WriterLock,
+    path: &Path,
+    bytes: &[u8],
+) -> io::Result<MigrationReport> {
+    let (text, prepared, schema) = match preflight(lock, path, bytes)? {
+        Preflight::Ready {
+            text,
+            prepared,
+            schema,
+        } => (text, prepared, schema),
+        Preflight::Done(report) => return Ok(report),
+    };
+    let backup = match config_commit::create_protected_backup(lock.directory(), &text, schema) {
+        Ok(backup) => backup,
+        Err(error) => {
+            eprintln!("migration backup failed: {:?}", error.kind());
+            return Ok(MigrationReport::Fallback(FallbackReason::Failed(
+                FailureStage::Backup,
+            )));
+        }
+    };
+    #[cfg(test)]
+    AFTER_BACKUP.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+    if let Err(error) =
+        config_commit::commit_primary(lock.directory(), path, &prepared, Some(bytes))
+    {
+        let reason = if config_commit::is_primary_changed(&error) {
+            FallbackReason::SourceChanged
+        } else if config_commit::is_commit_unverified(&error) {
+            FallbackReason::Failed(FailureStage::Verify)
+        } else {
+            FallbackReason::Failed(FailureStage::Commit)
+        };
+        eprintln!("migration commit failed: {:?}", error.kind());
+        return Ok(MigrationReport::Fallback(reason));
+    }
+    if let Err(error) = config_commit::clear_failure(lock.directory()) {
+        eprintln!(
+            "migration failure record cleanup failed: {:?}",
+            error.kind()
+        );
+    }
+    if let Err(error) = config_commit::apply_protected_retention(lock.directory(), &backup, 3) {
+        eprintln!("migration backup retention failed: {:?}", error.kind());
+    }
+    Ok(MigrationReport::Migrated { backup })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use island_core::config_state::{ChangeFingerprint, FailureRecord};
@@ -132,6 +192,17 @@ mod tests {
     }
     impl Drop for Temp {
         fn drop(&mut self) {
+            if let Ok(entries) = std::fs::read_dir(&self.0) {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        let mut permissions = metadata.permissions();
+                        // Windows-only module: remove the read-only attribute from test files.
+                        #[allow(clippy::permissions_set_readonly_false)]
+                        permissions.set_readonly(false);
+                        let _ = std::fs::set_permissions(entry.path(), permissions);
+                    }
+                }
+            }
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
@@ -296,5 +367,199 @@ mod tests {
                 assert_eq!(result, Preflight::Done(MigrationReport::NotNeeded))
             });
         }
+    }
+
+    #[test]
+    fn legacy_migration_preserves_exact_backup_and_writes_prepared_bytes() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for input in [
+            "ui_density = \"minimal\"\n",
+            "ui_density = \"balanced\"\n",
+            "ui_density = \"detailed\"\n",
+            "ui_density = \"minimal\"\nindicator_style = \"context\"\n",
+        ] {
+            let temp = Temp::new();
+            let path = temp.0.join("config.toml");
+            std::fs::write(&path, input).unwrap();
+            std::fs::write(
+                temp.0.join(config_commit::FAILURE_RECORD_NAME),
+                record(b"older"),
+            )
+            .unwrap();
+            let lock = WriterLock::acquire(&temp.0).unwrap();
+            let expected = match prepare(input).unwrap() {
+                MigrationOutcome::Prepared { text } => text,
+                other => panic!("unexpected: {other:?}"),
+            };
+            let MigrationReport::Migrated { backup } =
+                migrate_locked(&lock, &path, input.as_bytes()).unwrap()
+            else {
+                panic!("expected migration");
+            };
+            assert_eq!(std::fs::read(&path).unwrap(), expected.as_bytes());
+            let (indicator, media) = if input.contains("balanced") {
+                ("edge", "standard")
+            } else if input.contains("detailed") {
+                ("context", "informative")
+            } else if input.contains("indicator_style") {
+                ("context", "compact")
+            } else {
+                ("ring", "compact")
+            };
+            assert_eq!(
+                island_core::config::read_value(&expected, "indicator_style").as_deref(),
+                Some(indicator)
+            );
+            assert_eq!(
+                island_core::config::read_value(&expected, "media_layout").as_deref(),
+                Some(media)
+            );
+            let backup_path = temp.0.join(backup.file_name());
+            assert_eq!(std::fs::read(&backup_path).unwrap(), input.as_bytes());
+            assert!(
+                std::fs::metadata(backup_path)
+                    .unwrap()
+                    .permissions()
+                    .readonly()
+            );
+            assert!(!temp.0.join(config_commit::FAILURE_RECORD_NAME).exists());
+        }
+    }
+
+    #[test]
+    fn migration_refuses_changed_source_before_creating_backup() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = Temp::new();
+        let path = temp.0.join("config.toml");
+        std::fs::write(&path, LEGACY).unwrap();
+        let lock = WriterLock::acquire(&temp.0).unwrap();
+        let before = snapshot(&temp.0);
+        assert_eq!(
+            migrate_locked(&lock, &path, b"older").unwrap(),
+            MigrationReport::Fallback(FallbackReason::SourceChanged)
+        );
+        assert_eq!(snapshot(&temp.0), before);
+    }
+
+    #[test]
+    fn unverified_commit_keeps_original_protected_backup_and_record() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = Temp::new();
+        let path = temp.0.join("config.toml");
+        std::fs::write(&path, LEGACY).unwrap();
+        let old_record = record(b"older");
+        std::fs::write(temp.0.join(config_commit::FAILURE_RECORD_NAME), &old_record).unwrap();
+        let lock = WriterLock::acquire(&temp.0).unwrap();
+        let changed = path.clone();
+        config_commit::AFTER_PRIMARY_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(changed, b"external").unwrap()
+            }));
+        });
+        assert_eq!(
+            migrate_locked(&lock, &path, LEGACY.as_bytes()).unwrap(),
+            MigrationReport::Fallback(FallbackReason::Failed(FailureStage::Verify))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"external");
+        assert_eq!(
+            std::fs::read(temp.0.join(config_commit::FAILURE_RECORD_NAME)).unwrap(),
+            old_record.as_bytes()
+        );
+        let backups: Vec<_> = std::fs::read_dir(&temp.0)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .and_then(ProtectedBackupName::parse)
+                    .is_some()
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read(backups[0].path()).unwrap(), LEGACY.as_bytes());
+    }
+
+    #[test]
+    fn failed_backup_or_commit_preserves_primary_and_record() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (fail_at, stage, expected_backups) in
+            [(1, FailureStage::Backup, 0), (2, FailureStage::Commit, 1)]
+        {
+            let temp = Temp::new();
+            let path = temp.0.join("config.toml");
+            std::fs::write(&path, LEGACY).unwrap();
+            let old_record = record(b"older");
+            std::fs::write(temp.0.join(config_commit::FAILURE_RECORD_NAME), &old_record).unwrap();
+            let lock = WriterLock::acquire(&temp.0).unwrap();
+            config_commit::FAIL_VERIFICATION_AT.with(|count| count.set(fail_at));
+            assert_eq!(
+                migrate_locked(&lock, &path, LEGACY.as_bytes()).unwrap(),
+                MigrationReport::Fallback(FallbackReason::Failed(stage))
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), LEGACY.as_bytes());
+            assert_eq!(
+                std::fs::read(temp.0.join(config_commit::FAILURE_RECORD_NAME)).unwrap(),
+                old_record.as_bytes()
+            );
+            let backups: Vec<_> = std::fs::read_dir(&temp.0)
+                .unwrap()
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .and_then(ProtectedBackupName::parse)
+                        .is_some()
+                })
+                .collect();
+            assert_eq!(backups.len(), expected_backups);
+            for backup in backups {
+                assert_eq!(std::fs::read(backup.path()).unwrap(), LEGACY.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn source_changed_after_backup_is_not_overwritten() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = Temp::new();
+        let path = temp.0.join("config.toml");
+        std::fs::write(&path, LEGACY).unwrap();
+        let lock = WriterLock::acquire(&temp.0).unwrap();
+        let changed = path.clone();
+        AFTER_BACKUP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(changed, b"external").unwrap()
+            }))
+        });
+        assert_eq!(
+            migrate_locked(&lock, &path, LEGACY.as_bytes()).unwrap(),
+            MigrationReport::Fallback(FallbackReason::SourceChanged)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"external");
+        let backups: Vec<_> = std::fs::read_dir(&temp.0)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .and_then(ProtectedBackupName::parse)
+                    .is_some()
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read(backups[0].path()).unwrap(), LEGACY.as_bytes());
     }
 }

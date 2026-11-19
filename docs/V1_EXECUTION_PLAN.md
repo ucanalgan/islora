@@ -832,7 +832,9 @@ Parked at 11:55 UTC on 2026-11-19: Claude 5-hour 85% (resets 14:10 UTC), weekly 
 
 S4 spec draft (not yet checked by a lead): Enzo wrote `scratchpad/spec-2c3-s4-draft.md` read-only from the design and the code. He splits S4 into S4a (locked preflight in new `config_migrate.rs`: report types, exact-byte compare under the lock, record read plus `retry_decision`, strict prepare, D-D fallback) and S4b (protected backup, `commit_primary(Some(bytes))`, clear record, retention; no recording, that is S5). The lead must check it against D-A..D-J before handing it to Paolo. Collected minors (S1, S2, S3): `scratchpad/2c3-minors.md`.
 
-First step next: check and finalise `scratchpad/spec-2c3-s4-draft.md` as `scratchpad/spec-2c3-s4a.md`, then 2C-3 S4a (Paolo writes; Giulia plus Lucia or Enzo review).
+2C-3 S4a and S4b: locked preflight and migration transaction implemented; exact protected backup, byte-checked commit, post-commit verification and cleanup. Failure-path tests cover backup and commit failure, source change after backup, and unverified commit. Review found no remaining concrete issues; 635 tests and workspace Clippy passed. Production migration remains off; failure recording and disk re-observation belong to S5/S6.
+
+First step next: 2C-3 S5, failure recording and post-rename handling (D-E), with an explicit spec and tests before production integration.
 
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
