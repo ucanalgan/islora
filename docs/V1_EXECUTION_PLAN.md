@@ -846,6 +846,8 @@ S6b complete: opt-in test bootstrap migrates under the held lock and re-observes
 
 Budget update (Umut, 2026-11-19): both Claude and Codex 5-hour windows may be used through their next resets. Keep enough reserve for a safe stop and second-brain update; weekly windows remain separate and monitored. Claude current readings are unknown.
 
+S7 complete: isolated acceptance scenarios A-I cover fresh install, three legacy mappings, modern preference precedence in both directions, current and future schema, invalid value and duplicate critical key. Protected backups, unchanged bytes and no unintended failure records are checked. Independent Codex review approved after correction; 665 workspace tests and Clippy passed. Next S8: isolated scenarios J-S, including R's restart-only recovery; production migration remains off.
+
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
 Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:

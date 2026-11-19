@@ -734,8 +734,11 @@ pub(crate) fn update_with<T>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::config_fs::TEST_WRITER_SERIAL;
     use super::*;
+    use island_core::config::{contains_setting, read_value};
     use island_core::config_state::{ArtifactInventory, ProtectedBackupName, plan_startup};
+    use std::fs;
 
     #[test]
     fn unverified_commit_rereads_disk() {
@@ -1387,6 +1390,195 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn assert_no_protected_backup(folder: &Path) {
+        assert!(fs::read_dir(folder).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .and_then(ProtectedBackupName::parse)
+                .is_none()
+        }));
+    }
+
+    #[test]
+    fn acceptance_a_fresh_install() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        assert!(fs::read_dir(&*base).unwrap().next().is_none());
+        let folder = base.join("Islora");
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+
+        let snapshot = bootstrap_at(&base, true);
+
+        assert_eq!(snapshot.mode(), &RuntimeMode::Normal);
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert!(snapshot.writes_allowed());
+        let disk = fs::read_to_string(folder.join(settings::PRIMARY_NAME)).unwrap();
+        assert_eq!(snapshot.text(), Some(disk.as_str()));
+        assert_eq!(read_value(&disk, "config_version").as_deref(), Some("2"));
+        assert_no_protected_backup(&folder);
+        assert!(!folder.join("config.toml.bak").try_exists().unwrap());
+        assert!(
+            !folder
+                .join(config_commit::FAILURE_RECORD_NAME)
+                .try_exists()
+                .unwrap()
+        );
+    }
+
+    fn assert_acceptance_migration(legacy_settings: &str, indicator: &str, media: &str) {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let path = folder.join(settings::PRIMARY_NAME);
+        let unrelated = "# Keep this comment\r\ncustom_setting = \"keep me\" # and this one\r\n";
+        let legacy = format!("{unrelated}{legacy_settings}");
+        fs::write(&path, &legacy).unwrap();
+
+        let snapshot = bootstrap_at(&base, true);
+
+        let report = snapshot.take_migration_report();
+        let Some(MigrationReport::Migrated { backup }) = report else {
+            panic!("expected a successful migration, got {report:?}");
+        };
+        let backup_path = folder.join(backup.file_name());
+        assert_eq!(fs::read(&backup_path).unwrap(), legacy.as_bytes());
+        assert!(fs::metadata(backup_path).unwrap().permissions().readonly());
+        assert_eq!(snapshot.mode(), &RuntimeMode::Normal);
+        assert!(snapshot.writes_allowed());
+        let disk = fs::read_to_string(path).unwrap();
+        assert_eq!(snapshot.text(), Some(disk.as_str()));
+        assert_eq!(read_value(&disk, "config_version").as_deref(), Some("2"));
+        assert!(!contains_setting(&disk, "ui_density"));
+        assert_eq!(
+            read_value(&disk, "indicator_style").as_deref(),
+            Some(indicator)
+        );
+        assert_eq!(read_value(&disk, "media_layout").as_deref(), Some(media));
+        assert!(disk.contains(unrelated));
+    }
+
+    #[test]
+    fn acceptance_b_minimal_migrates_to_ring_and_compact() {
+        assert_acceptance_migration("ui_density = \"minimal\"\r\n", "ring", "compact");
+    }
+
+    #[test]
+    fn acceptance_c_balanced_migrates_to_edge_and_standard() {
+        assert_acceptance_migration("ui_density = \"balanced\"\r\n", "edge", "standard");
+    }
+
+    #[test]
+    fn acceptance_d_detailed_migrates_to_context_and_informative() {
+        assert_acceptance_migration("ui_density = \"detailed\"\r\n", "context", "informative");
+    }
+
+    #[test]
+    fn acceptance_e_explicit_modern_preference_wins() {
+        assert_acceptance_migration(
+            "config_version = \"1\"\r\nui_density = \"minimal\"\r\nindicator_style = \"context\"\r\n",
+            "context",
+            "compact",
+        );
+        assert_acceptance_migration(
+            "config_version = \"1\"\r\nui_density = \"minimal\"\r\nmedia_layout = \"informative\"\r\n",
+            "ring",
+            "informative",
+        );
+    }
+
+    fn assert_acceptance_no_migration(
+        source: &str,
+        mode: RuntimeMode,
+        check: impl FnOnce(ConfigSnapshot, &Path),
+    ) {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let path = folder.join(settings::PRIMARY_NAME);
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        {
+            let mut file = fs::File::create(&path).unwrap();
+            io::Write::write_all(&mut file, source.as_bytes()).unwrap();
+            file.set_modified(past).unwrap();
+        }
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+
+        let snapshot = bootstrap_at(&base, true);
+
+        assert_eq!(snapshot.mode(), &mode);
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(snapshot.text(), Some(source));
+        check(snapshot, &path);
+        assert_eq!(fs::read(&path).unwrap(), source.as_bytes());
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert_no_protected_backup(&folder);
+        assert!(!folder.join("config.toml.bak").try_exists().unwrap());
+        assert!(
+            !folder
+                .join(config_commit::FAILURE_RECORD_NAME)
+                .try_exists()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn acceptance_f_current_schema_is_untouched() {
+        assert_acceptance_no_migration(
+            "# Preserve these bytes\r\nconfig_version = \"2\"\r\nindicator_style = \"ring\"\r\n",
+            RuntimeMode::Normal,
+            |snapshot, _| assert!(snapshot.writes_allowed()),
+        );
+    }
+
+    #[test]
+    fn acceptance_g_future_schema_refuses_update() {
+        assert_acceptance_no_migration(
+            "config_version = \"100\"\r\nindicator_style = \"ring\"\r\n",
+            RuntimeMode::ReadOnly,
+            |snapshot, path| {
+                let slot = Mutex::new(Some(Arc::new(snapshot)));
+                let error = update_in(&slot, path, "indicator_style", "edge").unwrap_err();
+                assert!(is_mode_refused(&error));
+            },
+        );
+    }
+
+    #[test]
+    fn acceptance_h_invalid_legacy_value_is_untouched() {
+        assert_acceptance_no_migration(
+            "config_version = \"1\"\r\nui_density = \"unknown\"\r\n",
+            RuntimeMode::LegacyCompatible,
+            |_, _| {},
+        );
+    }
+
+    #[test]
+    fn acceptance_i_duplicate_critical_key_is_untouched() {
+        assert_acceptance_no_migration(
+            "ui_density = \"minimal\"\r\nui_density = \"minimal\"\r\n",
+            RuntimeMode::LegacyCompatible,
+            |_, _| {},
+        );
     }
 
     #[derive(Clone, Copy)]
