@@ -756,7 +756,59 @@ and renames the legacy folder by path before the directory handle exists;
 preparation must treat protected backups as recovery evidence before
 migration creates any (2C-2 S2 note).
 
-First step next: 2C-3 (see the Phase B table), in a new lead session: this
+2C-3 design (2026-11-19). A Sonnet scout mapped the code
+(`scratchpad/2c3-map.md`); Sofia (Opus), Enzo (Codex) and Giulia (Gemini 4)
+split the task independently (`scratchpad/2c3-wf-{sofia,enzo,giulia}.md`),
+a Sonnet agent compared them (`scratchpad/2c3-compare.md`). Agreed by all:
+migration only in `bootstrap` / `bootstrap_at`, one WriterLock held from
+preparation through inventory, locked read, migrate and snapshot; order:
+locked bytes -> `retry_decision` -> strict `prepare` -> protected backup ->
+`commit_primary(Some(bytes))` -> verify -> clear failure record -> retention;
+exact bytes compared under the lock (a change -> no write, no record,
+re-observe); retention or record-clear errors never downgrade `Migrated`; no
+rollback write; refresh and writes never migrate; a one-shot migration report
+on the snapshot; e2e A-S on temp bases and local slots only; the by-path
+rename / folder create stays under the WriterMutex (documented limit). Lead
+decisions on the disputes:
+- D-A protected backups count as non-ambiguous recovery evidence (like
+  `.bak`): they block the fresh template, a valid rolling `.bak` still
+  restores (Sofia, Giulia; Enzo's "ambiguous" would break the `.bak` restore
+  after every migration).
+- D-B failure record file `config.toml.failure`; its drafts must match the
+  stale-draft sweep (Sofia found the sweep matches only
+  `config.toml.<n>-<n>-<n>.tmp`).
+- D-C writes stay allowed after a fallback (`LegacyCompatible`, as in 2C-2;
+  a save changes the fingerprint, so the next start retries).
+- D-D a legacy file `prepare` refuses (unsupported line) falls back without a
+  record (no write; core has no Prepare stage); 2D-2 may revisit.
+- D-E `CommitUnverified`: record stage Verify, re-read the disk text into the
+  snapshot, keep the protected backup (consistent with S4b).
+- D-F new module `platform/config_migrate.rs` (config_store.rs is large).
+- D-G production switch LAST, after the e2e steps (Enzo): until then
+  `bootstrap_at` takes an explicit migrate flag that tests set and
+  production passes as off.
+- D-H scenario R (live repair) is pinned to today's behaviour (Recovery until
+  restart); live recovery is 2D-2.
+- D-I migrate reads the failure record itself; Corrupt suppresses the retry
+  and is never turned into an absent fingerprint.
+- D-J lock busy or preparation failed: lock-free observe, no migration,
+  report `Busy` / `Unprepared`. Tests that take the per-user WriterMutex hold
+  `TEST_WRITER_SERIAL` and follow `islora-safe-testing`.
+2C-3 steps (each one commit, Paolo writes; Giulia plus Lucia or Enzo review):
+S1 settings.rs (+config_store.rs inventory): protected backups and the failure
+record as recovery evidence (D-A), sweep failure drafts (D-B), flip the pin
+test. S2 failure record I/O (None / Valid / Corrupt, bounded, Draft + verify
++ rename, clear); inventory sets `recorded_failure` for Valid only. S3
+`prepare_storage_locked` returns the WriterLock, `prepare_storage_at` wraps
+it. S4 `config_migrate.rs`: report types, `migrate_locked`, D-D. S5 failure
+recording and the post-rename path (D-E). S6 bootstrap under one lock with
+the migrate flag off in production (D-G, D-J). S7 e2e A-I. S8 e2e J-S (R
+per D-H). S9 the switch. S10 docs (config_state.rs text, acceptance rows and
+gate). Test names per step in `scratchpad/2c3-compare.md` section 3.
+
+First step next: 2C-3 S1.
+
+Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
 Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:
 Enzo plus Giulia), then CL3. Hand-over at 2026-11-19 ~10:05 UTC: lead context
