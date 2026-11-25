@@ -111,6 +111,7 @@ pub enum Action {
     Progress(ProgressStyle),
     MonitorStep { next: bool },
     SoundWave,
+    AirPodsEarPause,
     ReducedMotion,
     QuickTimeout { next: bool },
     WaveStyle(WaveStyle),
@@ -173,6 +174,7 @@ pub struct SettingsState {
     pub progress: ProgressStyle,
     pub monitor_label: String,
     pub sound_wave: bool,
+    pub airpods_ear_pause: bool,
     pub reduced_motion: bool,
     pub quick_timeout: u64,
     pub battery_saver: bool,
@@ -705,9 +707,23 @@ fn general(view: &mut View, state: &SettingsState) {
         };
         view.control(action, Look::Button, bounds, label);
     }
+    let ear = Rect {
+        x: LEFT,
+        y: 340.0,
+        width: WIDTH,
+        height: ROW_HEIGHT,
+    };
+    view.control(
+        Action::AirPodsEarPause,
+        Look::Switch {
+            on: state.airpods_ear_pause,
+        },
+        ear,
+        "Kulaklık çıkınca duraklat",
+    );
     let motion = Rect {
         x: LEFT,
-        y: 348.0,
+        y: 392.0,
         width: WIDTH,
         height: ROW_HEIGHT,
     };
@@ -719,8 +735,8 @@ fn general(view: &mut View, state: &SettingsState) {
         motion,
         "Hareketi azalt",
     );
-    view.caption("Hızlı Kontroller otomatik kapansın", 405.0);
-    let y = 432.0;
+    view.caption("Hızlı Kontroller otomatik kapansın", 449.0);
+    let y = 474.0;
     view.control(
         Action::QuickTimeout { next: false },
         Look::Step,
@@ -763,7 +779,7 @@ fn general(view: &mut View, state: &SettingsState) {
     });
     view.caption(
         format!("Islora {}", env!("CARGO_PKG_VERSION")),
-        WINDOW_HEIGHT - 44.0,
+        WINDOW_HEIGHT - 30.0,
     );
 }
 
@@ -810,6 +826,7 @@ mod tests {
             progress: ProgressStyle::Ring,
             monitor_label: "Ekran 1 · Birincil".into(),
             sound_wave: true,
+            airpods_ear_pause: true,
             reduced_motion: false,
             quick_timeout: 8,
             battery_saver: false,
@@ -918,6 +935,21 @@ mod tests {
         let view = view(&state(Page::Appearance));
         assert_eq!(view.action_at(PREVIEW.x + 5.0, PREVIEW.y + 5.0), None);
         assert_eq!(view.action_at(-1.0, -1.0), None);
+    }
+
+    #[test]
+    fn the_general_page_shows_whether_earbuds_pause_the_music() {
+        for on in [true, false] {
+            let mut current = state(Page::General);
+            current.airpods_ear_pause = on;
+            let view = view(&current);
+            let control = view
+                .controls
+                .iter()
+                .find(|control| control.action == Action::AirPodsEarPause)
+                .unwrap();
+            assert_eq!(control.look, Look::Switch { on });
+        }
     }
 
     #[test]

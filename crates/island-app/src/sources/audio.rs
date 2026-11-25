@@ -2,7 +2,9 @@
 //! microphone, and follows both when the user switches to another device.
 
 use island_core::Indicator;
-use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+use windows::Win32::Devices::FunctionDiscovery::{
+    PKEY_Device_ContainerId, PKEY_Device_FriendlyName,
+};
 use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY, WPARAM};
 use windows::Win32::Media::Audio::Endpoints::{
     IAudioEndpointVolume, IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl,
@@ -12,7 +14,7 @@ use windows::Win32::Media::Audio::{
     IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator, eCapture, eConsole,
     eRender,
 };
-use windows::Win32::System::Com::StructuredStorage::PropVariantToBSTR;
+use windows::Win32::System::Com::StructuredStorage::{PropVariantToBSTR, PropVariantToGUID};
 use windows::Win32::System::Com::{CLSCTX_ALL, CLSCTX_INPROC_SERVER, CoCreateInstance, STGM_READ};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use windows::core::{Error, PCWSTR, Result, implement};
@@ -138,6 +140,22 @@ impl AudioWatch {
         let (endpoint, name) = self.attach(eRender, &self.callback).ok()?;
         self.endpoint = Some(endpoint);
         name
+    }
+
+    /// The container id of the default output device, which is the same for
+    /// everything that belongs to one physical device, such as a headset and
+    /// its Bluetooth connection. `None` if there is no output or it does not
+    /// say.
+    pub fn default_output_container(&self) -> Option<u128> {
+        unsafe {
+            let device = self
+                .enumerator
+                .GetDefaultAudioEndpoint(eRender, eConsole)
+                .ok()?;
+            let store = device.OpenPropertyStore(STGM_READ).ok()?;
+            let value = store.GetValue(&PKEY_Device_ContainerId).ok()?;
+            PropVariantToGUID(&value).ok().map(|guid| guid.to_u128())
+        }
     }
 
     /// Read the actual output state for the controls panel.

@@ -18,7 +18,7 @@ use windows::core::{HSTRING, IInspectable, Interface, Result};
 use windows_collections::IIterable;
 
 use super::IndicatorSink;
-use super::airpods::{AirPods, airpods_model_id};
+use super::airpods::{AirPods, find_airpods};
 
 /// Where Windows keeps a device's battery level, for the devices that report one.
 const BATTERY_PROPERTY: &str = "{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2";
@@ -191,7 +191,8 @@ fn identify(device: Device, news: bool, names: Names, airpods: AirPods, sink: In
             let _ = RoInitialize(RO_INIT_MULTITHREADED);
         }
         let address = bluetooth_address(&device.id);
-        if let Some(model_id) = address.as_deref().and_then(airpods_model_id) {
+        if let Some(found) = address.as_deref().and_then(find_airpods) {
+            let model_id = found.model_id;
             // Under the lock, so that a removal, or one followed by another
             // addition, cannot slip in between the check and the registration.
             {
@@ -199,7 +200,7 @@ fn identify(device: Device, news: bool, names: Names, airpods: AirPods, sink: In
                 if !is_current(&names, &device.id, device.generation) {
                     return;
                 }
-                airpods.connected(&device.id, &device.name, model_id, !news);
+                airpods.connected(&device.id, &device.name, found, !news);
             }
             if !news {
                 return;

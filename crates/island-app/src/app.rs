@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
@@ -72,7 +72,7 @@ use crate::sources::focus::{self, FocusWatch, MSG_FOCUS, MSG_FOCUS_REFUSED};
 use crate::sources::fullscreen::{self, MSG_APPBAR, MSG_FRONT_CHANGED, MSG_WINDOW_DRAG, Presence};
 use crate::sources::imaging::{Imaging, MSG_IMAGING, Made};
 use crate::sources::keys::KeyEvent;
-use crate::sources::media::{MSG_MEDIA, MediaSource};
+use crate::sources::media::{MSG_MEDIA, MediaEvent, MediaSource};
 use crate::sources::notifications::{
     MSG_NOTIFICATIONS, NotificationSource, Update as NotificationUpdate,
 };
@@ -82,8 +82,11 @@ use crate::sources::quick_brightness::{MSG_QUICK_BRIGHTNESS, QuickBrightness};
 use crate::sources::quick_radios::{MSG_QUICK_RADIOS, QuickRadios};
 use crate::sources::sharing::{self, MSG_SHARING, SharedFile, Sharing, SharingEvent};
 use crate::sources::{
-    IndicatorSink, MSG_INDICATOR, MSG_NETWORK_CHANGED, clipboard, keys, network, screenshots,
+    EarEvent, IndicatorSink, MSG_EAR_CHANGED, MSG_INDICATOR, MSG_NETWORK_CHANGED, clipboard, keys,
+    network, screenshots,
 };
+use island_core::airpods::output_is_airpods;
+use island_core::ear::{EarAction, EarControl};
 
 // Lives in `Win32::UI::Controls`, a large feature to enable for one constant.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -215,6 +218,8 @@ struct App {
     material: Material,
     preferences: island_core::presentation::PresentationPreferences,
     sound_wave: bool,
+    /// Whether music pauses when an AirPods earbud comes out.
+    airpods_ear_pause: bool,
     reduced_motion: bool,
     quick_timeout: u64,
     wave_still: bool,
@@ -257,6 +262,20 @@ struct App {
     preset_unit: Millis,
     tracker: SystemTracker,
     indicators: Receiver<Indicator>,
+    /// What AirPods tell about their earbuds and where the sound goes.
+    ear_events: Receiver<EarEvent>,
+    /// Whether the reports of worn earbuds are wanted, which the sources read.
+    ear_switch: Arc<AtomicBool>,
+    ear: EarControl,
+    /// What the followed player did last, for the ear control to turn on later.
+    ear_playing: bool,
+    ear_session: Option<u64>,
+    /// The title of the track that played last, to see it change.
+    ear_title: Option<String>,
+    /// The container ids of the connected AirPods and of the default audio
+    /// output, which say whether the sound goes to the AirPods.
+    airpods_containers: Vec<u128>,
+    output_container: Option<u128>,
     audio: Option<AudioWatch>,
     _power: Option<PowerWatch>,
     _bluetooth: Option<BluetoothWatch>,
@@ -349,6 +368,7 @@ pub fn run() -> Result<()> {
         selected_monitor.as_deref(),
     )?;
     let sound_wave = stored_sound_wave();
+    let airpods_ear_pause = stored_airpods_ear_pause();
     let reduced_motion = stored_reduced_motion();
     let quick_timeout = stored_quick_timeout();
     render::set_reduced_motion(reduced_motion);
@@ -393,7 +413,8 @@ pub fn run() -> Result<()> {
         window::show(edge_window);
     }
 
-    let (sink, indicators) = IndicatorSink::channel(island_window);
+    let (sink, indicators, ear_events) = IndicatorSink::channel(island_window);
+    let ear_switch = sink.ear_switch();
     let mut audio = optional("volume", AudioWatch::start(island_window, sink.clone()));
     let camera_watch = CameraWatch::start(island_window, sink.clone());
     network::start(sink.clone());
@@ -406,6 +427,9 @@ pub fn run() -> Result<()> {
     if let Some(name) = audio.as_mut().and_then(AudioWatch::follow_default_device) {
         tracker.audio_output_changed(name);
     }
+    let output_container = audio
+        .as_ref()
+        .and_then(AudioWatch::default_output_container);
     tracker.monitors_changed(monitor_count());
     if let Some(code) = keys::language() {
         tracker.keyboard_language_changed(code);
@@ -428,6 +452,7 @@ pub fn run() -> Result<()> {
         material: stored_material(),
         preferences,
         sound_wave,
+        airpods_ear_pause,
         reduced_motion,
         quick_timeout,
         wave_still,
@@ -475,6 +500,14 @@ pub fn run() -> Result<()> {
         },
         tracker,
         indicators,
+        ear_events,
+        ear_switch,
+        ear: EarControl::new(),
+        ear_playing: false,
+        ear_session: None,
+        ear_title: None,
+        airpods_containers: Vec::new(),
+        output_container,
         audio,
         _power: None,
         _bluetooth: bluetooth,
@@ -567,6 +600,7 @@ pub fn run() -> Result<()> {
         app.advance_indicator_demo();
         app.set_timer(TIMER_INDICATOR_DEMO, INDICATOR_DEMO_STEP_MS);
     }
+    app.restart_ear();
     APP.with(|cell| *cell.borrow_mut() = Some(app));
 
     // The island hides when idle, so nothing else would show that the app started.
@@ -1316,6 +1350,8 @@ impl App {
     /// Beside play, a button skips a track, or jumps within a video that has
     /// none to skip, or does nothing if the player takes neither.
     fn press_media(&mut self, button: MediaButton, now: Millis) {
+        // Whatever it does, the user is in charge of the music now.
+        self.ear.user_acted();
         let Some(media) = &self.shown_media else {
             self.media.press(button);
             return;
@@ -1715,6 +1751,11 @@ impl App {
         self.update_native_osd();
         self.calendar.set_address(calendar_address());
         self.sound_wave = stored_sound_wave();
+        let ear_pause = stored_airpods_ear_pause();
+        if ear_pause != self.airpods_ear_pause {
+            self.airpods_ear_pause = ear_pause;
+            self.restart_ear();
+        }
         self.reduced_motion = stored_reduced_motion();
         self.quick_timeout = stored_quick_timeout();
         render::set_reduced_motion(self.reduced_motion);
@@ -1775,6 +1816,7 @@ impl App {
             progress: self.progress_style,
             monitor_label: self.monitor_label(),
             sound_wave: self.sound_wave,
+            airpods_ear_pause: self.airpods_ear_pause,
             reduced_motion: self.reduced_motion,
             quick_timeout: self.quick_timeout,
             battery_saver: self.battery_saver,
@@ -1901,6 +1943,19 @@ impl App {
                         "Ses dalgası uygulanamadı ve önceki görünüm geri yüklenemedi. Ayarı kontrol edin."
                     });
                 }
+            }
+            Action::AirPodsEarPause => {
+                self.airpods_ear_pause = !self.airpods_ear_pause;
+                self.restart_ear();
+                settings::persist_or_rollback(
+                    "airpods_ear_pause",
+                    if self.airpods_ear_pause { "on" } else { "off" },
+                    || {
+                        self.airpods_ear_pause = !self.airpods_ear_pause;
+                        self.restart_ear();
+                        true
+                    },
+                );
             }
             Action::ReducedMotion => {
                 self.reduced_motion = !self.reduced_motion;
@@ -2402,7 +2457,64 @@ impl App {
     }
 
     fn on_media(&mut self) {
-        let Some(update) = self.media.latest() else {
+        // The ear control sees every report, in order, while the screen only
+        // needs where it ended up.
+        let mut latest = None;
+        // What the control wants done is done once every report is in: a
+        // resume on a stop that a later report shows was followed by a play
+        // would start music that the user paused again.
+        let mut action = None;
+        for event in self.media.events() {
+            // What the control wants, and whether someone else took over: the
+            // player plays, or another track or player came.
+            let (wanted, taken_over, session) = match event {
+                MediaEvent::Snapshot {
+                    session,
+                    snapshot,
+                    playing,
+                } => {
+                    let (wanted, changed) = self.feed_ear_media(session, &snapshot, playing);
+                    latest = Some(snapshot);
+                    (wanted, changed || playing == Some(true), session)
+                }
+                // The pause did not work, so the stop that a resume was
+                // waiting for was not the ear control's doing.
+                MediaEvent::PauseRefused(session) => {
+                    if self.ear_active() {
+                        self.ear.pause_refused(session);
+                    }
+                    let refused =
+                        matches!(action, Some(EarAction::Resume(paused)) if paused == session);
+                    (None, refused, None)
+                }
+                // A step that may be over by the next snapshot, which the
+                // control must still see, as a stop followed by a play is the
+                // user taking over.
+                MediaEvent::State { session, playing } => {
+                    self.ear_playing = playing;
+                    self.ear_session = Some(session);
+                    let wanted = self
+                        .ear_active()
+                        .then(|| self.ear.media(playing, Some(session), self.now()))
+                        .flatten();
+                    (wanted, playing, Some(session))
+                }
+            };
+            let other_session = match (action, session) {
+                (Some(EarAction::Resume(paused) | EarAction::Pause(paused)), Some(session)) => {
+                    paused != session
+                }
+                _ => false,
+            };
+            if taken_over || other_session {
+                action = None;
+            }
+            if wanted.is_some() {
+                action = wanted;
+            }
+        }
+        self.run_ear_action(action);
+        let Some(update) = latest else {
             return;
         };
         // The demo shows a made-up track, which real updates would wipe out.
@@ -2414,6 +2526,103 @@ impl App {
             None => self.island.remove(Kind::Media),
         }
         self.refresh();
+    }
+
+    /// Pausing for earbuds is on, and real events are not held back.
+    fn ear_active(&self) -> bool {
+        self.airpods_ear_pause && !self.quiet
+    }
+
+    /// Starts the ear control over, as when it is turned on again, and tells
+    /// the sources whether it wants their reports.
+    fn restart_ear(&mut self) {
+        self.ear = EarControl::new();
+        self.sync_ear_output();
+        self.ear
+            .media(self.ear_playing, self.ear_session, self.now());
+        self.ear_switch.store(self.ear_active(), Ordering::Relaxed);
+    }
+
+    /// Whether the sound goes to the AirPods: the default output and the
+    /// AirPods are one device. If either is not known, it does not.
+    fn sync_ear_output(&mut self) {
+        let airpods = output_is_airpods(&self.airpods_containers, self.output_container);
+        self.ear.output(airpods);
+    }
+
+    fn run_ear_action(&self, action: Option<EarAction>) {
+        match action {
+            Some(EarAction::Pause(session)) => self.media.pause(session),
+            Some(EarAction::Resume(session)) => self.media.play(session),
+            None => {}
+        }
+    }
+
+    /// Tells the ear control what the followed player does. Another session,
+    /// or another track in the same one, is someone else being in charge of
+    /// the music.
+    ///
+    /// `playing` is `None` when it is not known, which the control is not
+    /// told: taken as a stop, it could look like a pause that happened.
+    ///
+    /// Returns what the control wants done, which the caller runs, and
+    /// whether another track came.
+    fn feed_ear_media(
+        &mut self,
+        session: Option<u64>,
+        update: &Option<MediaSnapshot>,
+        playing: Option<bool>,
+    ) -> (Option<EarAction>, bool) {
+        let title = update.as_ref().map(|snapshot| snapshot.title.clone());
+        // Only one title replacing another counts: no title at all is the
+        // player stopped, which the control sees as it is.
+        let changed = match (&self.ear_title, &title) {
+            (Some(before), Some(now)) => before != now,
+            _ => false,
+        };
+        if title.is_some() {
+            self.ear_title = title;
+        }
+        // Not knowing keeps what was known of the same session, but nothing
+        // of another: its being paused must not be taken for a pause of this.
+        match playing {
+            Some(playing) => self.ear_playing = playing,
+            None if self.ear_session != session => self.ear_playing = false,
+            None => {}
+        }
+        self.ear_session = session;
+        if !self.ear_active() {
+            return (None, changed);
+        }
+        if changed {
+            self.ear.user_acted();
+        }
+        let wanted = playing.and_then(|playing| self.ear.media(playing, session, self.now()));
+        (wanted, changed)
+    }
+
+    /// AirPods told something about their earbuds or the output. No notice
+    /// comes of it.
+    fn on_ear(&mut self) {
+        while let Ok(event) = self.ear_events.try_recv() {
+            match event {
+                EarEvent::Containers(containers) => {
+                    self.airpods_containers = containers;
+                    self.sync_ear_output();
+                }
+                EarEvent::Gone => {
+                    self.airpods_containers.clear();
+                    self.ear.disconnected();
+                    self.sync_ear_output();
+                }
+                EarEvent::Worn(count) => {
+                    if self.ear_active() {
+                        let action = self.ear.worn(Some(count), self.now());
+                        self.run_ear_action(action);
+                    }
+                }
+            }
+        }
     }
 
     /// Returns files to drag out of the island, once a press on the shelf
@@ -2989,6 +3198,9 @@ impl App {
             return;
         }
         let name = audio.follow_default_device();
+        // Where the sound goes decides whether earbuds pause it.
+        self.output_container = audio.default_output_container();
+        self.sync_ear_output();
         match name {
             Some(name) => {
                 if let Some(indicator) = self.tracker.audio_output_changed(name) {
@@ -3613,6 +3825,14 @@ fn stored_sound_wave() -> bool {
     })
 }
 
+fn stored_airpods_ear_pause() -> bool {
+    config_store::text().is_none_or(|text| {
+        island_core::settings::Settings::read(&text)
+            .music
+            .airpods_ear_pause()
+    })
+}
+
 fn stored_reduced_motion() -> bool {
     config_store::text().is_some_and(|text| {
         island_core::settings::Settings::read(&text)
@@ -4077,6 +4297,9 @@ unsafe extern "system" fn island_proc(
         }
         MSG_INDICATOR => {
             with_app(App::on_indicators);
+        }
+        MSG_EAR_CHANGED => {
+            with_app(App::on_ear);
         }
         MSG_CALENDAR => {
             with_app(App::on_calendar);
