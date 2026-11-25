@@ -3,8 +3,9 @@
 //! WinRT calls here can take a while, so they run on their own thread, which
 //! blocks on a channel and costs nothing until something actually changes.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use island_core::media::RepeatMode;
@@ -35,11 +36,24 @@ const MAX_ARTWORK_BYTES: u64 = 8 * 1024 * 1024;
 /// Browsers name a new track before they swap its picture, sometimes without
 /// saying so, so the picture is read once more this long after a change.
 const ARTWORK_SETTLE: Duration = Duration::from_millis(1_500);
+/// The longest a state read waits for another one to finish. Neither should
+/// take more than a few milliseconds; past this, the read goes ahead without
+/// the lock, at the risk of its report coming out of order, rather than risk
+/// a deadlock with locks inside Windows that this cannot see.
+const READ_LOCK_WAIT: Duration = Duration::from_millis(200);
 
 enum Signal {
     SessionChanged,
     MetadataChanged,
-    StateChanged,
+    /// The player's state changed. It says whether the session with this id
+    /// was playing when the change was reported, and when that was read: a
+    /// burst of changes is read once, at its end, which would miss a play and
+    /// a pause that were both over by then.
+    StateChanged {
+        session: u64,
+        playing: bool,
+        at: Instant,
+    },
     TimelineChanged,
     Press(MediaButton),
     /// Pausing and playing, on their own and not as a toggle, for what is not
@@ -54,13 +68,25 @@ enum Signal {
 /// What the media thread tells the app, in order.
 pub enum MediaEvent {
     /// How the followed player is. `session` says which one, and is `None`
-    /// while none is followed. No snapshot is no media.
+    /// while none is followed. No snapshot is no media. `playing` is whether
+    /// it plays, read with the snapshot, and `None` when that is not known,
+    /// as while a track is being changed or when the read failed: the screen
+    /// can show no media then, but the ear control must not take it as a stop.
     Snapshot {
         session: Option<u64>,
         snapshot: Option<MediaSnapshot>,
+        playing: Option<bool>,
     },
     /// The player refused to pause, or could not be asked.
     PauseRefused(u64),
+    /// Whether the player of this session played, as read when it reported a
+    /// change. Every such read comes, in order, before the snapshot read after
+    /// it, so that a stop, a play and a pause in quick succession are all
+    /// seen.
+    ///
+    /// A read can still be late: the event does not carry the state, so a
+    /// play and a pause that are both over before the read show as one pause.
+    State { session: u64, playing: bool },
 }
 
 /// What is asked of the followed player, kept in the order it was asked.
@@ -96,6 +122,7 @@ impl MediaSource {
                     window,
                     clock,
                     only_session,
+                    reads: Arc::new(Mutex::new(())),
                 };
                 if let Err(error) = worker.run() {
                     eprintln!("media source stopped: {error}");
@@ -146,7 +173,12 @@ struct Tracked {
 }
 
 impl Tracked {
-    fn new(session: Session, id: u64, signals: &Sender<Signal>) -> Result<Self> {
+    fn new(
+        session: Session,
+        id: u64,
+        signals: &Sender<Signal>,
+        reads: &Arc<Mutex<()>>,
+    ) -> Result<Self> {
         let metadata = signals.clone();
         let metadata_token =
             session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
@@ -154,11 +186,26 @@ impl Tracked {
                 Ok(())
             }))?;
         let playback = signals.clone();
-        let playback_token =
-            session.PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
-                let _ = playback.send(Signal::StateChanged);
+        let playback_reads = Arc::clone(reads);
+        let playback_token = session.PlaybackInfoChanged(&TypedEventHandler::new(
+            move |sender: windows::core::Ref<Session>, _| {
+                // Read now, as the worker reads a burst only at its end. The
+                // lock keeps the reports in the order of the reads.
+                let _read = lock_for_read(&playback_reads);
+                let at = Instant::now();
+                // Not knowing is not passed on: taken as a stop, it could look
+                // like a pause that happened.
+                let Some(playing) = sender.as_ref().and_then(read_playing) else {
+                    return Ok(());
+                };
+                let _ = playback.send(Signal::StateChanged {
+                    session: id,
+                    playing,
+                    at,
+                });
                 Ok(())
-            }))?;
+            },
+        ))?;
         let timeline = signals.clone();
         let timeline_token =
             session.TimelinePropertiesChanged(&TypedEventHandler::new(move |_, _| {
@@ -222,6 +269,10 @@ struct Worker {
     window: isize,
     clock: Instant,
     only_session: Option<String>,
+    /// Held across each read of the player's state, by the worker and by the
+    /// handlers, so that a read and its report are never split by another
+    /// read: reports come in the order of the reads.
+    reads: Arc<Mutex<()>>,
 }
 
 impl Worker {
@@ -245,22 +296,32 @@ impl Worker {
         let mut sessions_followed = 0;
         let mut metadata = Metadata::default();
         let mut look_again: Option<Instant> = None;
+        // When the state in the latest snapshot was read. A state read before
+        // it is older news, and is not passed on.
+        let mut snapshot_read = Instant::now();
+        // Signals set aside while a snapshot was read, for the next burst.
+        // They go before anything newer, in the order they came.
+        let mut held: VecDeque<Signal> = VecDeque::new();
 
         loop {
             // Asleep until something happens, or until the picture is due a second look.
-            let first = match look_again {
-                Some(at) => match self
-                    .inbox
-                    .recv_timeout(at.saturating_duration_since(Instant::now()))
-                {
-                    Ok(signal) => Some(signal),
-                    Err(RecvTimeoutError::Timeout) => None,
-                    Err(RecvTimeoutError::Disconnected) => break,
-                },
-                None => match self.inbox.recv() {
-                    Ok(signal) => Some(signal),
-                    Err(_) => break,
-                },
+            let first = if let Some(signal) = held.pop_front() {
+                Some(signal)
+            } else {
+                match look_again {
+                    Some(at) => match self
+                        .inbox
+                        .recv_timeout(at.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(signal) => Some(signal),
+                        Err(RecvTimeoutError::Timeout) => None,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    },
+                    None => match self.inbox.recv() {
+                        Ok(signal) => Some(signal),
+                        Err(_) => break,
+                    },
+                }
             };
             // Players send bursts of events; handle each burst once. A second
             // look at the picture is a metadata change of its own.
@@ -272,11 +333,27 @@ impl Worker {
             let mut timeline_changed = false;
             let mut commands = Vec::new();
             let mut seek = None;
-            for signal in first.into_iter().chain(self.inbox.try_iter()) {
+            // The states read during the burst, in order, if newer than the
+            // last snapshot.
+            let mut states = Vec::new();
+            let earlier: Vec<Signal> = held.drain(..).collect();
+            for signal in first
+                .into_iter()
+                .chain(earlier)
+                .chain(self.inbox.try_iter())
+            {
                 match signal {
                     Signal::SessionChanged => session_changed = true,
                     Signal::MetadataChanged => metadata_changed = true,
-                    Signal::StateChanged => {}
+                    Signal::StateChanged {
+                        session,
+                        playing,
+                        at,
+                    } => {
+                        if at > snapshot_read {
+                            states.push((session, playing));
+                        }
+                    }
                     Signal::TimelineChanged => timeline_changed = true,
                     Signal::Press(button) => commands.push(Command::Press(button)),
                     Signal::Pause(session) => commands.push(Command::Pause(session)),
@@ -297,8 +374,8 @@ impl Worker {
                         sessions_followed
                     }
                 };
-                tracked =
-                    followed.and_then(|session| Tracked::new(session, id, &self.signals).ok());
+                tracked = followed
+                    .and_then(|session| Tracked::new(session, id, &self.signals, &self.reads).ok());
                 metadata = Metadata::default();
                 metadata_changed = true;
             }
@@ -311,9 +388,25 @@ impl Worker {
                         self.refused(for_session);
                     }
                 }
-                self.send(None, None);
+                self.send(None, None, Some(false));
                 continue;
             };
+            // Before anything else about this session, so that the snapshot
+            // that follows is the later state. The states of a session that is
+            // no longer followed are of no use to anyone. Within one burst, all
+            // states go before all commands, whatever their order: a resume
+            // and a pause by the user that cross that closely are not told
+            // apart, and the resume wins.
+            let mut states_sent = false;
+            for (for_session, playing) in states {
+                if for_session == id {
+                    self.emit(MediaEvent::State {
+                        session: id,
+                        playing,
+                    });
+                    states_sent = true;
+                }
+            }
             for command in commands {
                 match command {
                     Command::Press(button) => press(session, button),
@@ -337,16 +430,44 @@ impl Worker {
                 }
             }
             // Reading now would still return the old position. The player
-            // reports the new one by itself, unless it refused.
-            if seek.is_some_and(|position_ms| seek_to(session, position_ms)) && !metadata_changed {
+            // reports the new one by itself, unless it refused. States that
+            // were just sent still need the snapshot that ends them.
+            if seek.is_some_and(|position_ms| seek_to(session, position_ms))
+                && !metadata_changed
+                && !states_sent
+            {
                 continue;
             }
             let new_position = timeline_changed || metadata_changed;
-            self.send(
-                Some(id),
-                self.snapshot(session, &metadata, new_position)
-                    .unwrap_or(None),
-            );
+            // Under the lock, so that a handler's read is either before this
+            // one or after it. Those before it that came in since the burst
+            // was taken in are passed on first; those after are newer.
+            let read = lock_for_read(&self.reads);
+            for signal in self.inbox.try_iter() {
+                match signal {
+                    Signal::StateChanged {
+                        session: for_session,
+                        playing,
+                        at,
+                    } => {
+                        if for_session == id && at > snapshot_read {
+                            self.emit(MediaEvent::State {
+                                session: id,
+                                playing,
+                            });
+                        }
+                    }
+                    // For the next burst, in the order they came.
+                    other => held.push_back(other),
+                }
+            }
+            snapshot_read = Instant::now();
+            let playing = read_playing(session);
+            let snapshot = self
+                .snapshot(session, &metadata, new_position)
+                .unwrap_or(None);
+            drop(read);
+            self.send(Some(id), snapshot, playing);
         }
         Ok(())
     }
@@ -363,8 +484,12 @@ impl Worker {
         })
     }
 
-    fn send(&self, session: Option<u64>, snapshot: Option<MediaSnapshot>) {
-        self.emit(MediaEvent::Snapshot { session, snapshot });
+    fn send(&self, session: Option<u64>, snapshot: Option<MediaSnapshot>, playing: Option<bool>) {
+        self.emit(MediaEvent::Snapshot {
+            session,
+            snapshot,
+            playing,
+        });
     }
 
     fn refused(&self, session: u64) {
@@ -501,6 +626,32 @@ fn press(session: &Session, button: MediaButton) {
     };
     if let Err(error) = operation.and_then(|operation| operation.join()) {
         eprintln!("media command failed: {error}");
+    }
+}
+
+/// Takes the lock that orders state reads, waiting at most [`READ_LOCK_WAIT`].
+/// `None` is going ahead without it.
+fn lock_for_read(reads: &Mutex<()>) -> Option<MutexGuard<'_, ()>> {
+    let deadline = Instant::now() + READ_LOCK_WAIT;
+    loop {
+        match reads.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// Whether the player plays: `None` when that cannot be read, or when it is
+/// between two states, as while a track is being changed.
+fn read_playing(session: &Session) -> Option<bool> {
+    match session.GetPlaybackInfo().ok()?.PlaybackStatus().ok()? {
+        Status::Playing => Some(true),
+        Status::Paused | Status::Stopped | Status::Closed => Some(false),
+        _ => None,
     }
 }
 

@@ -2460,19 +2460,60 @@ impl App {
         // The ear control sees every report, in order, while the screen only
         // needs where it ended up.
         let mut latest = None;
+        // What the control wants done is done once every report is in: a
+        // resume on a stop that a later report shows was followed by a play
+        // would start music that the user paused again.
+        let mut action = None;
         for event in self.media.events() {
-            match event {
-                MediaEvent::Snapshot { session, snapshot } => {
-                    self.feed_ear_media(session, &snapshot);
+            // What the control wants, and whether someone else took over: the
+            // player plays, or another track or player came.
+            let (wanted, taken_over, session) = match event {
+                MediaEvent::Snapshot {
+                    session,
+                    snapshot,
+                    playing,
+                } => {
+                    let (wanted, changed) = self.feed_ear_media(session, &snapshot, playing);
                     latest = Some(snapshot);
+                    (wanted, changed || playing == Some(true), session)
                 }
+                // The pause did not work, so the stop that a resume was
+                // waiting for was not the ear control's doing.
                 MediaEvent::PauseRefused(session) => {
                     if self.ear_active() {
                         self.ear.pause_refused(session);
                     }
+                    let refused =
+                        matches!(action, Some(EarAction::Resume(paused)) if paused == session);
+                    (None, refused, None)
                 }
+                // A step that may be over by the next snapshot, which the
+                // control must still see, as a stop followed by a play is the
+                // user taking over.
+                MediaEvent::State { session, playing } => {
+                    self.ear_playing = playing;
+                    self.ear_session = Some(session);
+                    let wanted = self
+                        .ear_active()
+                        .then(|| self.ear.media(playing, Some(session), self.now()))
+                        .flatten();
+                    (wanted, playing, Some(session))
+                }
+            };
+            let other_session = match (action, session) {
+                (Some(EarAction::Resume(paused) | EarAction::Pause(paused)), Some(session)) => {
+                    paused != session
+                }
+                _ => false,
+            };
+            if taken_over || other_session {
+                action = None;
+            }
+            if wanted.is_some() {
+                action = wanted;
             }
         }
+        self.run_ear_action(action);
         let Some(update) = latest else {
             return;
         };
@@ -2520,7 +2561,18 @@ impl App {
     /// Tells the ear control what the followed player does. Another session,
     /// or another track in the same one, is someone else being in charge of
     /// the music.
-    fn feed_ear_media(&mut self, session: Option<u64>, update: &Option<MediaSnapshot>) {
+    ///
+    /// `playing` is `None` when it is not known, which the control is not
+    /// told: taken as a stop, it could look like a pause that happened.
+    ///
+    /// Returns what the control wants done, which the caller runs, and
+    /// whether another track came.
+    fn feed_ear_media(
+        &mut self,
+        session: Option<u64>,
+        update: &Option<MediaSnapshot>,
+        playing: Option<bool>,
+    ) -> (Option<EarAction>, bool) {
         let title = update.as_ref().map(|snapshot| snapshot.title.clone());
         // Only one title replacing another counts: no title at all is the
         // player stopped, which the control sees as it is.
@@ -2531,16 +2583,22 @@ impl App {
         if title.is_some() {
             self.ear_title = title;
         }
-        self.ear_playing = update.as_ref().is_some_and(|snapshot| snapshot.playing);
+        // Not knowing keeps what was known of the same session, but nothing
+        // of another: its being paused must not be taken for a pause of this.
+        match playing {
+            Some(playing) => self.ear_playing = playing,
+            None if self.ear_session != session => self.ear_playing = false,
+            None => {}
+        }
         self.ear_session = session;
         if !self.ear_active() {
-            return;
+            return (None, changed);
         }
         if changed {
             self.ear.user_acted();
         }
-        let action = self.ear.media(self.ear_playing, session, self.now());
-        self.run_ear_action(action);
+        let wanted = playing.and_then(|playing| self.ear.media(playing, session, self.now()));
+        (wanted, changed)
     }
 
     /// AirPods told something about their earbuds or the output. No notice
