@@ -1616,7 +1616,10 @@ mod tests {
             let path = folder.join(name);
             assert_eq!(fs::read(&path).unwrap(), text.as_bytes(), "{name}");
             if ProtectedBackupName::parse(name).is_some() {
-                assert!(fs::metadata(path).unwrap().permissions().readonly(), "{name}");
+                assert!(
+                    fs::metadata(path).unwrap().permissions().readonly(),
+                    "{name}"
+                );
             }
         }
     }
@@ -1906,7 +1909,9 @@ mod tests {
         let path = folder.join(settings::PRIMARY_NAME);
         let earlier_backup = acceptance_backup(1, ACCEPTANCE_LEGACY).file_name();
         config_migrate::AFTER_BACKUP.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || fs::write(path, ACCEPTANCE_EDITED).unwrap()));
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::write(path, ACCEPTANCE_EDITED).unwrap()
+            }));
         });
 
         let first = bootstrap_at(&base, true);
