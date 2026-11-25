@@ -154,6 +154,59 @@ pub fn parse(data: &[u8]) -> Option<Status> {
     None
 }
 
+/// The profiles of a headset's audio: A2DP sink and Hands-Free.
+const AUDIO_PROFILES: [&str; 2] = ["{0000110B-", "{0000111E-"];
+/// Apple's vendor id as Windows spells it in a Bluetooth device's instance id,
+/// where the `0001` in front says that the Bluetooth SIG gave it out. The
+/// product id follows `PID&`.
+const APPLE_VENDOR: &str = "VID&0001004C_PID&";
+
+/// The model id of the AirPods that these device instance ids belong to, if
+/// they do. Windows lists a Bluetooth device's profiles as children, such as
+/// `BTHENUM\{0000110b-0000-1000-8000-00805f9b34fb}_VID&0001004c_PID&2014\7&...`.
+/// One must carry Apple's vendor id, and one must be an audio profile, which
+/// keeps Apple's keyboards, mice and trackpads out, since they carry the same
+/// vendor id.
+///
+/// Only the earbuds are known models here. AirPods Max have no earbuds or case
+/// to read, and other Apple or Beats audio is not known to advertise the same
+/// message, so they all give none and keep the generic notice.
+pub fn apple_audio_pid(instance_ids: &[&str]) -> Option<u16> {
+    let ids: Vec<String> = instance_ids.iter().map(|id| id.to_uppercase()).collect();
+    if !ids
+        .iter()
+        .any(|id| AUDIO_PROFILES.iter().any(|profile| id.contains(profile)))
+    {
+        return None;
+    }
+    let pid = ids.iter().find_map(|id| {
+        let (_, after) = id.split_once(APPLE_VENDOR)?;
+        hex4(after.get(..4)?)
+    })?;
+    matches!(
+        Model::from_id(pid),
+        Model::AirPods1
+            | Model::AirPods2
+            | Model::AirPods3
+            | Model::AirPods4
+            | Model::AirPodsPro
+            | Model::AirPodsPro2
+            | Model::AirPodsPro2UsbC
+            | Model::AirPodsPro3
+    )
+    .then_some(pid)
+}
+
+/// Exactly four hexadecimal digits, which `from_str_radix` alone would not
+/// insist on: it also takes a leading plus sign.
+fn hex4(text: &str) -> Option<u16> {
+    if text.len() == 4 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        u16::from_str_radix(text, 16).ok()
+    } else {
+        None
+    }
+}
+
 /// Reads the body of a proximity pairing message.
 fn parse_proximity_pairing(body: &[u8; PROXIMITY_PAIRING_LEN]) -> Status {
     // body[0] is a prefix whose meaning is not known.
@@ -311,7 +364,8 @@ struct Link {
     /// Left, then right.
     pods: [Slot; 2],
     case: Option<u8>,
-    /// Whether an advertisement has been accepted yet.
+    /// Whether an advertisement has been accepted yet, or the connect notice
+    /// is not wanted.
     seen: bool,
 }
 
@@ -338,6 +392,17 @@ impl Tracker {
     /// connection twice, and that changes nothing. Surrounding whitespace is
     /// trimmed from the name, and an empty name is replaced by the model's own.
     pub fn connected(&mut self, name: String, model_id: u16, now: Millis) {
+        self.connect(name, model_id, now, false);
+    }
+
+    /// Like [`Tracker::connected`], for a headset that was already connected
+    /// when the app started. That is not news, so no connect notice comes, but
+    /// the low battery warnings work.
+    pub fn connected_quietly(&mut self, name: String, model_id: u16, now: Millis) {
+        self.connect(name, model_id, now, true);
+    }
+
+    fn connect(&mut self, name: String, model_id: u16, now: Millis, quiet: bool) {
         if self
             .link
             .as_ref()
@@ -357,8 +422,26 @@ impl Tracker {
             connected_at: now,
             pods: [Slot::new(); 2],
             case: None,
-            seen: false,
+            seen: quiet,
         });
+    }
+
+    /// Gives up on announcing a connection that has been waited for in vain,
+    /// say because no advertisement came, so that the caller can say it
+    /// another way. Returns whether the connect notice was still owed. In
+    /// that case it is used up, so no connect notice comes from here later,
+    /// and the caller must say it. After false, someone else has: the notice
+    /// was given, or was not wanted, or this model is not connected.
+    ///
+    /// Warnings are not affected either way.
+    pub fn give_up_announcing(&mut self, model_id: u16) -> bool {
+        match self.link.as_mut() {
+            Some(link) if link.model_id == model_id && !link.seen => {
+                link.seen = true;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The headset with this model id has disconnected. A report about some
@@ -1180,6 +1263,171 @@ mod tests {
             tracker.advertised(&from_left(worn(10), worn(90)), NEAR, 3_000),
             None
         );
+    }
+
+    #[test]
+    fn a_quiet_connection_has_no_connect_notice_but_warns() {
+        let mut tracker = Tracker::new();
+        tracker.connected_quietly(NAME.into(), PRO, 0);
+        assert_eq!(
+            tracker.advertised(&from_left(worn(90), worn(90)), NEAR, 1_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 2_000),
+            low(Some(20), None)
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 3_000),
+            None
+        );
+    }
+
+    #[test]
+    fn a_quiet_connection_warns_about_what_is_already_low() {
+        let mut tracker = Tracker::new();
+        tracker.connected_quietly(NAME.into(), PRO, 0);
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(90)), NEAR, 1_000),
+            low(Some(10), None)
+        );
+    }
+
+    #[test]
+    fn connecting_for_real_after_a_quiet_one_changes_nothing() {
+        let mut tracker = Tracker::new();
+        tracker.connected_quietly(NAME.into(), PRO, 0);
+        tracker.connected(NAME.into(), PRO, 1_000);
+        assert_eq!(
+            tracker.advertised(&from_left(worn(90), worn(90)), NEAR, 2_000),
+            None
+        );
+    }
+
+    /// A Bluetooth device's profile children as Windows lists them.
+    fn profile(uuid: &str, pid: &str) -> String {
+        format!(
+            "BTHENUM\\{{{uuid}-0000-1000-8000-00805f9b34fb}}_VID&0001004c_PID&{pid}\\7&2a1b3c4d&0&A1B2C3D4E5F6_C00000000"
+        )
+    }
+
+    #[test]
+    fn airpods_are_found_by_their_vendor_and_audio_profile() {
+        let sink = profile("0000110b", "2014");
+        assert_eq!(apple_audio_pid(&[&sink]), Some(0x2014));
+        let hands_free = profile("0000111e", "2027");
+        assert_eq!(apple_audio_pid(&[&hands_free]), Some(0x2027));
+    }
+
+    #[test]
+    fn the_vendor_and_the_audio_profile_may_be_on_different_ids() {
+        let device = "BTHENUM\\DEV_A1B2C3D4E5F6\\7&2a1b3c4d&0&BLUETOOTHDEVICE_A1B2C3D4E5F6";
+        let audio =
+            "BTHENUM\\{0000110B-0000-1000-8000-00805F9B34FB}\\7&2A1B3C4D&0&A1B2C3D4E5F6_C00000000";
+        let vendor = profile("00001200", "200E");
+        assert_eq!(apple_audio_pid(&[device, audio, &vendor]), Some(0x200E));
+    }
+
+    #[test]
+    fn ids_are_read_whatever_their_case() {
+        let id = "bthenum\\{0000111E-0000-1000-8000-00805f9b34fb}_vid&0001004c_pid&200f\\x";
+        assert_eq!(apple_audio_pid(&[id]), Some(0x200F));
+    }
+
+    #[test]
+    fn apple_devices_without_audio_are_not_airpods() {
+        // A keyboard has Apple's vendor id and a human interface profile.
+        let keyboard = profile("00001124", "0267");
+        assert_eq!(apple_audio_pid(&[&keyboard]), None);
+        assert_eq!(apple_audio_pid(&[]), None);
+    }
+
+    #[test]
+    fn other_vendors_audio_is_not_airpods() {
+        let sony = "BTHENUM\\{0000110b-0000-1000-8000-00805f9b34fb}_VID&0001012d_PID&0e3d\\7&1&0&001122334455_C00000000";
+        assert_eq!(apple_audio_pid(&[sony]), None);
+        // The Bluetooth SIG source is the one that counts: USB's source id
+        // for the same number is another company's.
+        let usb_source = profile("0000110b", "2014").replace("VID&0001004c", "VID&0002004c");
+        assert_eq!(apple_audio_pid(&[&usb_source]), None);
+    }
+
+    #[test]
+    fn only_known_earbuds_are_taken() {
+        let max = profile("0000110b", "200a");
+        assert_eq!(apple_audio_pid(&[&max]), None, "AirPods Max");
+        // A Beats product, or an Apple one that is not known, is not.
+        let other = profile("0000110b", "2006");
+        assert_eq!(apple_audio_pid(&[&other]), None, "another model");
+        for known in [
+            "2002", "200f", "2013", "2019", "200e", "2014", "2024", "2027",
+        ] {
+            let id = profile("0000110b", known);
+            assert!(apple_audio_pid(&[&id]).is_some(), "pid {known}");
+        }
+    }
+
+    #[test]
+    fn a_product_id_is_four_hex_digits_and_nothing_else() {
+        assert_eq!(hex4("2027"), Some(0x2027));
+        assert_eq!(hex4("20aF"), Some(0x20AF));
+        for text in ["+201", "-201", "201", "20277", " 201", "20 7", "2g27", ""] {
+            assert_eq!(hex4(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn giving_up_announcing_is_owed_once() {
+        let mut tracker = Tracker::new();
+        assert!(!tracker.give_up_announcing(PRO), "nothing connected");
+        tracker.connected(NAME.into(), PRO, 0);
+        assert!(!tracker.give_up_announcing(0x2014), "another model");
+        assert!(tracker.give_up_announcing(PRO));
+        assert!(!tracker.give_up_announcing(PRO), "already given up");
+        // Having given up, the connect notice does not come any more, but
+        // warnings do.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(90), worn(90)), NEAR, 1_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 2_000),
+            low(Some(20), None)
+        );
+    }
+
+    #[test]
+    fn nothing_is_owed_once_the_connection_was_announced() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        let first = tracker.advertised(&from_left(worn(90), worn(90)), NEAR, 1_000);
+        assert!(matches!(first, Some(Indicator::AirPods { .. })));
+        assert!(!tracker.give_up_announcing(PRO));
+    }
+
+    #[test]
+    fn a_quiet_connection_owes_nothing() {
+        let mut tracker = Tracker::new();
+        tracker.connected_quietly(NAME.into(), PRO, 0);
+        assert!(!tracker.give_up_announcing(PRO));
+    }
+
+    #[test]
+    fn a_new_connection_owes_its_notice_again() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        assert!(tracker.give_up_announcing(PRO));
+        tracker.disconnected(PRO);
+        tracker.connected(NAME.into(), PRO, 100_000);
+        assert!(tracker.give_up_announcing(PRO));
+    }
+
+    #[test]
+    fn a_broken_product_id_gives_nothing() {
+        for pid in ["", "20", "ZZZZ", "20-4", "+201"] {
+            let id = profile("0000110b", pid);
+            assert_eq!(apple_audio_pid(&[&id]), None, "pid {pid:?}");
+        }
     }
 
     #[test]

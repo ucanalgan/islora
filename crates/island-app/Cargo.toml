@@ -25,6 +25,7 @@ features = [
     "ApplicationModel_AppService",
     "ApplicationModel",
     "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
     "Devices_Enumeration",
     "Devices_Radios",
     "Devices_WiFiDirect",
