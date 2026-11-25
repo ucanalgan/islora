@@ -20,6 +20,7 @@ pub struct MusicPlayer {
     pub media_layout: Option<MediaLayout>,
     pub sound_wave: Option<bool>,
     pub wave_style: Option<WaveStyle>,
+    pub airpods_ear_pause: Option<bool>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Activities {
@@ -101,6 +102,7 @@ impl Settings {
                 wave_style: WaveStyle::ALL
                     .into_iter()
                     .find(|v| wave.as_deref() == Some(v.setting())),
+                airpods_ear_pause: boolean(text, "airpods_ear_pause"),
             },
             activities: Activities {
                 task_layout: TaskLayout::ALL
@@ -164,6 +166,10 @@ impl MusicPlayer {
     }
     pub fn wave_style(&self) -> WaveStyle {
         self.wave_style.unwrap_or_default()
+    }
+    /// Whether music pauses when an AirPods earbud comes out. On unless turned off.
+    pub fn airpods_ear_pause(&self) -> bool {
+        self.airpods_ear_pause.unwrap_or(true)
     }
 }
 impl Activities {
@@ -313,7 +319,12 @@ impl Feature {
         match self {
             Self::Appearance => &["island_style", "material", "reduced_motion"],
             Self::SystemIndicators => &["indicator_style"],
-            Self::MusicPlayer => &["media_layout", "sound_wave", "wave_style"],
+            Self::MusicPlayer => &[
+                "media_layout",
+                "sound_wave",
+                "wave_style",
+                "airpods_ear_pause",
+            ],
             Self::Activities => &[
                 "task_layout",
                 "progress_style",
@@ -345,6 +356,25 @@ pub fn reset_all(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_ear_pause_is_on_unless_turned_off() {
+        let ear = |text: &str| Settings::read(text).music.airpods_ear_pause();
+        assert!(ear(""));
+        assert!(ear("airpods_ear_pause = \"on\""));
+        assert!(!ear("airpods_ear_pause = \"off\""));
+        assert!(ear("airpods_ear_pause = \"maybe\""));
+        let reset = reset_feature(
+            "airpods_ear_pause = \"off\"
+unknown = \"keep\"
+",
+            Feature::MusicPlayer,
+        );
+        assert_eq!(
+            reset,
+            "unknown = \"keep\"
+"
+        );
+    }
     #[test]
     fn disabled_wave_stays_hidden_under_all_motion_constraints() {
         let settings = Settings::read("sound_wave = \"off\"\nwave_style = \"lively\"");

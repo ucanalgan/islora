@@ -9,6 +9,7 @@ pub mod config_state;
 pub mod convert;
 pub mod direct;
 pub mod drop;
+pub mod ear;
 pub mod files;
 pub mod firewall;
 pub mod focus;

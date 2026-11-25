@@ -207,6 +207,26 @@ fn hex4(text: &str) -> Option<u16> {
     }
 }
 
+/// A container id that tells one physical device from another: Windows groups
+/// everything that belongs to one device, such as its profiles and its audio
+/// endpoint, under one. The all-zero id and the one of the computer itself,
+/// `{00000000-0000-0000-FFFF-FFFFFFFFFFFF}`, belong to no particular device.
+pub fn usable_container(id: u128) -> Option<u128> {
+    const COMPUTER: u128 = 0xFFFF_FFFF_FFFF_FFFF;
+    (id != 0 && id != COMPUTER).then_some(id)
+}
+
+/// Whether the default audio output is one of these AirPods: its container id
+/// is one of theirs. If either is not known, it is not, because failing to
+/// act is safer than acting on the wrong sound.
+pub fn output_is_airpods(airpods: &[u128], output: Option<u128>) -> bool {
+    output.and_then(usable_container).is_some_and(|output| {
+        airpods
+            .iter()
+            .any(|&id| usable_container(id) == Some(output))
+    })
+}
+
 /// Reads the body of a proximity pairing message.
 fn parse_proximity_pairing(body: &[u8; PROXIMITY_PAIRING_LEN]) -> Status {
     // body[0] is a prefix whose meaning is not known.
@@ -355,6 +375,12 @@ impl Slot {
         self.reading.and_then(|reading| reading.pod.battery)
     }
 
+    /// In an ear. An earbud that charges is in the case, whatever else it says.
+    fn is_worn(&self) -> bool {
+        self.reading
+            .is_some_and(|reading| reading.pod.in_ear && !reading.pod.charging)
+    }
+
     /// The level of this earbud if it has fallen to or past a warning level
     /// while being worn. Every level it has fallen past is used up, so that
     /// falling past both at once warns once.
@@ -387,6 +413,15 @@ struct Link {
     /// Whether an advertisement has been accepted yet, or the connect notice
     /// is not wanted.
     seen: bool,
+}
+
+/// What one accepted advertisement led to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Heard {
+    /// A notice worth showing, if any.
+    pub indicator: Option<Indicator>,
+    /// How many earbuds are now in an ear, as in [`Tracker::worn_count`].
+    pub worn: Option<u8>,
 }
 
 /// Turns the advertisements of connected AirPods into what is worth saying.
@@ -466,15 +501,22 @@ impl Tracker {
 
     /// The headset with this model id has disconnected. A report about some
     /// other model than the connected one is not about this connection and is
-    /// ignored.
-    pub fn disconnected(&mut self, model_id: u16) {
+    /// ignored. Returns whether a connection ended.
+    pub fn disconnected(&mut self, model_id: u16) -> bool {
         if self
             .link
             .as_ref()
             .is_some_and(|link| link.model_id == model_id)
         {
             self.link = None;
+            return true;
         }
+        false
+    }
+
+    /// The model id of the connected headset, if any.
+    pub fn connected_model(&self) -> Option<u16> {
+        self.link.as_ref().map(|link| link.model_id)
     }
 
     /// An advertisement came in. Ones from another model, from too far away,
@@ -485,6 +527,24 @@ impl Tracker {
     /// low battery notice each time it falls past a warning level. Only one
     /// notice comes back per call.
     pub fn advertised(&mut self, status: &Status, rssi: i16, now: Millis) -> Option<Indicator> {
+        self.listened(status, rssi, now)?.indicator
+    }
+
+    /// How many earbuds are in an ear, from what is known of each: 0, 1 or 2.
+    /// An earbud that charges is in the case, not in an ear. `None` while
+    /// nothing is connected, or before anything is known of either earbud.
+    pub fn worn_count(&self) -> Option<u8> {
+        let link = self.link.as_ref()?;
+        link.pods
+            .iter()
+            .any(|slot| slot.reading.is_some())
+            .then(|| link.pods.iter().map(|slot| u8::from(slot.is_worn())).sum())
+    }
+
+    /// Like [`Tracker::advertised`], and also says how many earbuds are worn
+    /// now. `None` for the advertisements that are not accepted, which say
+    /// nothing about the headset in use and must not count as a report.
+    pub fn listened(&mut self, status: &Status, rssi: i16, now: Millis) -> Option<Heard> {
         let link = self.link.as_mut()?;
         if status.model.id() != link.model_id || rssi < RSSI_MIN {
             return None;
@@ -515,15 +575,20 @@ impl Tracker {
         let [left, right] = link.pods.each_mut().map(Slot::fallen);
         let first = !link.seen;
         link.seen = true;
-        if first && now.saturating_sub(link.connected_at) <= CONNECT_WINDOW_MS {
-            return Some(Indicator::AirPods {
+        let indicator = if first && now.saturating_sub(link.connected_at) <= CONNECT_WINDOW_MS {
+            Some(Indicator::AirPods {
                 name: link.name.clone(),
                 left: link.pods[0].battery(),
                 right: link.pods[1].battery(),
                 case: link.case,
-            });
-        }
-        (left.is_some() || right.is_some()).then_some(Indicator::AirPodsLow { left, right })
+            })
+        } else {
+            (left.is_some() || right.is_some()).then_some(Indicator::AirPodsLow { left, right })
+        };
+        Some(Heard {
+            indicator,
+            worn: self.worn_count(),
+        })
     }
 }
 
@@ -1543,6 +1608,109 @@ mod tests {
             tracker.advertised(&from_right(in_case, worn(10)), NEAR, later + 1_000),
             low(None, Some(10))
         );
+    }
+
+    #[test]
+    fn the_worn_count_is_what_is_known_of_each_earbud() {
+        let mut tracker = Tracker::new();
+        assert_eq!(tracker.worn_count(), None, "nothing connected");
+        tracker.connected(NAME.into(), PRO, 0);
+        assert_eq!(tracker.worn_count(), None, "nothing known yet");
+
+        let out = pod(Some(80), false, false);
+        let status = |left, right| from_left(left, right);
+        tracker.advertised(&status(worn(80), worn(80)), NEAR, 1_000);
+        assert_eq!(tracker.worn_count(), Some(2));
+        // The left earbud says for itself that it is out.
+        tracker.advertised(&status(out, worn(80)), NEAR, 2_000);
+        assert_eq!(tracker.worn_count(), Some(1));
+        tracker.advertised(&status(out, out), NEAR, 3_000);
+        assert_eq!(tracker.worn_count(), Some(0));
+    }
+
+    #[test]
+    fn a_charging_earbud_is_not_worn() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        let charging = pod(Some(80), true, true);
+        tracker.advertised(&from_left(worn(80), charging), NEAR, 1_000);
+        assert_eq!(tracker.worn_count(), Some(1));
+    }
+
+    #[test]
+    fn an_earbud_that_says_nothing_is_not_counted() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        // The right earbud is not there, as when only one is used.
+        let absent = pod(None, false, false);
+        tracker.advertised(&from_left(worn(80), absent), NEAR, 1_000);
+        assert_eq!(tracker.worn_count(), Some(1));
+    }
+
+    #[test]
+    fn the_worn_count_follows_the_in_case_quirk() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        tracker.advertised(&from_right(worn(80), worn(80)), NEAR, 1_000);
+        // The left earbud, in the case, says the right one is out, which is
+        // not believed; it only says that the left one is in the case.
+        let in_case = pod(Some(80), true, false);
+        let says_out = pod(Some(80), false, false);
+        // Long after the right earbud last spoke for itself.
+        let later = 1_000 + STALE_MS + 1_000;
+        tracker.advertised(&from_left(in_case, says_out), NEAR, later);
+        assert_eq!(tracker.worn_count(), Some(1));
+    }
+
+    #[test]
+    fn only_accepted_advertisements_are_heard() {
+        let mut tracker = Tracker::new();
+        let status = from_left(worn(80), worn(80));
+        assert_eq!(tracker.listened(&status, NEAR, 0), None, "not connected");
+        tracker.connected(NAME.into(), PRO, 0);
+        assert_eq!(tracker.listened(&status, -90, 1_000), None, "too weak");
+        let other = status_of(0x2014, true, worn(80), worn(80), None);
+        assert_eq!(tracker.listened(&other, NEAR, 1_000), None, "another model");
+        let heard = tracker.listened(&status, NEAR, 2_000).unwrap();
+        assert_eq!(heard.worn, Some(2));
+        assert!(matches!(heard.indicator, Some(Indicator::AirPods { .. })));
+        let again = tracker.listened(&status, NEAR, 3_000).unwrap();
+        assert_eq!(again.indicator, None);
+        assert_eq!(again.worn, Some(2));
+    }
+
+    #[test]
+    fn a_disconnect_says_whether_a_connection_ended() {
+        let mut tracker = Tracker::new();
+        assert!(!tracker.disconnected(PRO), "nothing connected");
+        assert_eq!(tracker.connected_model(), None);
+        tracker.connected(NAME.into(), PRO, 0);
+        assert_eq!(tracker.connected_model(), Some(PRO));
+        assert!(!tracker.disconnected(0x2014), "another model");
+        assert!(tracker.disconnected(PRO));
+        assert_eq!(tracker.connected_model(), None);
+    }
+
+    #[test]
+    fn containers_that_belong_to_no_device_are_not_usable() {
+        assert_eq!(usable_container(0), None);
+        assert_eq!(usable_container(0xFFFF_FFFF_FFFF_FFFF), None);
+        assert_eq!(usable_container(0xA1B2), Some(0xA1B2));
+    }
+
+    #[test]
+    fn the_output_is_the_airpods_only_by_a_shared_container() {
+        let pods = [0x1111_u128, 0x2222];
+        assert!(output_is_airpods(&pods, Some(0x2222)));
+        assert!(!output_is_airpods(&pods, Some(0x3333)), "another device");
+        assert!(!output_is_airpods(&pods, None), "output not known");
+        assert!(!output_is_airpods(&[], Some(0x2222)), "airpods not known");
+        // A computer's own devices all share one container, which is no proof.
+        assert!(!output_is_airpods(
+            &[0xFFFF_FFFF_FFFF_FFFF],
+            Some(0xFFFF_FFFF_FFFF_FFFF)
+        ));
+        assert!(!output_is_airpods(&[0], Some(0)));
     }
 
     #[test]

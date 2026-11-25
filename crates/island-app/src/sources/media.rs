@@ -42,12 +42,37 @@ enum Signal {
     StateChanged,
     TimelineChanged,
     Press(MediaButton),
+    /// Pausing and playing, on their own and not as a toggle, for what is not
+    /// the user's own press. They name the session that they are for, and are
+    /// dropped if another is followed by then: they must never reach an app
+    /// that they were not meant for.
+    Pause(u64),
+    Play(u64),
     Seek(u64),
+}
+
+/// What the media thread tells the app, in order.
+pub enum MediaEvent {
+    /// How the followed player is. `session` says which one, and is `None`
+    /// while none is followed. No snapshot is no media.
+    Snapshot {
+        session: Option<u64>,
+        snapshot: Option<MediaSnapshot>,
+    },
+    /// The player refused to pause, or could not be asked.
+    PauseRefused(u64),
+}
+
+/// What is asked of the followed player, kept in the order it was asked.
+enum Command {
+    Press(MediaButton),
+    Pause(u64),
+    Play(u64),
 }
 
 pub struct MediaSource {
     signals: Sender<Signal>,
-    updates: Receiver<Option<MediaSnapshot>>,
+    updates: Receiver<MediaEvent>,
 }
 
 impl MediaSource {
@@ -86,26 +111,42 @@ impl MediaSource {
         let _ = self.signals.send(Signal::Press(button));
     }
 
+    /// Pauses the player of this session, if it is still the followed one. It
+    /// does nothing to one that is paused.
+    pub fn pause(&self, session: u64) {
+        let _ = self.signals.send(Signal::Pause(session));
+    }
+
+    /// Plays the player of this session, if it is still the followed one. It
+    /// does nothing to one that is playing.
+    pub fn play(&self, session: u64) {
+        let _ = self.signals.send(Signal::Play(session));
+    }
+
     pub fn seek(&self, position_ms: u64) {
         let _ = self.signals.send(Signal::Seek(position_ms));
     }
 
-    /// The newest update, if any arrived. `Some(None)` means media ended.
-    pub fn latest(&self) -> Option<Option<MediaSnapshot>> {
-        self.updates.try_iter().last()
+    /// Everything that arrived since the last call, oldest first. Nothing is
+    /// left out, as what the earbuds did to the music depends on every step.
+    pub fn events(&self) -> Vec<MediaEvent> {
+        self.updates.try_iter().collect()
     }
 }
 
 /// A session with our handlers attached, detached again on drop.
 struct Tracked {
     session: Session,
+    /// Counts the sessions that were followed, so that one can be told from
+    /// another, and from itself at another time.
+    id: u64,
     metadata_token: i64,
     playback_token: i64,
     timeline_token: i64,
 }
 
 impl Tracked {
-    fn new(session: Session, signals: &Sender<Signal>) -> Result<Self> {
+    fn new(session: Session, id: u64, signals: &Sender<Signal>) -> Result<Self> {
         let metadata = signals.clone();
         let metadata_token =
             session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
@@ -126,6 +167,7 @@ impl Tracked {
             }))?;
         Ok(Self {
             session,
+            id,
             metadata_token,
             playback_token,
             timeline_token,
@@ -176,7 +218,7 @@ impl Default for Metadata {
 struct Worker {
     signals: Sender<Signal>,
     inbox: Receiver<Signal>,
-    publish: Sender<Option<MediaSnapshot>>,
+    publish: Sender<MediaEvent>,
     window: isize,
     clock: Instant,
     only_session: Option<String>,
@@ -200,6 +242,7 @@ impl Worker {
         let _ = self.signals.send(Signal::SessionChanged);
 
         let mut tracked: Option<Tracked> = None;
+        let mut sessions_followed = 0;
         let mut metadata = Metadata::default();
         let mut look_again: Option<Instant> = None;
 
@@ -227,7 +270,7 @@ impl Worker {
                 look_again = None;
             }
             let mut timeline_changed = false;
-            let mut presses = Vec::new();
+            let mut commands = Vec::new();
             let mut seek = None;
             for signal in first.into_iter().chain(self.inbox.try_iter()) {
                 match signal {
@@ -235,25 +278,56 @@ impl Worker {
                     Signal::MetadataChanged => metadata_changed = true,
                     Signal::StateChanged => {}
                     Signal::TimelineChanged => timeline_changed = true,
-                    Signal::Press(button) => presses.push(button),
+                    Signal::Press(button) => commands.push(Command::Press(button)),
+                    Signal::Pause(session) => commands.push(Command::Pause(session)),
+                    Signal::Play(session) => commands.push(Command::Play(session)),
                     Signal::Seek(position_ms) => seek = Some(position_ms),
                 }
             }
 
             if session_changed {
-                tracked = self
-                    .followed_session(&manager)
-                    .and_then(|session| Tracked::new(session, &self.signals).ok());
+                let followed = self.followed_session(&manager);
+                // The same session reported again keeps its id, which a new
+                // one would not: only what is the very same is still the one
+                // that was paused.
+                let id = match (&tracked, &followed) {
+                    (Some(tracked), Some(followed)) if tracked.session == *followed => tracked.id,
+                    _ => {
+                        sessions_followed += 1;
+                        sessions_followed
+                    }
+                };
+                tracked =
+                    followed.and_then(|session| Tracked::new(session, id, &self.signals).ok());
                 metadata = Metadata::default();
                 metadata_changed = true;
             }
 
-            let Some(session) = tracked.as_ref().map(|t| &t.session) else {
-                self.send(None);
+            let Some((session, id)) = tracked.as_ref().map(|t| (&t.session, t.id)) else {
+                // Nothing to do these to, and a pause that did not happen is
+                // said so.
+                for command in commands {
+                    if let Command::Pause(for_session) = command {
+                        self.refused(for_session);
+                    }
+                }
+                self.send(None, None);
                 continue;
             };
-            for button in presses {
-                press(session, button);
+            for command in commands {
+                match command {
+                    Command::Press(button) => press(session, button),
+                    Command::Pause(for_session) if for_session == id => {
+                        if !set_playing(session, false) {
+                            self.refused(id);
+                        }
+                    }
+                    Command::Play(for_session) if for_session == id => {
+                        set_playing(session, true);
+                    }
+                    Command::Pause(for_session) => self.refused(for_session),
+                    Command::Play(_) => {}
+                }
             }
             if metadata_changed {
                 let before = metadata.title.clone();
@@ -269,6 +343,7 @@ impl Worker {
             }
             let new_position = timeline_changed || metadata_changed;
             self.send(
+                Some(id),
                 self.snapshot(session, &metadata, new_position)
                     .unwrap_or(None),
             );
@@ -288,8 +363,16 @@ impl Worker {
         })
     }
 
-    fn send(&self, update: Option<MediaSnapshot>) {
-        if self.publish.send(update).is_ok() {
+    fn send(&self, session: Option<u64>, snapshot: Option<MediaSnapshot>) {
+        self.emit(MediaEvent::Snapshot { session, snapshot });
+    }
+
+    fn refused(&self, session: u64) {
+        self.emit(MediaEvent::PauseRefused(session));
+    }
+
+    fn emit(&self, event: MediaEvent) {
+        if self.publish.send(event).is_ok() {
             let window = HWND(self.window as _);
             unsafe {
                 let _ = PostMessageW(Some(window), MSG_MEDIA, WPARAM(0), LPARAM(0));
@@ -418,6 +501,23 @@ fn press(session: &Session, button: MediaButton) {
     };
     if let Err(error) = operation.and_then(|operation| operation.join()) {
         eprintln!("media command failed: {error}");
+    }
+}
+
+/// Asks the player to play or to pause, which is not a toggle: it does nothing
+/// to one that is already so. Returns whether the player accepted.
+fn set_playing(session: &Session, play: bool) -> bool {
+    let operation = if play {
+        session.TryPlayAsync()
+    } else {
+        session.TryPauseAsync()
+    };
+    match operation.and_then(|operation| operation.join()) {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            eprintln!("media command failed: {error}");
+            false
+        }
     }
 }
 

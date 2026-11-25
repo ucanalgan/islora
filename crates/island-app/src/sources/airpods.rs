@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use island_core::activity::Millis;
-use island_core::airpods::{APPLE_COMPANY_ID, Tracker, apple_audio_pid, parse};
+use island_core::airpods::{APPLE_COMPANY_ID, Tracker, apple_audio_pid, parse, usable_container};
 use windows::Devices::Bluetooth::Advertisement::{
     BluetoothLEAdvertisement, BluetoothLEAdvertisementFilter,
     BluetoothLEAdvertisementReceivedEventArgs, BluetoothLEAdvertisementWatcher,
@@ -20,12 +20,17 @@ use windows::Devices::Bluetooth::Advertisement::{
     BluetoothLEScanningMode,
 };
 use windows::Devices::Enumeration::{DeviceInformation, DeviceInformationKind};
-use windows::Foundation::TypedEventHandler;
+use windows::Foundation::{IPropertyValue, TypedEventHandler};
 use windows::Storage::Streams::{DataReader, IBuffer};
-use windows::core::HSTRING;
+use windows::core::{HSTRING, Interface};
 use windows_collections::IIterable;
 
-use super::IndicatorSink;
+use super::{EarEvent, IndicatorSink};
+
+/// Where Windows keeps the container id of a device: the same for everything
+/// that belongs to one physical device, such as its profiles and its audio
+/// endpoint.
+const CONTAINER_PROPERTY: &str = "System.Devices.ContainerId";
 
 /// A scan that is running, and which one, so that the stop of an earlier scan
 /// is not mistaken for the stop of this one.
@@ -36,10 +41,10 @@ struct Scan {
 
 #[derive(Default)]
 struct State {
-    /// The model id of every connected Bluetooth device that is AirPods, by
-    /// device id. The classic and the LE connection of one pair of AirPods are
-    /// two devices.
-    devices: HashMap<String, u16>,
+    /// The model id and container id of every connected Bluetooth device that
+    /// is AirPods, by device id. The classic and the LE connection of one pair
+    /// of AirPods are two devices.
+    devices: HashMap<String, (u16, Option<u128>)>,
     scan: Option<Scan>,
     scans_started: u64,
     /// The app is shutting down, and nothing may start scanning again.
@@ -78,8 +83,9 @@ impl AirPods {
     /// A Bluetooth device that is AirPods has connected. `quiet` is for the
     /// ones that were connected when the app started, which is not news.
     /// Starts scanning if it is not already.
-    pub fn connected(&self, device_id: &str, name: &str, model_id: u16, quiet: bool) {
+    pub fn connected(&self, device_id: &str, name: &str, found: Found, quiet: bool) {
         let now = self.inner.now();
+        let model_id = found.model_id;
         // The state is always locked before the tracker, never the other way.
         let mut state = lock(&self.inner.state);
         if state.closed {
@@ -87,13 +93,27 @@ impl AirPods {
         }
         {
             let mut tracker = lock(&self.inner.tracker);
+            // Another model replaces the connection, so a new pair must not
+            // inherit what the old one was doing: that is said first, and
+            // while the tracker is locked, so that it comes in order.
+            if tracker
+                .connected_model()
+                .is_some_and(|connected| connected != model_id)
+            {
+                self.inner.sink.ear(EarEvent::Gone);
+                // The devices of the pair that is replaced are not this one's.
+                state.devices.retain(|_, &mut (model, _)| model == model_id);
+            }
             if quiet {
                 tracker.connected_quietly(name.to_owned(), model_id, now);
             } else {
                 tracker.connected(name.to_owned(), model_id, now);
             }
         }
-        state.devices.insert(device_id.to_owned(), model_id);
+        state
+            .devices
+            .insert(device_id.to_owned(), (model_id, found.container));
+        self.tell_containers(&state);
         if state.scan.is_none() {
             self.start_scan(&mut state);
         }
@@ -115,12 +135,18 @@ impl AirPods {
     pub fn disconnected(&self, device_id: &str) {
         let scan = {
             let mut state = lock(&self.inner.state);
-            let Some(model_id) = state.devices.remove(device_id) else {
+            let Some((model_id, _)) = state.devices.remove(device_id) else {
                 return;
             };
-            if !state.devices.values().any(|&other| other == model_id) {
-                lock(&self.inner.tracker).disconnected(model_id);
+            if !state.devices.values().any(|&(other, _)| other == model_id) {
+                let mut tracker = lock(&self.inner.tracker);
+                // Only when the connection really ended, and said under the
+                // lock, so that it cannot overtake a report that came before.
+                if tracker.disconnected(model_id) {
+                    self.inner.sink.ear(EarEvent::Gone);
+                }
             }
+            self.tell_containers(&state);
             if state.devices.is_empty() {
                 state.scan.take()
             } else {
@@ -128,6 +154,17 @@ impl AirPods {
             }
         };
         stop(scan);
+    }
+
+    /// Says which containers the connected AirPods are in, for telling their
+    /// audio output.
+    fn tell_containers(&self, state: &State) {
+        let containers = state
+            .devices
+            .values()
+            .filter_map(|&(_, container)| container)
+            .collect();
+        self.inner.sink.ear(EarEvent::Containers(containers));
     }
 
     /// Stops scanning, for when the app shuts down.
@@ -229,8 +266,19 @@ impl Inner {
             return;
         };
         let now = self.now();
-        let indicator = lock(&self.tracker).advertised(&status, signal, now);
-        if let Some(indicator) = indicator {
+        let mut tracker = lock(&self.tracker);
+        let Some(heard) = tracker.listened(&status, signal, now) else {
+            return;
+        };
+        // Every accepted advertisement is a report, as the next one is what
+        // confirms a change. It is sent while the tracker is locked, so that
+        // the reports of handlers on different threads arrive in the order
+        // that the tracker took them in.
+        if let Some(count) = heard.worn {
+            self.sink.ear(EarEvent::Worn(count));
+        }
+        drop(tracker);
+        if let Some(indicator) = heard.indicator {
             self.sink.send(indicator);
         }
     }
@@ -283,28 +331,58 @@ fn buffer_bytes(buffer: &IBuffer) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// The model id of the AirPods at this Bluetooth address, if the device is
-/// one. Windows lists a device's profiles as devices of their own, whose
-/// instance ids end in the address and, for Apple's, carry its vendor and
-/// product id. Searching for the address alone finds them all, where the
-/// device itself would only be found by its `DEV_` name, which has neither.
+/// What is known of AirPods found by their address.
+#[derive(Clone, Copy, Debug)]
+pub struct Found {
+    pub model_id: u16,
+    /// The container id that Windows gives everything of this device. `None`
+    /// if it could not be read, in which case its audio output cannot be told.
+    pub container: Option<u128>,
+}
+
+/// The AirPods at this Bluetooth address, if the device is one. Windows lists a
+/// device's profiles as devices of their own, whose instance ids end in the
+/// address and, for Apple's, carry its vendor and product id. Searching for the
+/// address alone finds them all, where the device itself would only be found
+/// by its `DEV_` name, which has neither.
 ///
 /// This blocks, so it is not for the callbacks.
-pub fn airpods_model_id(address: &str) -> Option<u16> {
+pub fn find_airpods(address: &str) -> Option<Found> {
     let filter = HSTRING::from(format!("System.Devices.DeviceInstanceId:~~\"{address}\""));
-    let none = IIterable::<HSTRING>::from(Vec::new());
+    let property = HSTRING::from(CONTAINER_PROPERTY);
+    let wanted = IIterable::<HSTRING>::from(vec![property.clone()]);
     let devices = DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(
         &filter,
-        &none,
+        &wanted,
         DeviceInformationKind::Device,
     )
     .ok()?
     .join()
     .ok()?;
-    let ids: Vec<String> = devices
+    let nodes: Vec<(String, Option<u128>)> = devices
         .into_iter()
-        .filter_map(|device| Some(device.Id().ok()?.to_string()))
+        .filter_map(|device| {
+            let container = device
+                .Properties()
+                .ok()
+                .and_then(|properties| properties.Lookup(&property).ok())
+                .and_then(|value| value.cast::<IPropertyValue>().ok())
+                .and_then(|value| value.GetGuid().ok())
+                .and_then(|guid| usable_container(guid.to_u128()));
+            Some((device.Id().ok()?.to_string(), container))
+        })
         .collect();
-    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-    apple_audio_pid(&ids)
+    let ids: Vec<&str> = nodes.iter().map(|(id, _)| id.as_str()).collect();
+    let model_id = apple_audio_pid(&ids)?;
+    // The device's own node, with Apple's vendor id, is the best witness. Any
+    // other that has one will do, as they are all of one device.
+    let container = nodes
+        .iter()
+        .filter(|(id, _)| id.to_uppercase().contains("VID&0001004C"))
+        .find_map(|(_, container)| *container)
+        .or_else(|| nodes.iter().find_map(|(_, container)| *container));
+    Some(Found {
+        model_id,
+        container,
+    })
 }

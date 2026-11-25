@@ -66,6 +66,12 @@ const WAVE_SETTINGS: &str = "
 sound_wave = \"on\"
 ";
 
+const AIRPODS_EAR_SETTINGS: &str = "
+# AirPods'tan bir kulaklık çıkınca müzik duraklar, geri takınca (duraklatan
+# Islora ise) devam eder: on veya off.
+airpods_ear_pause = \"on\"
+";
+
 const WAVE_STYLE_SETTINGS: &str = "
 # Ses dalgasının hareketi: calm sakin, normal, lively canlı.
 wave_style = \"normal\"
@@ -287,7 +293,7 @@ pub(crate) fn prepare_storage_locked(base: &Path) -> io::Result<(bool, WriterLoc
     recover_in(dir, &path)?;
     if !inspect_in(dir, PRIMARY_NAME)? {
         let template = format!(
-            "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
+            "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{AIRPODS_EAR_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
         );
         let mut text = island_core::settings::reset_all(&template);
         text.push_str("config_version = \"2\"\n");
