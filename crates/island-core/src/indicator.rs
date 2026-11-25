@@ -68,6 +68,18 @@ pub enum Indicator {
         name: String,
         percent: u8,
     },
+    /// AirPods connected. Each level is a percentage, `None` when not known.
+    AirPods {
+        name: String,
+        left: Option<u8>,
+        right: Option<u8>,
+        case: Option<u8>,
+    },
+    /// Worn AirPods that ran low: only the earbuds that did have a level.
+    AirPodsLow {
+        left: Option<u8>,
+        right: Option<u8>,
+    },
     AudioOutput {
         name: String,
     },
@@ -125,6 +137,7 @@ impl Indicator {
             Indicator::Volume { .. } => Some("volume"),
             Indicator::Brightness { .. } => Some("brightness"),
             Indicator::BluetoothBattery { .. } => Some("bluetooth_battery"),
+            Indicator::AirPods { .. } | Indicator::AirPodsLow { .. } => Some("airpods"),
             Indicator::AudioOutput { .. } => Some("audio_output"),
             Indicator::Microphone { .. } => Some("microphone"),
             Indicator::MicrophoneInUse { .. } => Some("microphone_use"),
@@ -198,6 +211,23 @@ impl Indicator {
                 Icon::Bluetooth,
                 "Bağlandı",
                 format!("{name} · %{percent}"),
+                now,
+            ),
+            Indicator::AirPods {
+                name,
+                left,
+                right,
+                case,
+            } => notice(
+                Icon::Bluetooth,
+                &name,
+                airpods_levels([("Sol", left), ("Sağ", right), ("Kutu", case)]),
+                now,
+            ),
+            Indicator::AirPodsLow { left, right } => notice(
+                Icon::BatteryLow,
+                "AirPods pili azaldı",
+                airpods_levels([("Sol", left), ("Sağ", right)]),
                 now,
             ),
             Indicator::AudioOutput { name } => notice(Icon::Speaker, "Ses çıkışı", name, now),
@@ -298,6 +328,17 @@ impl Indicator {
 
 fn switch_text(on: bool) -> &'static str {
     if on { "Açık" } else { "Kapalı" }
+}
+
+/// The levels that are known, like `Sol %80 · Sağ %90`. Empty when none is.
+fn airpods_levels<const N: usize>(levels: [(&str, Option<u8>); N]) -> String {
+    let known: Vec<String> = levels
+        .into_iter()
+        .filter_map(|(part, percent)| {
+            percent.map(|percent| format!("{part} %{}", percent.min(100)))
+        })
+        .collect();
+    known.join(" · ")
 }
 
 fn level(icon: Icon, title: &str, percent: u8, now: Millis) -> Activity {
@@ -997,6 +1038,81 @@ mod tests {
             Some("airplane")
         );
         assert_eq!(Indicator::CapsLock { on: true }.setting(), None);
+        let connected = Indicator::AirPods {
+            name: "AirPods".into(),
+            left: None,
+            right: None,
+            case: None,
+        };
+        assert_eq!(connected.setting(), Some("airpods"));
+        let low = Indicator::AirPodsLow {
+            left: Some(20),
+            right: None,
+        };
+        assert_eq!(low.setting(), Some("airpods"));
+    }
+
+    #[test]
+    fn connected_airpods_say_every_level_they_know() {
+        let full = Indicator::AirPods {
+            name: "Umut'un AirPods".into(),
+            left: Some(80),
+            right: Some(90),
+            case: Some(50),
+        };
+        let activity = full.into_activity(0);
+        assert_eq!(activity.title, "Umut'un AirPods");
+        assert_eq!(activity.detail, "Sol %80 · Sağ %90 · Kutu %50");
+        assert_eq!(activity.icon, Some(Icon::Bluetooth));
+
+        let partial = Indicator::AirPods {
+            name: "AirPods".into(),
+            left: None,
+            right: Some(70),
+            case: None,
+        };
+        assert_eq!(partial.into_activity(0).detail, "Sağ %70");
+
+        let case_missing = Indicator::AirPods {
+            name: "AirPods".into(),
+            left: Some(100),
+            right: Some(100),
+            case: None,
+        };
+        assert_eq!(case_missing.into_activity(0).detail, "Sol %100 · Sağ %100");
+    }
+
+    #[test]
+    fn connected_airpods_without_levels_still_show_their_name() {
+        let activity = Indicator::AirPods {
+            name: "AirPods".into(),
+            left: None,
+            right: None,
+            case: None,
+        }
+        .into_activity(0);
+        assert_eq!(activity.title, "AirPods");
+        assert_eq!(activity.detail, "");
+        assert_eq!(activity.expires_at, Some(NOTICE_MS));
+    }
+
+    #[test]
+    fn low_airpods_name_the_earbuds_that_ran_low() {
+        let one = Indicator::AirPodsLow {
+            left: Some(20),
+            right: None,
+        }
+        .into_activity(0);
+        assert_eq!(one.title, "AirPods pili azaldı");
+        assert_eq!(one.detail, "Sol %20");
+        assert_eq!(one.icon, Some(Icon::BatteryLow));
+
+        let both = Indicator::AirPodsLow {
+            left: Some(10),
+            right: Some(10),
+        }
+        .into_activity(0);
+        assert_eq!(both.detail, "Sol %10 · Sağ %10");
     }
 
     #[test]

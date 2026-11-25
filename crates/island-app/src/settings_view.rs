@@ -39,7 +39,7 @@ pub const ADDRESS_FIELD: Rect = Rect {
 };
 
 /// Every notice that can be turned off: its name in the settings file and its label.
-pub const NOTICES: [(&str, &str); 18] = [
+pub const NOTICES: [(&str, &str); 19] = [
     ("volume", "Ses düzeyi"),
     ("brightness", "Parlaklık"),
     ("audio_output", "Ses çıkışı"),
@@ -51,6 +51,7 @@ pub const NOTICES: [(&str, &str); 18] = [
     ("vpn", "VPN"),
     ("airplane", "Uçak modu"),
     ("bluetooth_battery", "Bluetooth pili"),
+    ("airpods", "AirPods"),
     ("usb", "USB"),
     ("display", "Ekranlar"),
     ("screenshot", "Ekran görüntüsü"),
@@ -514,9 +515,9 @@ fn notices(view: &mut View, state: &SettingsState) {
         let row = index % rows;
         let bounds = Rect {
             x: LEFT + column as f32 * (width + GAP),
-            y: TOP + row as f32 * 48.0,
+            y: TOP + row as f32 * 42.0,
             width,
-            height: 42.0,
+            height: 36.0,
         };
         let on = !state.notices_off.iter().any(|name| name == setting);
         view.control(Action::Notice(index), Look::Switch { on }, bounds, label);

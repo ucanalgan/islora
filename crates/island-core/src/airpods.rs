@@ -12,6 +12,13 @@
 //! The layout below is Apple's undocumented format as the open-source
 //! community has observed it. Nothing here touches Windows; the watcher hands
 //! over the manufacturer data bytes, without the company id.
+//!
+//! [`Tracker`] sits on top of the parsed messages. It decides, from the
+//! advertisements of one connected pair of AirPods, when the island should say
+//! something: once on connecting, and once when a worn earbud runs low.
+
+use crate::activity::Millis;
+use crate::indicator::Indicator;
 
 /// Apple's Bluetooth company id, under which the message is advertised.
 pub const APPLE_COMPANY_ID: u16 = 0x004C;
@@ -55,6 +62,23 @@ impl Model {
             0x2027 => Self::AirPodsPro3,
             0x200A => Self::AirPodsMax,
             other => Self::Other(other),
+        }
+    }
+
+    /// The model id this was read from, so that the model id Windows reports
+    /// for the connected headset can be compared with the one in a message.
+    pub fn id(self) -> u16 {
+        match self {
+            Self::AirPods1 => 0x2002,
+            Self::AirPods2 => 0x200F,
+            Self::AirPods3 => 0x2013,
+            Self::AirPods4 => 0x2019,
+            Self::AirPodsPro => 0x200E,
+            Self::AirPodsPro2 => 0x2014,
+            Self::AirPodsPro2UsbC => 0x2024,
+            Self::AirPodsPro3 => 0x2027,
+            Self::AirPodsMax => 0x200A,
+            Self::Other(id) => id,
         }
     }
 
@@ -183,6 +207,211 @@ fn parse_proximity_pairing(body: &[u8; PROXIMITY_PAIRING_LEN]) -> Status {
 
 fn battery(nibble: u8) -> Option<u8> {
     (nibble <= BATTERY_MAX).then_some(nibble * 10)
+}
+
+/// Advertisements weaker than this, in dBm, come from earbuds too far away to
+/// be the ones in use. This is a guess to tune on a real device in step 2b.
+///
+/// It is the only guard against other people's AirPods of the same model
+/// within range: what is advertised does not tell one pair from another, since
+/// the part that would is encrypted.
+const RSSI_MIN: i16 = -70;
+/// How long an earbud's own report outranks what the other earbud says about
+/// it. The other earbud's copy can lag behind, but it is better than a report
+/// that is old.
+const STALE_MS: Millis = 30_000;
+/// How soon after connecting the first advertisement must come to still be
+/// announced. A notice for a connection that is long past would only confuse.
+const CONNECT_WINDOW_MS: Millis = 20_000;
+/// Warns once on the way down past each of these percentages.
+const LOW_WARNINGS: [u8; 2] = [20, 10];
+
+/// The latest value read for one earbud.
+#[derive(Clone, Copy, Debug)]
+struct Reading {
+    pod: Pod,
+    /// Told by the earbud itself, not by the other one.
+    first_hand: bool,
+    at: Millis,
+}
+
+/// What is known about one earbud while connected.
+#[derive(Clone, Copy, Debug)]
+struct Slot {
+    reading: Option<Reading>,
+    /// Whether each of [`LOW_WARNINGS`] may still be given.
+    armed: [bool; LOW_WARNINGS.len()],
+}
+
+impl Slot {
+    fn new() -> Self {
+        Self {
+            reading: None,
+            armed: [true; LOW_WARNINGS.len()],
+        }
+    }
+
+    /// Takes in what a message says about this earbud. A level that is not
+    /// known leaves what is held as it is, and so does a second-hand report
+    /// while the earbud's own is recent.
+    fn update(&mut self, pod: Pod, first_hand: bool, now: Millis) {
+        if pod.battery.is_none() {
+            return;
+        }
+        if !first_hand
+            && let Some(held) = self.reading
+            && held.first_hand
+            && now.saturating_sub(held.at) <= STALE_MS
+        {
+            return;
+        }
+        self.reading = Some(Reading {
+            pod,
+            first_hand,
+            at: now,
+        });
+        // Levels come in steps of ten, so a level that flickers around a
+        // limit must not warn every time. Only seeing the earbud charge, which
+        // is the one way its level really goes back up, warns again.
+        if pod.charging {
+            self.armed = [true; LOW_WARNINGS.len()];
+        }
+    }
+
+    fn battery(&self) -> Option<u8> {
+        self.reading.and_then(|reading| reading.pod.battery)
+    }
+
+    /// The level of this earbud if it has fallen to or past a warning level
+    /// while being worn. Every level it has fallen past is used up, so that
+    /// falling past both at once warns once.
+    fn fallen(&mut self) -> Option<u8> {
+        let pod = self.reading?.pod;
+        let battery = pod.battery?;
+        if !pod.in_ear || pod.charging {
+            return None;
+        }
+        let mut fallen = false;
+        for (armed, limit) in self.armed.iter_mut().zip(LOW_WARNINGS) {
+            if *armed && battery <= limit {
+                *armed = false;
+                fallen = true;
+            }
+        }
+        fallen.then_some(battery)
+    }
+}
+
+/// One connection of AirPods, from connecting to disconnecting.
+#[derive(Debug)]
+struct Link {
+    name: String,
+    model_id: u16,
+    connected_at: Millis,
+    /// Left, then right.
+    pods: [Slot; 2],
+    case: Option<u8>,
+    /// Whether an advertisement has been accepted yet.
+    seen: bool,
+}
+
+/// Turns the advertisements of connected AirPods into what is worth saying.
+/// It reads no clock and touches no Windows API: the caller says what time it
+/// is, which headset Windows has connected, and what was advertised.
+///
+/// `now` must come from a monotonic clock. If it ever runs backwards nothing
+/// panics, but ages stop growing, so staleness and the connect window freeze
+/// until time catches up.
+#[derive(Debug, Default)]
+pub struct Tracker {
+    link: Option<Link>,
+}
+
+impl Tracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A paired headset with this model id has connected. Everything learned
+    /// about an earlier connection is forgotten, warnings included, unless it
+    /// is the same model that is already connected: Windows can report one
+    /// connection twice, and that changes nothing. Surrounding whitespace is
+    /// trimmed from the name, and an empty name is replaced by the model's own.
+    pub fn connected(&mut self, name: String, model_id: u16, now: Millis) {
+        if self
+            .link
+            .as_ref()
+            .is_some_and(|link| link.model_id == model_id)
+        {
+            return;
+        }
+        let name = name.trim();
+        let name = if name.is_empty() {
+            Model::from_id(model_id).name().to_owned()
+        } else {
+            name.to_owned()
+        };
+        self.link = Some(Link {
+            name,
+            model_id,
+            connected_at: now,
+            pods: [Slot::new(); 2],
+            case: None,
+            seen: false,
+        });
+    }
+
+    /// The headset with this model id has disconnected. A report about some
+    /// other model than the connected one is not about this connection and is
+    /// ignored.
+    pub fn disconnected(&mut self, model_id: u16) {
+        if self
+            .link
+            .as_ref()
+            .is_some_and(|link| link.model_id == model_id)
+        {
+            self.link = None;
+        }
+    }
+
+    /// An advertisement came in. Ones from another model, from too far away,
+    /// or while nothing is connected are not about the headset in use.
+    ///
+    /// The first accepted one soon after connecting returns the connect
+    /// notice. After that, an earbud that is worn and not charging returns a
+    /// low battery notice each time it falls past a warning level. Only one
+    /// notice comes back per call.
+    pub fn advertised(&mut self, status: &Status, rssi: i16, now: Millis) -> Option<Indicator> {
+        let link = self.link.as_mut()?;
+        if status.model.id() != link.model_id || rssi < RSSI_MIN {
+            return None;
+        }
+        let sides = [
+            (status.left, status.from_left),
+            (status.right, !status.from_left),
+        ];
+        for (slot, (pod, first_hand)) in link.pods.iter_mut().zip(sides) {
+            slot.update(pod, first_hand, now);
+        }
+        if let Some(case) = status.case.battery {
+            link.case = Some(case);
+        }
+
+        // Levels that the connect notice shows are used up here too, so that
+        // no warning follows right after it.
+        let [left, right] = link.pods.each_mut().map(Slot::fallen);
+        let first = !link.seen;
+        link.seen = true;
+        if first && now.saturating_sub(link.connected_at) <= CONNECT_WINDOW_MS {
+            return Some(Indicator::AirPods {
+                name: link.name.clone(),
+                left: link.pods[0].battery(),
+                right: link.pods[1].battery(),
+                case: link.case,
+            });
+        }
+        (left.is_some() || right.is_some()).then_some(Indicator::AirPodsLow { left, right })
+    }
 }
 
 #[cfg(test)]
@@ -359,5 +588,606 @@ mod tests {
         for len in 0..data.len() {
             assert_eq!(parse(&data[..len]), None, "cut to {len} bytes");
         }
+    }
+
+    #[test]
+    fn a_model_gives_back_the_id_it_was_read_from() {
+        for id in 0..=u16::MAX {
+            assert_eq!(Model::from_id(id).id(), id);
+        }
+        assert_eq!(Model::AirPodsPro2.id(), 0x2014);
+        assert_eq!(Model::Other(0x2099).id(), 0x2099);
+    }
+
+    const PRO: u16 = 0x200E;
+    const NAME: &str = "Umut'un AirPods";
+
+    /// An earbud in an ear, not charging.
+    fn worn(battery: u8) -> Pod {
+        Pod {
+            battery: Some(battery),
+            charging: false,
+            in_ear: true,
+        }
+    }
+
+    fn pod(battery: Option<u8>, charging: bool, in_ear: bool) -> Pod {
+        Pod {
+            battery,
+            charging,
+            in_ear,
+        }
+    }
+
+    fn status_of(model: u16, from_left: bool, left: Pod, right: Pod, case: Option<u8>) -> Status {
+        Status {
+            model: Model::from_id(model),
+            left,
+            right,
+            case: Case {
+                battery: case,
+                charging: false,
+            },
+            both_in_case: false,
+            from_left,
+            lid_open: None,
+        }
+    }
+
+    /// An advertisement from the left earbud, which is first-hand for it.
+    fn from_left(left: Pod, right: Pod) -> Status {
+        status_of(PRO, true, left, right, None)
+    }
+
+    /// An advertisement from the right earbud.
+    fn from_right(left: Pod, right: Pod) -> Status {
+        status_of(PRO, false, left, right, None)
+    }
+
+    const NEAR: i16 = -50;
+
+    /// A tracker that is connected and has already given its connect notice.
+    fn announced() -> Tracker {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        let first = tracker.advertised(&from_left(worn(90), worn(90)), NEAR, 1_000);
+        assert!(matches!(first, Some(Indicator::AirPods { .. })));
+        tracker
+    }
+
+    fn low(left: Option<u8>, right: Option<u8>) -> Option<Indicator> {
+        Some(Indicator::AirPodsLow { left, right })
+    }
+
+    #[test]
+    fn nothing_is_said_while_nothing_is_connected() {
+        let mut tracker = Tracker::new();
+        assert_eq!(
+            tracker.advertised(&from_left(worn(90), worn(90)), NEAR, 0),
+            None
+        );
+
+        tracker.connected(NAME.into(), PRO, 0);
+        tracker.disconnected(PRO);
+        assert_eq!(
+            tracker.advertised(&from_left(worn(90), worn(90)), NEAR, 1_000),
+            None
+        );
+    }
+
+    #[test]
+    fn another_model_is_ignored() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        let other = status_of(0x2014, true, worn(90), worn(90), None);
+        assert_eq!(tracker.advertised(&other, NEAR, 1_000), None);
+        // The refused one did not use up the connect notice.
+        assert!(
+            tracker
+                .advertised(&from_left(worn(90), worn(90)), NEAR, 2_000)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn weak_signals_are_ignored() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        let status = from_left(worn(90), worn(90));
+        assert_eq!(tracker.advertised(&status, RSSI_MIN - 1, 1_000), None);
+        assert!(tracker.advertised(&status, RSSI_MIN, 2_000).is_some());
+    }
+
+    #[test]
+    fn a_weak_signal_does_not_change_what_is_known() {
+        let mut tracker = announced();
+        // A stranger's earbuds at 10 %, heard faintly, warn about nothing and
+        // use up no warning.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(10)), -90, 2_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 3_000),
+            low(Some(20), None)
+        );
+    }
+
+    #[test]
+    fn connecting_announces_the_levels_once() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 5_000);
+        let status = status_of(PRO, true, worn(80), worn(90), Some(50));
+        assert_eq!(
+            tracker.advertised(&status, NEAR, 6_000),
+            Some(Indicator::AirPods {
+                name: NAME.into(),
+                left: Some(80),
+                right: Some(90),
+                case: Some(50),
+            })
+        );
+        assert_eq!(tracker.advertised(&status, NEAR, 7_000), None);
+    }
+
+    #[test]
+    fn the_connect_notice_has_a_window() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 5_000);
+        let status = from_left(worn(80), worn(90));
+        let edge = 5_000 + CONNECT_WINDOW_MS;
+        assert!(tracker.advertised(&status, NEAR, edge).is_some());
+
+        let mut late = Tracker::new();
+        late.connected(NAME.into(), PRO, 5_000);
+        assert_eq!(late.advertised(&status, NEAR, edge + 1), None);
+        // Having been too late once, a later one is not on time either.
+        assert_eq!(late.advertised(&status, NEAR, edge + 2), None);
+    }
+
+    #[test]
+    fn a_late_first_advertisement_still_warns_about_a_low_earbud() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        let status = from_left(worn(20), worn(90));
+        assert_eq!(
+            tracker.advertised(&status, NEAR, CONNECT_WINDOW_MS + 1),
+            low(Some(20), None)
+        );
+    }
+
+    #[test]
+    fn an_empty_name_becomes_the_models() {
+        let mut tracker = Tracker::new();
+        tracker.connected("  ".into(), 0x2014, 0);
+        let status = status_of(0x2014, true, worn(80), worn(80), None);
+        let Some(Indicator::AirPods { name, .. }) = tracker.advertised(&status, NEAR, 1_000) else {
+            panic!("no connect notice");
+        };
+        assert_eq!(name, "AirPods Pro");
+    }
+
+    #[test]
+    fn the_name_is_trimmed() {
+        let mut tracker = Tracker::new();
+        tracker.connected("  Umut'un AirPods \t".into(), PRO, 0);
+        let status = from_left(worn(80), worn(80));
+        let Some(Indicator::AirPods { name, .. }) = tracker.advertised(&status, NEAR, 1_000) else {
+            panic!("no connect notice");
+        };
+        assert_eq!(name, NAME);
+    }
+
+    #[test]
+    fn unknown_levels_are_left_out_of_the_connect_notice() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        // The right earbud is not there, so it says nothing, and neither does
+        // the case.
+        let status = from_left(worn(70), pod(None, false, false));
+        assert_eq!(
+            tracker.advertised(&status, NEAR, 1_000),
+            Some(Indicator::AirPods {
+                name: NAME.into(),
+                left: Some(70),
+                right: None,
+                case: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_new_connection_forgets_the_case_level() {
+        let mut tracker = announced();
+        let with_case = status_of(PRO, true, worn(90), worn(90), Some(40));
+        tracker.advertised(&with_case, NEAR, 2_000);
+        tracker.disconnected(PRO);
+        tracker.connected(NAME.into(), PRO, 10_000);
+        let status = from_left(worn(90), worn(90));
+        assert_eq!(
+            tracker.advertised(&status, NEAR, 11_000),
+            Some(Indicator::AirPods {
+                name: NAME.into(),
+                left: Some(90),
+                right: Some(90),
+                case: None,
+            })
+        );
+    }
+
+    #[test]
+    fn an_earbuds_own_report_wins_over_the_other_ones() {
+        let mut tracker = announced();
+        // The left earbud has said it is at 90 %. A moment later the right
+        // one passes on 20 % for it, which must not count: taken in, it
+        // would warn at once.
+        assert_eq!(
+            tracker.advertised(&from_right(worn(20), worn(90)), NEAR, 2_000),
+            None
+        );
+        // The left earbud's own report of 20 % does.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 3_000),
+            low(Some(20), None)
+        );
+    }
+
+    #[test]
+    fn a_second_hand_report_counts_once_the_first_hand_one_is_stale() {
+        let mut tracker = announced();
+        // The left earbud last spoke for itself at 1 s.
+        let later = 1_000 + STALE_MS + 1;
+        assert_eq!(
+            tracker.advertised(&from_right(worn(20), worn(90)), NEAR, later),
+            low(Some(20), None)
+        );
+    }
+
+    #[test]
+    fn a_second_hand_report_is_ignored_while_the_first_hand_one_is_recent() {
+        let mut tracker = announced();
+        // Exactly at the window's edge the left earbud's own report is still
+        // recent.
+        let edge = 1_000 + STALE_MS;
+        assert_eq!(
+            tracker.advertised(&from_right(worn(20), worn(90)), NEAR, edge),
+            None
+        );
+    }
+
+    #[test]
+    fn a_second_hand_report_counts_when_there_is_no_other() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        // Only the right earbud has spoken, so the left earbud's level is
+        // known second-hand.
+        let status = from_right(worn(60), worn(80));
+        assert_eq!(
+            tracker.advertised(&status, NEAR, 1_000),
+            Some(Indicator::AirPods {
+                name: NAME.into(),
+                left: Some(60),
+                right: Some(80),
+                case: None,
+            })
+        );
+    }
+
+    #[test]
+    fn each_level_warns_once() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_left(worn(30), worn(90)), NEAR, 2_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 3_000),
+            low(Some(20), None)
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 4_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(90)), NEAR, 5_000),
+            low(Some(10), None)
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(90)), NEAR, 6_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(0), worn(90)), NEAR, 7_000),
+            None
+        );
+    }
+
+    #[test]
+    fn falling_past_both_levels_at_once_warns_once() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(90)), NEAR, 2_000),
+            low(Some(10), None)
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(90)), NEAR, 3_000),
+            None
+        );
+    }
+
+    #[test]
+    fn the_right_earbud_warns_on_its_own() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_right(worn(90), worn(20)), NEAR, 2_000),
+            low(None, Some(20))
+        );
+    }
+
+    #[test]
+    fn both_earbuds_falling_together_come_as_one_notice() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(20)), NEAR, 2_000),
+            low(Some(20), Some(20))
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(20)), NEAR, 3_000),
+            None
+        );
+        // Each level is then warned about on its own again.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(20)), NEAR, 4_000),
+            low(Some(10), None)
+        );
+    }
+
+    #[test]
+    fn earbuds_that_are_not_worn_are_not_warned_about() {
+        let mut tracker = announced();
+        let in_case = pod(Some(10), true, false);
+        let in_hand = pod(Some(10), false, false);
+        assert_eq!(
+            tracker.advertised(&from_left(in_case, in_hand), NEAR, 2_000),
+            None
+        );
+        // Putting one on afterwards is the first time it is worn low.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), in_hand), NEAR, 3_000),
+            low(Some(10), None)
+        );
+    }
+
+    #[test]
+    fn an_earbud_is_warned_again_only_after_it_has_charged() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 2_000),
+            low(Some(20), None)
+        );
+        // Staying at the level warns no more.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 3_000),
+            None
+        );
+        // A level that flickers up and down warns only once.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(30), worn(90)), NEAR, 4_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 5_000),
+            None
+        );
+        // Seeing it charge in the case is what warns again.
+        let charging = pod(Some(30), true, false);
+        assert_eq!(
+            tracker.advertised(&from_left(charging, worn(90)), NEAR, 6_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 7_000),
+            low(Some(20), None)
+        );
+    }
+
+    #[test]
+    fn charging_rearms_every_level_of_that_earbud_only() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(10)), NEAR, 2_000),
+            low(Some(10), Some(10))
+        );
+        // Only the left earbud charges.
+        let charging = pod(Some(40), true, false);
+        assert_eq!(
+            tracker.advertised(&from_left(charging, worn(10)), NEAR, 3_000),
+            None
+        );
+        // The left earbud warns at both levels again, the right one not.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(10)), NEAR, 4_000),
+            low(Some(20), None)
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(10)), NEAR, 5_000),
+            low(Some(10), None)
+        );
+    }
+
+    #[test]
+    fn a_second_hand_charging_report_is_not_taken_while_the_own_one_is_recent() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 2_000),
+            low(Some(20), None)
+        );
+        // The right earbud says the left one charges, but the left one's own
+        // report from a moment ago says it is worn.
+        let charging = pod(Some(30), true, false);
+        assert_eq!(
+            tracker.advertised(&from_right(charging, worn(90)), NEAR, 3_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 4_000),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_levels_warn_about_nothing_and_change_nothing() {
+        let mut tracker = announced();
+        let unknown = pod(None, false, true);
+        assert_eq!(
+            tracker.advertised(&from_left(unknown, worn(90)), NEAR, 2_000),
+            None
+        );
+        // The level held from before is still 90 %, so 20 % is a fall.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 3_000),
+            low(Some(20), None)
+        );
+
+        // An unknown level that comes with the charging flag does not warn
+        // about the used up levels again either.
+        let unknown_charging = pod(None, true, false);
+        assert_eq!(
+            tracker.advertised(&from_left(unknown_charging, worn(90)), NEAR, 4_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 5_000),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unknown_level_does_not_make_the_earbuds_own_report_recent() {
+        let mut tracker = announced();
+        // The left earbud last gave a level at 1 s. Its unknown level at 25 s
+        // says nothing, so at 35 s that report is stale and the right
+        // earbud's 20 % for it counts.
+        let unknown = pod(None, false, true);
+        assert_eq!(
+            tracker.advertised(&from_left(unknown, worn(90)), NEAR, 25_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_right(worn(20), worn(90)), NEAR, 35_000),
+            low(Some(20), None)
+        );
+    }
+
+    #[test]
+    fn no_warning_follows_the_connect_notice_for_the_levels_it_shows() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        let first = tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 1_000);
+        assert!(matches!(first, Some(Indicator::AirPods { .. })));
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 2_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(90)), NEAR, 3_000),
+            low(Some(10), None)
+        );
+    }
+
+    #[test]
+    fn a_new_connection_starts_over() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 2_000),
+            low(Some(20), None)
+        );
+
+        tracker.disconnected(PRO);
+        tracker.connected(NAME.into(), PRO, 100_000);
+        let status = from_left(worn(90), worn(90));
+        assert!(matches!(
+            tracker.advertised(&status, NEAR, 101_000),
+            Some(Indicator::AirPods { .. })
+        ));
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 102_000),
+            low(Some(20), None)
+        );
+    }
+
+    #[test]
+    fn connecting_again_changes_nothing() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 2_000),
+            low(Some(20), None)
+        );
+
+        // Windows reports the same connection a second time, late enough that
+        // a new connection would be announced.
+        tracker.connected("Another name".into(), PRO, 100_000);
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 101_000),
+            None,
+            "neither announced again nor warned again"
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(90)), NEAR, 102_000),
+            low(Some(10), None)
+        );
+    }
+
+    #[test]
+    fn connecting_again_keeps_the_connect_window() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        tracker.connected(NAME.into(), PRO, CONNECT_WINDOW_MS);
+        // Measured from the first report, so this is too late.
+        let status = from_left(worn(80), worn(80));
+        assert_eq!(
+            tracker.advertised(&status, NEAR, CONNECT_WINDOW_MS + 1),
+            None
+        );
+    }
+
+    #[test]
+    fn a_different_model_replaces_the_connection() {
+        let mut tracker = announced();
+        tracker.connected("AirPods Max".into(), 0x200A, 10_000);
+        // The earlier one's advertisements are not about it any more.
+        assert_eq!(
+            tracker.advertised(&from_left(worn(80), worn(80)), NEAR, 11_000),
+            None
+        );
+        let max = status_of(0x200A, true, worn(80), worn(80), None);
+        assert!(matches!(
+            tracker.advertised(&max, NEAR, 12_000),
+            Some(Indicator::AirPods { .. })
+        ));
+    }
+
+    #[test]
+    fn disconnecting_another_model_is_ignored() {
+        let mut tracker = announced();
+        tracker.disconnected(0x200A);
+        assert_eq!(
+            tracker.advertised(&from_left(worn(20), worn(90)), NEAR, 2_000),
+            low(Some(20), None)
+        );
+        tracker.disconnected(PRO);
+        assert_eq!(
+            tracker.advertised(&from_left(worn(10), worn(90)), NEAR, 3_000),
+            None
+        );
+    }
+
+    #[test]
+    fn a_clock_that_runs_backwards_does_not_panic() {
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 10_000);
+        let status = from_left(worn(80), worn(80));
+        assert!(tracker.advertised(&status, NEAR, 0).is_some());
+        assert_eq!(tracker.advertised(&status, NEAR, 0), None);
     }
 }
