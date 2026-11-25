@@ -263,12 +263,22 @@ fn battery(nibble: u8) -> Option<u8> {
 }
 
 /// Advertisements weaker than this, in dBm, come from earbuds too far away to
-/// be the ones in use. This is a guess to tune on a real device in step 2b.
+/// be the ones in use.
+///
+/// Measured with a real pair of AirPods Pro 3: their own proximity messages
+/// had a median of -54 dBm and, while worn, went down to -80 and now and then
+/// -83. Another person's AirPods 2 read -85 to -94. So this keeps the own
+/// pair, except for the odd reading below the limit, which the next
+/// advertisement a second or two later makes up for.
+///
+/// Windows also reports -127 for an advertisement that has no signal strength.
+/// That is below the limit and is rejected, which is wanted: it says nothing
+/// about how far away the earbuds are.
 ///
 /// It is the only guard against other people's AirPods of the same model
 /// within range: what is advertised does not tell one pair from another, since
 /// the part that would is encrypted.
-const RSSI_MIN: i16 = -70;
+const RSSI_MIN: i16 = -80;
 /// How long an earbud's own report outranks what the other earbud says about
 /// it. The other earbud's copy can lag behind, but it is better than a report
 /// that is old.
@@ -307,7 +317,11 @@ impl Slot {
     /// Takes in what a message says about this earbud. A level that is not
     /// known leaves what is held as it is, and so does a second-hand report
     /// while the earbud's own is recent.
-    fn update(&mut self, pod: Pod, first_hand: bool, now: Millis) {
+    ///
+    /// `trust_in_ear` says whether the message's ear flag for this earbud can
+    /// be believed. When it cannot, the ear state that is held stays, as long
+    /// as the earbud does not say that it charges.
+    fn update(&mut self, mut pod: Pod, first_hand: bool, trust_in_ear: bool, now: Millis) {
         if pod.battery.is_none() {
             return;
         }
@@ -317,6 +331,12 @@ impl Slot {
             && now.saturating_sub(held.at) <= STALE_MS
         {
             return;
+        }
+        if !trust_in_ear
+            && !pod.charging
+            && let Some(held) = self.reading
+        {
+            pod.in_ear = held.pod.in_ear;
         }
         self.reading = Some(Reading {
             pod,
@@ -469,12 +489,22 @@ impl Tracker {
         if status.model.id() != link.model_id || rssi < RSSI_MIN {
             return None;
         }
+        // Observed with AirPods Pro 3: while the earbud that sends is in the
+        // case, its message says that the other earbud is not in an ear, even
+        // when it is worn. The worn one's own messages say that it is. So what
+        // such a message says about the other earbud's ear is not taken, only
+        // its level and charging.
+        let sender_in_case = if status.from_left {
+            status.left.charging
+        } else {
+            status.right.charging
+        };
         let sides = [
             (status.left, status.from_left),
             (status.right, !status.from_left),
         ];
         for (slot, (pod, first_hand)) in link.pods.iter_mut().zip(sides) {
-            slot.update(pod, first_hand, now);
+            slot.update(pod, first_hand, first_hand || !sender_in_case, now);
         }
         if let Some(case) = status.case.battery {
             link.case = Some(case);
@@ -1030,13 +1060,18 @@ mod tests {
         let mut tracker = announced();
         let in_case = pod(Some(10), true, false);
         let in_hand = pod(Some(10), false, false);
+        // The right earbud says for itself that it is in a hand.
         assert_eq!(
-            tracker.advertised(&from_left(in_case, in_hand), NEAR, 2_000),
+            tracker.advertised(&from_right(in_case, in_hand), NEAR, 2_000),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_left(in_case, in_hand), NEAR, 3_000),
             None
         );
         // Putting one on afterwards is the first time it is worn low.
         assert_eq!(
-            tracker.advertised(&from_left(worn(10), in_hand), NEAR, 3_000),
+            tracker.advertised(&from_left(worn(10), in_hand), NEAR, 4_000),
             low(Some(10), None)
         );
     }
@@ -1428,6 +1463,86 @@ mod tests {
             let id = profile("0000110b", pid);
             assert_eq!(apple_audio_pid(&[&id]), None, "pid {pid:?}");
         }
+    }
+
+    #[test]
+    fn a_strength_of_minus_127_is_rejected() {
+        // Windows' value for an advertisement without a signal strength.
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        let status = from_left(worn(90), worn(90));
+        assert_eq!(tracker.advertised(&status, -127, 1_000), None);
+        assert!(tracker.advertised(&status, -80, 2_000).is_some());
+    }
+
+    #[test]
+    fn the_limit_is_measured_not_guessed() {
+        assert_eq!(RSSI_MIN, -80);
+        let mut tracker = Tracker::new();
+        tracker.connected(NAME.into(), PRO, 0);
+        let status = from_left(worn(90), worn(90));
+        // Another person's earbuds read -85 and below.
+        assert_eq!(tracker.advertised(&status, -85, 1_000), None);
+        assert!(tracker.advertised(&status, -54, 2_000).is_some());
+    }
+
+    #[test]
+    fn a_message_from_an_earbud_in_the_case_does_not_say_whether_the_other_is_worn() {
+        let mut tracker = announced();
+        // The right earbud says for itself that it is worn, at 30 %.
+        assert_eq!(
+            tracker.advertised(&from_right(worn(90), worn(30)), NEAR, 2_000),
+            None
+        );
+        // Much later the left one, in the case, sends: it says the right one
+        // is at 20 % and not in an ear. The right one's own report is stale.
+        let in_case = pod(Some(90), true, false);
+        let not_in_ear = pod(Some(20), false, false);
+        let later = 2_000 + STALE_MS + 1_000;
+        assert_eq!(
+            tracker.advertised(&from_left(in_case, not_in_ear), NEAR, later),
+            low(None, Some(20)),
+            "still worn, so warned"
+        );
+    }
+
+    #[test]
+    fn a_message_from_a_worn_earbud_does_say_whether_the_other_is_worn() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_right(worn(90), worn(30)), NEAR, 2_000),
+            None
+        );
+        // The left earbud is not in the case, so when it says that the right
+        // one is out of the ear, it is.
+        let out = pod(Some(20), false, false);
+        let later = 2_000 + STALE_MS + 1_000;
+        assert_eq!(
+            tracker.advertised(&from_left(worn(90), out), NEAR, later),
+            None
+        );
+    }
+
+    #[test]
+    fn a_second_hand_charging_earbud_is_taken_as_charging_even_from_a_sender_in_the_case() {
+        let mut tracker = announced();
+        assert_eq!(
+            tracker.advertised(&from_right(worn(90), worn(10)), NEAR, 2_000),
+            low(None, Some(10))
+        );
+        // Later the left earbud in the case says that the right one charges
+        // too: both are in the case, and charging warns again afterwards.
+        let in_case = pod(Some(90), true, false);
+        let charging = pod(Some(20), true, false);
+        let later = 2_000 + STALE_MS + 1_000;
+        assert_eq!(
+            tracker.advertised(&from_left(in_case, charging), NEAR, later),
+            None
+        );
+        assert_eq!(
+            tracker.advertised(&from_right(in_case, worn(10)), NEAR, later + 1_000),
+            low(None, Some(10))
+        );
     }
 
     #[test]
