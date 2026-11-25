@@ -2125,6 +2125,211 @@ mod tests {
         }
     }
 
+    #[test]
+    fn acceptance_r_live_repair_needs_restart() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let protected = acceptance_write_protected(&folder, 1, ACCEPTANCE_LEGACY);
+        let failure = acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1);
+        fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), &failure).unwrap();
+        let path = folder.join(settings::PRIMARY_NAME);
+        let initial = bootstrap_at(&base, true);
+        assert_eq!(initial.mode(), &RuntimeMode::Recovery);
+        assert_eq!(initial.text(), None);
+        assert!(!initial.writes_allowed());
+        assert_eq!(
+            initial.take_migration_report(),
+            Some(MigrationReport::Fallback(FallbackReason::Unprepared))
+        );
+        let slot = Mutex::new(Some(Arc::new(initial)));
+        assert_acceptance_files(
+            &folder,
+            &[
+                (&protected, ACCEPTANCE_LEGACY),
+                (config_commit::FAILURE_RECORD_NAME, &failure),
+            ],
+        );
+
+        let current = acceptance_current();
+        fs::write(&path, &current).unwrap();
+        let expected = [
+            (settings::PRIMARY_NAME, current.as_str()),
+            (&protected, ACCEPTANCE_LEGACY),
+            (config_commit::FAILURE_RECORD_NAME, failure.as_str()),
+        ];
+        assert_acceptance_files(&folder, &expected);
+        let refreshed = refresh_in(&slot, &base);
+        assert_eq!(refreshed.mode(), &RuntimeMode::Normal);
+        assert_eq!(refreshed.text(), Some(current.as_str()));
+        assert!(!refreshed.writes_allowed());
+        assert!(is_mode_refused(
+            &update_in(&slot, &path, "indicator_style", "edge").unwrap_err()
+        ));
+        assert_acceptance_files(&folder, &expected);
+
+        let restarted = bootstrap_at(&base, true);
+        assert_acceptance_snapshot(
+            &restarted,
+            RuntimeMode::Normal,
+            &current,
+            MigrationReport::NotNeeded,
+            true,
+        );
+        assert_acceptance_files(&folder, &expected);
+        let restarted_slot = Mutex::new(Some(Arc::new(restarted)));
+        update_in(&restarted_slot, &path, "indicator_style", "edge").unwrap();
+        let updated = text_in(&restarted_slot).unwrap();
+        assert_eq!(
+            read_value(&updated, "indicator_style").as_deref(),
+            Some("edge")
+        );
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, &updated),
+                ("config.toml.bak", &current),
+                (&protected, ACCEPTANCE_LEGACY),
+                (config_commit::FAILURE_RECORD_NAME, &failure),
+            ],
+        );
+    }
+
+    #[test]
+    fn acceptance_r_refresh_never_migrates_a_repaired_legacy_primary() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let protected = acceptance_write_protected(&folder, 1, ACCEPTANCE_LEGACY);
+        let failure = acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1);
+        fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), &failure).unwrap();
+        let path = folder.join(settings::PRIMARY_NAME);
+        let initial = bootstrap_at(&base, true);
+        assert_eq!(initial.mode(), &RuntimeMode::Recovery);
+        assert_eq!(initial.text(), None);
+        assert!(!initial.writes_allowed());
+        assert_eq!(
+            initial.take_migration_report(),
+            Some(MigrationReport::Fallback(FallbackReason::Unprepared))
+        );
+        let slot = Mutex::new(Some(Arc::new(initial)));
+        assert_acceptance_files(
+            &folder,
+            &[
+                (&protected, ACCEPTANCE_LEGACY),
+                (config_commit::FAILURE_RECORD_NAME, &failure),
+            ],
+        );
+        fs::write(&path, ACCEPTANCE_LEGACY).unwrap();
+        let expected = [
+            (settings::PRIMARY_NAME, ACCEPTANCE_LEGACY),
+            (&protected, ACCEPTANCE_LEGACY),
+            (config_commit::FAILURE_RECORD_NAME, failure.as_str()),
+        ];
+        assert_acceptance_files(&folder, &expected);
+        let refreshed = refresh_in(&slot, &base);
+        assert_eq!(refreshed.mode(), &RuntimeMode::LegacyCompatible);
+        assert_eq!(refreshed.text(), Some(ACCEPTANCE_LEGACY));
+        assert!(!refreshed.writes_allowed());
+        assert!(is_mode_refused(
+            &update_in(&slot, &path, "indicator_style", "edge").unwrap_err()
+        ));
+        assert_acceptance_files(&folder, &expected);
+        let restarted = bootstrap_at(&base, true);
+        assert_acceptance_snapshot(
+            &restarted,
+            RuntimeMode::LegacyCompatible,
+            ACCEPTANCE_LEGACY,
+            MigrationReport::Fallback(FallbackReason::Suppressed),
+            true,
+        );
+        let _restarted_slot = Mutex::new(Some(Arc::new(restarted)));
+        assert_acceptance_files(&folder, &expected);
+    }
+
+    #[test]
+    fn acceptance_s_future_edit_after_start_is_refused_without_changes() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let path = folder.join(settings::PRIMARY_NAME);
+        let current = acceptance_current();
+        fs::write(&path, &current).unwrap();
+        fs::write(folder.join("config.toml.bak"), ACCEPTANCE_ROLLING).unwrap();
+        let initial = bootstrap_at(&base, true);
+        assert_acceptance_snapshot(
+            &initial,
+            RuntimeMode::Normal,
+            &current,
+            MigrationReport::NotNeeded,
+            true,
+        );
+        let slot = Mutex::new(Some(Arc::new(initial)));
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, &current),
+                ("config.toml.bak", ACCEPTANCE_ROLLING),
+            ],
+        );
+        let future = "config_version = \"99\"\r\nindicator_style = \"ring\"\r\n";
+        fs::write(&path, future).unwrap();
+        let expected = [
+            (settings::PRIMARY_NAME, future),
+            ("config.toml.bak", ACCEPTANCE_ROLLING),
+        ];
+        assert_acceptance_files(&folder, &expected);
+        let error = update_in(&slot, &path, "indicator_style", "edge").unwrap_err();
+        assert!(config_commit::is_primary_changed(&error));
+        assert_acceptance_files(&folder, &expected);
+        let mut conflict_calls = 0;
+        let error = update_with_in(&slot, &path, |_, _| {
+            conflict_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(config_commit::is_primary_changed(&error));
+        assert_eq!(conflict_calls, 0);
+        assert_acceptance_files(&folder, &expected);
+        let refreshed = refresh_in(&slot, &base);
+        assert_eq!(refreshed.mode(), &RuntimeMode::ReadOnly);
+        assert_eq!(refreshed.text(), Some(future));
+        assert!(!refreshed.writes_allowed());
+        assert!(is_mode_refused(
+            &update_in(&slot, &path, "indicator_style", "edge").unwrap_err()
+        ));
+        let mut calls = 0;
+        let error = update_with_in(&slot, &path, |_, _| {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(is_mode_refused(&error));
+        assert_eq!(calls, 0);
+        assert_acceptance_files(&folder, &expected);
+        let restarted = bootstrap_at(&base, true);
+        assert_acceptance_snapshot(
+            &restarted,
+            RuntimeMode::ReadOnly,
+            future,
+            MigrationReport::NotNeeded,
+            false,
+        );
+        let _restarted_slot = Mutex::new(Some(Arc::new(restarted)));
+        assert_acceptance_files(&folder, &expected);
+    }
+
     #[derive(Clone, Copy)]
     enum ReobserveCase {
         SourceChanged,
