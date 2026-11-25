@@ -1945,6 +1945,186 @@ mod tests {
         );
     }
 
+    fn acceptance_current() -> String {
+        let island_core::migration::MigrationOutcome::Prepared { text } =
+            island_core::migration::prepare(ACCEPTANCE_LEGACY).unwrap()
+        else {
+            panic!("expected a migratable fixture");
+        };
+        text
+    }
+
+    fn acceptance_write_protected(folder: &Path, sequence: u32, source: &str) -> String {
+        let name = acceptance_backup(sequence, source).file_name();
+        let path = folder.join(&name);
+        fs::write(&path, source).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).unwrap();
+        name
+    }
+
+    fn acceptance_assert_recovery(snapshot: ConfigSnapshot, path: &Path) {
+        assert_eq!(snapshot.mode(), &RuntimeMode::Recovery);
+        assert_eq!(snapshot.text(), None);
+        assert!(!snapshot.writes_allowed());
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::Fallback(FallbackReason::Unprepared))
+        );
+        let slot = Mutex::new(Some(Arc::new(snapshot)));
+        assert!(is_mode_refused(
+            &update_in(&slot, path, "indicator_style", "edge").unwrap_err()
+        ));
+        let mut calls = 0;
+        let error = update_with_in(&slot, path, |_, _| {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(is_mode_refused(&error));
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn acceptance_o_trusted_rolling_backup_restores_beside_protected_backup() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let protected = acceptance_write_protected(&folder, 1, ACCEPTANCE_LEGACY);
+        let current = acceptance_current();
+        fs::write(folder.join("config.toml.bak"), &current).unwrap();
+
+        let snapshot = bootstrap_at(&base, true);
+        assert_acceptance_snapshot(
+            &snapshot,
+            RuntimeMode::Normal,
+            &current,
+            MigrationReport::NotNeeded,
+            true,
+        );
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, &current),
+                ("config.toml.bak", &current),
+                (&protected, ACCEPTANCE_LEGACY),
+            ],
+        );
+        let slot = Mutex::new(Some(Arc::new(snapshot)));
+        update_in(
+            &slot,
+            &folder.join(settings::PRIMARY_NAME),
+            "indicator_style",
+            "edge",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn acceptance_o_legacy_rolling_backup_restores_then_migrates() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let old = acceptance_write_protected(&folder, 1, ACCEPTANCE_ROLLING);
+        fs::write(folder.join("config.toml.bak"), ACCEPTANCE_LEGACY).unwrap();
+
+        let snapshot = bootstrap_at(&base, true);
+        let backup = acceptance_backup(2, ACCEPTANCE_LEGACY);
+        let migrated = assert_acceptance_migrated(&snapshot, ACCEPTANCE_LEGACY, backup.clone());
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, &migrated),
+                ("config.toml.bak", ACCEPTANCE_LEGACY),
+                (&old, ACCEPTANCE_ROLLING),
+                (&backup.file_name(), ACCEPTANCE_LEGACY),
+            ],
+        );
+    }
+
+    #[test]
+    fn acceptance_p_ambiguous_artifacts_refuse_restore() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for name in [
+            "config.toml.bak.new",
+            "config.toml.recover",
+            "config.pre-migration-1.bak",
+        ] {
+            let base = settings::tests::temp_base();
+            let folder = base.join("Islora");
+            fs::create_dir(&folder).unwrap();
+            let current = acceptance_current();
+            let ambiguous = "different artifact contents\n";
+            fs::write(folder.join("config.toml.bak"), &current).unwrap();
+            fs::write(folder.join(name), ambiguous).unwrap();
+            let expected = [("config.toml.bak", current.as_str()), (name, ambiguous)];
+            for _ in 0..2 {
+                acceptance_assert_recovery(
+                    bootstrap_at(&base, true),
+                    &folder.join(settings::PRIMARY_NAME),
+                );
+                assert_acceptance_files(&folder, &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn acceptance_q_recovery_evidence_without_rolling_backup_stays_recovery() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let protected = acceptance_write_protected(&folder, 1, ACCEPTANCE_LEGACY);
+        let failure = acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1);
+        fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), &failure).unwrap();
+        let expected = [
+            (protected.as_str(), ACCEPTANCE_LEGACY),
+            (config_commit::FAILURE_RECORD_NAME, failure.as_str()),
+        ];
+        for _ in 0..2 {
+            acceptance_assert_recovery(
+                bootstrap_at(&base, true),
+                &folder.join(settings::PRIMARY_NAME),
+            );
+            assert_acceptance_files(&folder, &expected);
+        }
+    }
+
+    #[test]
+    fn acceptance_q_untrusted_rolling_backup_is_not_restored() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for source in [
+            "config_version = \"99\"\r\nindicator_style = \"ring\"\r\n",
+            "ui_density = \"minimal\"\r\nui_density = \"minimal\"\r\n",
+        ] {
+            let base = settings::tests::temp_base();
+            let folder = base.join("Islora");
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("config.toml.bak"), source).unwrap();
+            acceptance_assert_recovery(
+                bootstrap_at(&base, true),
+                &folder.join(settings::PRIMARY_NAME),
+            );
+            assert_acceptance_files(&folder, &[("config.toml.bak", source)]);
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum ReobserveCase {
         SourceChanged,

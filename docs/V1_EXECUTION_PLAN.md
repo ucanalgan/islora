@@ -850,6 +850,8 @@ S7 complete: isolated acceptance scenarios A-I cover fresh install, three legacy
 
 S8a complete: isolated acceptance J-N cover backup failure, draft sync failure, interrupted migration, competing writer and external edit with retry. Independent Codex review approved after sync-error injection was moved into Draft::write's error path; 670 workspace tests and Clippy passed. Minor follow-ups: test hook targets the next draft rather than a named target, and log capture is not tested. Next S8b: scenarios O-S, including R restart-only recovery. Production migration remains off.
 
+S8b-1 complete: isolated acceptance O-Q. O: a valid rolling .bak restores a missing primary beside protected backups (never a restore source); a restored legacy text migrates with the next protected sequence. P: .bak.new, .recover and pre-migration .bak refuse restore (Recovery, Fallback(Unprepared), writes refused, disk unchanged across two starts). Q: protected backup plus failure record without .bak, and a future or invalid .bak, stay Recovery with no template and no restore. Paolo wrote it in one pass; Lucia and Giulia approve (Lucia minors in scratchpad/2c3-minors.md). The S8a commit was not rustfmt-clean; fixed in its own commit. 675 workspace tests, fmt and Clippy passed. Next S8b-2: R (restart-only live repair) and S (write in read-only mode).
+
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
 Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:
