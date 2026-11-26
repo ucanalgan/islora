@@ -986,7 +986,6 @@ fn open_relative(
 /// Opens an existing non-directory entry by its exact name relative to the held directory,
 /// without following a final reparse point, with only the access needed to read and write its
 /// attributes and to delete it. A directory with that name is refused as `IsDirectory`.
-#[allow(dead_code, reason = "called by migration in 2C-3")]
 // Kept separate from open_relative: it has distinct directory errors and no security retries.
 fn open_for_delete(dir: &ConfigDir, name: &[u16]) -> Result<File, ConfigFsError> {
     use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
@@ -1217,7 +1216,6 @@ impl VerifiedFile {
     /// a file whose final name differs from `name` is refused with nothing changed. If marking
     /// the file for deletion fails after the attribute was cleared, the original attributes
     /// are restored through the same handle and the file stays.
-    #[allow(dead_code, reason = "called by migration in 2C-3")]
     pub(crate) fn delete_read_only(
         dir: &ConfigDir,
         name: &std::ffi::OsStr,
@@ -1429,7 +1427,6 @@ impl Draft {
     /// Creates a file with exactly this name, exclusively and write-through, relative to the
     /// held directory. It never retries another name and never overwrites; an existing name
     /// yields an `AlreadyExists` error. The file is deleted on drop until `keep_read_only`.
-    #[allow(dead_code, reason = "called by migration in 2C-3")]
     pub fn create_exact(
         dir: &ConfigDir,
         exact: &std::ffi::OsStr,
@@ -1452,7 +1449,6 @@ impl Draft {
     }
     /// Marks the file read-only through its handle, keeping other attributes, and keeps it
     /// on disk. If the attribute cannot be set the file is deleted when `self` drops.
-    #[allow(dead_code, reason = "called by migration in 2C-3")]
     pub fn keep_read_only(mut self) -> Result<(), ConfigFsError> {
         use windows::Win32::Storage::FileSystem::{
             FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO, FileBasicInfo,

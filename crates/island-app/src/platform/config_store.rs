@@ -122,7 +122,6 @@ impl ConfigSnapshot {
             .unwrap_or_else(PoisonError::into_inner)
             .take()
     }
-    #[allow(dead_code, reason = "accessor is currently unused in production")]
     pub(crate) fn text(&self) -> Option<&str> {
         self.text.as_deref()
     }
@@ -1519,6 +1518,76 @@ mod tests {
     }
 
     #[test]
+    fn failed_migration_edit_then_restart_retries_once() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_legacy_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let old_backup = acceptance_backup(1, ACCEPTANCE_LEGACY).file_name();
+        config_migrate::AFTER_BACKUP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|| {
+                super::super::config_fs::FAIL_DRAFT_SYNC.with(|flag| flag.set(true));
+            }));
+        });
+        let first = bootstrap_at(&base, true);
+        assert_eq!(
+            first.take_migration_report(),
+            Some(MigrationReport::Fallback(FallbackReason::Failed(
+                FailureStage::Commit
+            )))
+        );
+        let failure = acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1);
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, ACCEPTANCE_LEGACY),
+                ("config.toml.bak", ACCEPTANCE_ROLLING),
+                (config_commit::FAILURE_RECORD_NAME, &failure),
+                (&old_backup, ACCEPTANCE_LEGACY),
+            ],
+        );
+        let slot = Mutex::new(Some(Arc::new(first)));
+        update_in(
+            &slot,
+            &folder.join(settings::PRIMARY_NAME),
+            "custom_setting",
+            "after",
+        )
+        .unwrap();
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, ACCEPTANCE_EDITED),
+                ("config.toml.bak", ACCEPTANCE_LEGACY),
+                (config_commit::FAILURE_RECORD_NAME, &failure),
+                (&old_backup, ACCEPTANCE_LEGACY),
+            ],
+        );
+        let second = bootstrap_at(&base, true);
+        let new_backup = acceptance_backup(2, ACCEPTANCE_EDITED);
+        let migrated = assert_acceptance_migrated(&second, ACCEPTANCE_EDITED, new_backup.clone());
+        assert_eq!(
+            read_value(&migrated, "custom_setting").as_deref(),
+            Some("after")
+        );
+        let new_name = new_backup.file_name();
+        let expected = [
+            (settings::PRIMARY_NAME, migrated.as_str()),
+            ("config.toml.bak", ACCEPTANCE_EDITED),
+            (&old_backup, ACCEPTANCE_LEGACY),
+            (&new_name, ACCEPTANCE_EDITED),
+        ];
+        assert_acceptance_files(&folder, &expected);
+        let third = bootstrap_at(&base, true);
+        assert_eq!(
+            third.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_acceptance_files(&folder, &expected);
+    }
+
+    #[test]
     fn disabled_and_refresh_never_migrate() {
         let _serial = super::super::config_fs::TEST_WRITER_SERIAL
             .lock()
@@ -2190,6 +2259,12 @@ mod tests {
                 ("config.toml.bak", &current),
                 (&protected, ACCEPTANCE_LEGACY),
             ],
+        );
+        assert!(
+            !fs::metadata(folder.join(settings::PRIMARY_NAME))
+                .unwrap()
+                .permissions()
+                .readonly()
         );
         let slot = Mutex::new(Some(Arc::new(snapshot)));
         update_in(
@@ -3143,6 +3218,26 @@ mod tests {
         assert!(!folder.join("config.toml").exists());
         assert!(snap.text().is_none());
         assert_eq!(std::fs::read(path).unwrap(), b"backup");
+    }
+
+    #[test]
+    fn missing_primary_with_failure_record_refuses_template() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for name in ["config.toml.failure", "CONFIG.TOML.FAILURE"] {
+            let base = settings::tests::temp_base();
+            let folder = base.join("Islora");
+            fs::create_dir(&folder).unwrap();
+            let failure = folder.join(name);
+            fs::write(&failure, b"failure").unwrap();
+            let snap = bootstrap_at(&base, false);
+            assert!(!snap.storage_ready && !snap.writes_allowed());
+            assert_eq!(snap.mode(), &RuntimeMode::Recovery);
+            assert!(snap.text().is_none());
+            assert!(!folder.join(settings::PRIMARY_NAME).exists());
+            assert_eq!(fs::read(failure).unwrap(), b"failure");
+        }
     }
 
     #[test]

@@ -386,6 +386,33 @@ mod tests {
     }
 
     #[test]
+    fn directory_failure_record_is_corrupt() {
+        let temp = Temp::new();
+        std::fs::create_dir(temp.0.join(FAILURE_RECORD_NAME)).unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        assert_eq!(
+            read_failure(&dir),
+            island_core::config_state::StoredFailure::Corrupt
+        );
+    }
+
+    #[test]
+    fn longest_valid_failure_record_is_readable() {
+        use island_core::config_state::{FAILURE_RECORD_MAX_BYTES, FailureStage, StoredFailure};
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let mut record = failure_record();
+        record.from_schema = u32::MAX;
+        record.attempts = u32::MAX;
+        record.stage = FailureStage::Commit;
+        let encoded = record.encode();
+        // All stage names have six bytes; both numeric fields are at their maximum.
+        assert!(encoded.len() < FAILURE_RECORD_MAX_BYTES);
+        std::fs::write(temp.0.join(FAILURE_RECORD_NAME), encoded).unwrap();
+        assert_eq!(read_failure(&dir), StoredFailure::Valid(record));
+    }
+
+    #[test]
     fn write_failure_replaces_previous() {
         let temp = Temp::new();
         let dir = ConfigDir::open(&temp.0).unwrap();
