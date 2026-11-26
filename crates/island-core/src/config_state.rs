@@ -171,7 +171,7 @@ pub enum RuntimeMode {
     Normal,
     /// Read-only operation for a newer schema.
     ReadOnly,
-    /// Compatibility operation without modifying the configuration.
+    /// Compatibility mode for legacy, invalid or unreadable primaries (migration disabled, failed or suppressed); settings writes need readable text and ready storage.
     LegacyCompatible,
     /// Recovery is required before normal operation.
     Recovery,
