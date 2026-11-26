@@ -1,8 +1,5 @@
 //! Maps the startup migration report and config mode to what the user sees (2C-4).
 
-// ConfigStatus is wired into settings in 2C-4 S3.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use crate::platform::config_migrate::{FallbackReason, MigrationReport};
 use island_core::config_state::RuntimeMode;
 use island_core::{Activity, Icon, Kind, Millis};

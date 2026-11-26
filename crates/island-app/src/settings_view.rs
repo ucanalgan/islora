@@ -18,6 +18,9 @@ const ROW_HEIGHT: f32 = 46.0;
 const CHOICE_HEIGHT: f32 = 44.0;
 const BUTTON_HEIGHT: f32 = 40.0;
 const STEP_SIZE: f32 = 32.0;
+const CONFIG_STATUS_FIRST_Y: f32 = 468.0;
+const CONFIG_STATUS_SECOND_Y: f32 = 486.0;
+const VERSION_WITH_STATUS_Y: f32 = 506.0;
 
 /// How far one press of a duration's buttons moves it, in minutes.
 const PRESET_STEP: u64 = 5;
@@ -186,6 +189,8 @@ pub struct SettingsState {
     pub demo_running: bool,
     /// The answer to the last attempt to save the calendar address.
     pub calendar_note: Option<&'static str>,
+    /// What is wrong with the settings file and what to do, two lines; None while settings work normally.
+    pub config_status: Option<(&'static str, &'static str)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -760,10 +765,30 @@ fn general(view: &mut View, state: &SettingsState) {
         opacity: 1.0,
         centered: true,
     });
-    view.caption(
-        format!("Islora {}", env!("CARGO_PKG_VERSION")),
-        WINDOW_HEIGHT - 44.0,
-    );
+    let version_y = if let Some((what, todo)) = state.config_status {
+        for (text, y, bold, opacity) in [
+            (what, CONFIG_STATUS_FIRST_Y, true, 0.9),
+            (todo, CONFIG_STATUS_SECOND_Y, false, 0.65),
+        ] {
+            view.labels.push(Label {
+                text: text.to_owned(),
+                bounds: Rect {
+                    x: LEFT,
+                    y,
+                    width: WIDTH,
+                    height: 18.0,
+                },
+                size: 12.5,
+                bold,
+                opacity,
+                centered: false,
+            });
+        }
+        VERSION_WITH_STATUS_Y
+    } else {
+        WINDOW_HEIGHT - 44.0
+    };
+    view.caption(format!("Islora {}", env!("CARGO_PKG_VERSION")), version_y);
 }
 
 /// The next duration in that direction, always on a whole step.
@@ -822,11 +847,100 @@ mod tests {
             autostart: false,
             demo_running: false,
             calendar_note: Some("Kaydedildi"),
+            config_status: None,
         }
     }
 
     fn overlaps(a: Rect, b: Rect) -> bool {
         a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    }
+
+    #[test]
+    fn general_shows_config_status_lines() {
+        let mut current = state(Page::General);
+        current.config_status = Some(("Birinci satır", "İkinci satır"));
+        let view = view(&current);
+        let first = view
+            .labels
+            .iter()
+            .find(|label| label.text == "Birinci satır")
+            .unwrap();
+        let second = view
+            .labels
+            .iter()
+            .find(|label| label.text == "İkinci satır")
+            .unwrap();
+        let version = view
+            .labels
+            .iter()
+            .find(|label| label.text.starts_with("Islora "))
+            .unwrap();
+        assert!(first.bold);
+        assert!(!second.bold);
+        for label in [first, second] {
+            let r = label.bounds;
+            assert!(r.x >= 0.0 && r.x + r.width <= WINDOW_WIDTH);
+            assert!(r.y >= 0.0 && r.y + r.height <= WINDOW_HEIGHT);
+            assert!(
+                view.controls
+                    .iter()
+                    .all(|control| !overlaps(r, control.bounds))
+            );
+            assert!(!overlaps(r, version.bounds));
+        }
+        assert!(!overlaps(first.bounds, second.bounds));
+        assert!(first.bounds.y + first.bounds.height <= second.bounds.y);
+        assert!(second.bounds.y + second.bounds.height <= version.bounds.y);
+    }
+
+    #[test]
+    fn general_without_config_status_is_unchanged() {
+        let view = view(&state(Page::General));
+        assert!(
+            view.labels
+                .iter()
+                .all(|label| label.text != "Birinci satır" && label.text != "İkinci satır")
+        );
+        let version = view
+            .labels
+            .iter()
+            .find(|label| label.text.starts_with("Islora "))
+            .unwrap();
+        assert_eq!(version.bounds.y, WINDOW_HEIGHT - 44.0);
+    }
+
+    #[test]
+    fn config_status_keeps_focus_order() {
+        let mut current = state(Page::General);
+        let without = view(&current).focus_order(Page::General);
+        current.config_status = Some(("Birinci satır", "İkinci satır"));
+        assert_eq!(view(&current).focus_order(Page::General), without);
+    }
+
+    #[test]
+    fn config_status_lines_fit() {
+        use crate::config_notice::ConfigStatus;
+        for status in [
+            ConfigStatus::MigrationFailed,
+            ConfigStatus::Legacy,
+            ConfigStatus::Recovery,
+            ConfigStatus::ReadOnly,
+            ConfigStatus::RestartNeeded,
+        ] {
+            let mut current = state(Page::General);
+            let (what, todo) = status.lines();
+            current.config_status = Some((what, todo));
+            let view = view(&current);
+            for text in [what, todo] {
+                let r = view
+                    .labels
+                    .iter()
+                    .find(|label| label.text == text)
+                    .unwrap()
+                    .bounds;
+                assert!(r.x >= 0.0 && r.x + r.width <= WINDOW_WIDTH);
+            }
+        }
     }
 
     #[test]

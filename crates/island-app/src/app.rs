@@ -200,7 +200,6 @@ impl OpenView {
 
 struct App {
     /// The startup migration report, taken once; the settings status (2C-4 S3) reads it.
-    #[allow(dead_code, reason = "settings status reads the report in 2C-4 S3")]
     migration_report: Option<MigrationReport>,
     island_window: HWND,
     edge_window: HWND,
@@ -1600,6 +1599,7 @@ impl App {
                     self.reload();
                 }
                 self.refresh();
+                self.sync_settings_window();
                 return;
             }
             if config_store::take_reload_request() {
@@ -1808,6 +1808,15 @@ impl App {
             autostart: autostart::is_on(),
             demo_running: self.demo_step.is_some(),
             calendar_note: None,
+            config_status: config_store::snapshot()
+                .and_then(|s| {
+                    config_notice::status(
+                        self.migration_report.as_ref(),
+                        s.mode(),
+                        s.writes_allowed(),
+                    )
+                })
+                .map(config_notice::ConfigStatus::lines),
         }
     }
 
