@@ -28,7 +28,6 @@ pub(crate) fn read_failure(dir: &ConfigDir) -> island_core::config_state::Stored
 }
 
 // Used by migration from 2C-3 S5.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write_failure(
     dir: &ConfigDir,
     record: &island_core::config_state::FailureRecord,
@@ -44,7 +43,6 @@ pub(crate) fn write_failure(
 }
 
 // Used by migration from 2C-3 S5.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn clear_failure(dir: &ConfigDir) -> io::Result<()> {
     match VerifiedFile::delete_verified(dir, FAILURE_RECORD_NAME.as_ref()) {
         Ok(()) => Ok(()),
@@ -246,7 +244,6 @@ pub(crate) fn commit_primary_with_hook(
 /// The file is created exclusively (an existing name is an `AlreadyExists` error, never
 /// overwritten), written through, read back and compared, then marked read-only. Any failure
 /// deletes only the file this call created. Retention is not handled here.
-#[allow(dead_code, reason = "called by migration in 2C-3")]
 pub(crate) fn create_protected_backup(
     dir: &ConfigDir,
     text: &str,
@@ -285,7 +282,6 @@ pub(crate) fn create_protected_backup(
 /// Deletion is per file and stops at the first failure, so backups deleted before a failure
 /// stay deleted (they were excess) and every file not yet reached is unchanged; the file that
 /// failed keeps its original attributes and still exists.
-#[allow(dead_code, reason = "called by migration in 2C-3")]
 pub(crate) fn apply_protected_retention(
     dir: &ConfigDir,
     just_created: &island_core::config_state::ProtectedBackupName,

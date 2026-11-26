@@ -12,36 +12,27 @@ use super::config_fs::{ConfigFsError, VerifiedFile, WriterLock};
 use super::{config_commit, config_store, settings};
 
 // Used by migration from 2C-3 S4b/S6.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MigrationReport {
     NotNeeded,
-    #[allow(dead_code, reason = "constructed by migration in 2C-3 S4b")]
-    Migrated {
-        backup: ProtectedBackupName,
-    },
+    Migrated { backup: ProtectedBackupName },
     Fallback(FallbackReason),
 }
 
 // Used by migration from 2C-3 S4b/S6.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FallbackReason {
-    #[allow(dead_code, reason = "constructed by bootstrap in 2C-3 S6")]
     Busy,
-    #[allow(dead_code, reason = "constructed by bootstrap in 2C-3 S6")]
     Unprepared,
     /// Migration could not read its source; the kind carries no configuration data.
     Io(io::ErrorKind),
     SourceChanged,
     Suppressed,
     Unpreparable,
-    #[allow(dead_code, reason = "constructed by migration in 2C-3 S4b")]
     Failed(FailureStage),
 }
 
 // Used by migration from 2C-3 S4b/S6.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 enum Preflight {
     Ready {
@@ -55,7 +46,6 @@ enum Preflight {
 }
 
 // Used by migration from 2C-3 S4b/S6.
-#[cfg_attr(not(test), allow(dead_code))]
 fn preflight(lock: &WriterLock, path: &Path, bytes: &[u8]) -> io::Result<Preflight> {
     let mut file =
         VerifiedFile::open(lock.directory(), settings::name(path)?).map_err(io::Error::from)?;
@@ -117,7 +107,6 @@ thread_local! {
 }
 
 // Called from bootstrap in 2C-3 S6.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn migrate_locked(
     lock: &WriterLock,
     path: &Path,

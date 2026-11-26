@@ -323,7 +323,8 @@ pub fn run() -> Result<()> {
         }
         return Ok(());
     }
-    crate::platform::config_store::bootstrap();
+    // A second copy must not migrate the running copy's configuration.
+    crate::platform::config_store::bootstrap(!second_copy);
 
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)? };
     TASKBAR_CREATED.store(

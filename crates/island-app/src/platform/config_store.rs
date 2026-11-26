@@ -43,7 +43,7 @@ pub(crate) fn observe(read: io::Result<String>) -> PrimaryObservation {
     }
 }
 
-/// Select the runtime mode with migration disabled.
+/// Select the runtime mode for refresh and when startup migration is disabled.
 pub(crate) fn effective_outcome(outcome: StartupOutcome) -> RuntimeMode {
     match outcome {
         StartupOutcome::Migrate { .. } => RuntimeMode::LegacyCompatible,
@@ -115,18 +115,18 @@ pub(crate) struct ConfigSnapshot {
 
 // Readers and writers switch to these accessors in 2C-2 S3.
 impl ConfigSnapshot {
-    #[allow(dead_code, reason = "report consumers arrive after S6b")]
+    #[allow(dead_code, reason = "migration report awaits a production consumer")]
     pub(crate) fn take_migration_report(&self) -> Option<MigrationReport> {
         self.migration_report
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
     }
-    #[allow(dead_code, reason = "readers will use this in 2C-2 S5")]
+    #[allow(dead_code, reason = "accessor is currently unused in production")]
     pub(crate) fn text(&self) -> Option<&str> {
         self.text.as_deref()
     }
-    #[allow(dead_code, reason = "readers will use this in 2C-2 S5")]
+    #[allow(dead_code, reason = "accessor is currently unused in production")]
     pub(crate) fn mode(&self) -> &RuntimeMode {
         &self.mode
     }
@@ -332,7 +332,7 @@ fn config_folder() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
 }
 
-pub(crate) fn bootstrap() -> Arc<ConfigSnapshot> {
+pub(crate) fn bootstrap(migrate: bool) -> Arc<ConfigSnapshot> {
     install_once(&STORE, || {
         let snapshot = match std::env::var_os("APPDATA") {
             Some(base) => {
@@ -340,7 +340,7 @@ pub(crate) fn bootstrap() -> Arc<ConfigSnapshot> {
                 bootstrap_prepared(
                     &base,
                     settings::prepare_storage_locked_recorded(&base),
-                    false,
+                    migrate,
                     || {},
                 )
             }
@@ -359,7 +359,7 @@ pub(crate) fn bootstrap() -> Arc<ConfigSnapshot> {
     })
 }
 
-#[allow(dead_code, reason = "readers will use this in 2C-2 S5")]
+#[allow(dead_code, reason = "accessor is currently unused in production")]
 pub(crate) fn snapshot() -> Option<Arc<ConfigSnapshot>> {
     STORE.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
@@ -1340,6 +1340,182 @@ mod tests {
             Some(MigrationReport::NotNeeded)
         );
         assert_eq!(std::fs::read(&path).unwrap(), migrated);
+    }
+
+    fn start_production_child(base: &Path, marker: &str, phase: &str, test_name: &str) {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(marker, phase)
+            .env("APPDATA", base)
+            .env("LOCALAPPDATA", base)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "production bootstrap test process failed on {phase}:\n{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    fn production_bootstrap_migrates_legacy_once() {
+        const PHASE: &str = "ISLORA_TEST_PRODUCTION_BOOTSTRAP_PHASE";
+        if let Ok(phase) = std::env::var(PHASE) {
+            let base = PathBuf::from(std::env::var_os("APPDATA").unwrap());
+            assert_eq!(base.parent(), Some(std::env::temp_dir().as_path()));
+            assert!(base.join(PHASE).is_file());
+
+            let snapshot = bootstrap(true);
+            let report = snapshot.take_migration_report();
+            match phase.as_str() {
+                "first" => assert!(
+                    matches!(report, Some(MigrationReport::Migrated { .. })),
+                    "production bootstrap should migrate legacy settings, got {report:?}"
+                ),
+                "restart" => assert_eq!(report, Some(MigrationReport::NotNeeded)),
+                _ => panic!("unexpected test phase: {phase}"),
+            }
+            assert_eq!(snapshot.mode(), &RuntimeMode::Normal);
+            assert!(snapshot.writes_allowed());
+            let disk =
+                fs::read_to_string(base.join("Islora").join(settings::PRIMARY_NAME)).unwrap();
+            assert_eq!(snapshot.text(), Some(disk.as_str()));
+            return;
+        }
+
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        fs::write(base.join(PHASE), []).unwrap();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let path = folder.join(settings::PRIMARY_NAME);
+        let legacy = b"# Keep my settings\r\nui_density = \"minimal\"\r\n";
+        fs::write(&path, legacy).unwrap();
+
+        // Each test process starts with its own empty production STORE.
+        let test_name = concat!(
+            module_path!(),
+            "::production_bootstrap_migrates_legacy_once"
+        );
+        let (_, test_name) = test_name.split_once("::").unwrap();
+        let start = |phase| start_production_child(&base, PHASE, phase, test_name);
+        start("first");
+
+        let migrated = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            read_value(&migrated, "config_version").as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            read_value(&migrated, "indicator_style").as_deref(),
+            Some("ring")
+        );
+        assert_eq!(
+            read_value(&migrated, "media_layout").as_deref(),
+            Some("compact")
+        );
+        let protected = || inventory(&ConfigDir::open(&folder).unwrap()).protected_backups;
+        let backups = protected();
+        assert_eq!(backups.len(), 1);
+        let backup = folder.join(backups[0].file_name());
+        assert_eq!(fs::read(&backup).unwrap(), legacy);
+        assert!(fs::metadata(&backup).unwrap().permissions().readonly());
+
+        start("restart");
+
+        assert_eq!(fs::read_to_string(path).unwrap(), migrated);
+        assert_eq!(protected(), backups);
+        assert_eq!(fs::read(backup).unwrap(), legacy);
+    }
+
+    #[test]
+    fn production_second_copy_never_migrates() {
+        const PHASE: &str = "ISLORA_TEST_SECOND_COPY_PHASE";
+        if std::env::var_os(PHASE).is_some() {
+            let base = PathBuf::from(std::env::var_os("APPDATA").unwrap());
+            assert_eq!(base.parent(), Some(std::env::temp_dir().as_path()));
+            assert!(base.join(PHASE).is_file());
+            let snapshot = bootstrap(false);
+            assert_eq!(
+                snapshot.take_migration_report(),
+                Some(MigrationReport::NotNeeded)
+            );
+            assert_eq!(snapshot.mode(), &RuntimeMode::LegacyCompatible);
+            return;
+        }
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        fs::write(base.join(PHASE), []).unwrap();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let legacy = "ui_density = \"minimal\"\r\n";
+        fs::write(folder.join(settings::PRIMARY_NAME), legacy).unwrap();
+        let name = concat!(module_path!(), "::production_second_copy_never_migrates");
+        start_production_child(&base, PHASE, "second", name.split_once("::").unwrap().1);
+        assert_acceptance_files(&folder, &[(settings::PRIMARY_NAME, legacy)]);
+    }
+
+    #[test]
+    fn failed_bootstrap_never_retries_in_run() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_legacy_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let backup = acceptance_backup(1, ACCEPTANCE_LEGACY).file_name();
+        config_migrate::AFTER_BACKUP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|| {
+                super::super::config_fs::FAIL_DRAFT_SYNC.with(|flag| flag.set(true));
+            }));
+        });
+        let snapshot = bootstrap_at(&base, true);
+        assert_eq!(snapshot.mode(), &RuntimeMode::LegacyCompatible);
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::Fallback(FallbackReason::Failed(
+                FailureStage::Commit
+            )))
+        );
+        let failure = acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1);
+        let expected = [
+            (settings::PRIMARY_NAME, ACCEPTANCE_LEGACY),
+            ("config.toml.bak", ACCEPTANCE_ROLLING),
+            (config_commit::FAILURE_RECORD_NAME, failure.as_str()),
+            (backup.as_str(), ACCEPTANCE_LEGACY),
+        ];
+        assert_acceptance_files(&folder, &expected);
+        let slot = Mutex::new(Some(Arc::new(snapshot)));
+        assert_eq!(
+            refresh_in(&slot, &base).mode(),
+            &RuntimeMode::LegacyCompatible
+        );
+        assert_acceptance_files(&folder, &expected);
+        update_in(
+            &slot,
+            &folder.join(settings::PRIMARY_NAME),
+            "custom_setting",
+            "after",
+        )
+        .unwrap();
+        assert_eq!(
+            slot.lock().unwrap().as_ref().unwrap().mode(),
+            &RuntimeMode::LegacyCompatible
+        );
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, ACCEPTANCE_EDITED),
+                ("config.toml.bak", ACCEPTANCE_LEGACY),
+                (config_commit::FAILURE_RECORD_NAME, failure.as_str()),
+                (backup.as_str(), ACCEPTANCE_LEGACY),
+            ],
+        );
     }
 
     #[test]
@@ -2873,7 +3049,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_v1_is_legacy_fallback_bytes_unchanged() {
+    fn disabled_bootstrap_v1_is_legacy_fallback_bytes_unchanged() {
         let _serial = super::super::config_fs::TEST_WRITER_SERIAL
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
