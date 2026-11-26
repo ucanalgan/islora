@@ -86,7 +86,7 @@ The workflow in C runs format, workspace tests, Clippy and release build on Wind
 
 ## Manual checks still needed
 
-- Run a real Windows start with a real legacy profile copy (not the live profile) and confirm the migration, the protected backup and that no user-visible error appears.
+- Run a real Windows start with a copy of the user's own legacy profile and confirm the migration, the protected backup and that no user-visible error appears. Partly done on 2026-11-27 with a synthetic legacy file (not the user's profile): a debug build at `28c370e`, started with `--only-session IsloraManualCheck --no-real-notices` (no `--second-copy`, the user's copy closed) and `APPDATA` / `LOCALAPPDATA` in a new temp folder, logged `settings startup mode: Normal`; `config.toml` became version 2 (`ui_density = "detailed"` removed, `indicator_style = "context"` and `media_layout = "informative"` appended, comments, an inline comment, an unrelated key and CRLF kept); `config.protected.000001.v1.<fingerprint>.bak` (read-only) and the rolling `.bak` both held the exact original bytes; the first copy ignored a plain `taskkill` and was force-stopped (so a clean shutdown was not observed); a second start in the same folder logged `Normal` and changed nothing. No error dialog was looked for, and no setting was changed through the UI.
 - Check timers, Quick Controls and presentation after a real migration.
 - Check the read-only save message with a future-schema file in the real settings window.
 - Check a fresh install on a clean Windows profile, including the legacy DynamicIsland folder rename.

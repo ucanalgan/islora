@@ -860,6 +860,8 @@ S10a complete: collected minors. Stale dead_code allows removed from four config
 
 S10b complete: docs. CONFIG_MIGRATION_ACCEPTANCE.md re-audited row by row (workflow: seven Sonnet auditors, seven Sonnet skeptics, Marco writes), CONFIG_MIGRATION.md has a "Phase 2 status" section, the LegacyCompatible doc comment is corrected. Giulia (Gemini 4) found seven accuracy problems in round one (undefined critical rows, a claim that tests were not run, the wrong protected backup name, overstated failure handling, writes-refused-until-restart overgeneralised) and two in round two; all fixed. Gate stays BLOCKED: 21 rows Partial, 46 Not applicable, 51 Configured (CI runs only for main). 2C-3 is complete. Next: manual checks from the acceptance doc on a trial copy with a real legacy profile (islora-safe-testing), then a UI consumer for the migration report (product decision, see kararlar.md), then 2D.
 
+Manual check 1 partly done (2026-11-27): a debug build migrated a synthetic legacy file in a temp profile (the user's copy closed for the run; a `--second-copy` run cannot migrate by design), with the protected and rolling backups holding the exact original bytes and a second start changing nothing; recorded in CONFIG_MIGRATION_ACCEPTANCE.md. Still open: the user's own profile copy, the UI checks, a clean shutdown, a PR to main for CI. Nino checked the doc line.
+
 Older note: First step next: 2C-3 (see the Phase B table), in a new lead session: this
 lead's context passed 55%. Older note follows. First step next: Phase B cleanup step CL3 (earlier note: CL1 Paolo writes; reviewers by kind:
 Lucia for tests and Rust logic, plus Giulia or Enzo), then CL2 (Win32 detail:
