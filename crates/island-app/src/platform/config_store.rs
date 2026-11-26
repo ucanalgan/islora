@@ -115,7 +115,6 @@ pub(crate) struct ConfigSnapshot {
 
 // Readers and writers switch to these accessors in 2C-2 S3.
 impl ConfigSnapshot {
-    #[allow(dead_code, reason = "migration report awaits a production consumer")]
     pub(crate) fn take_migration_report(&self) -> Option<MigrationReport> {
         self.migration_report
             .lock()
@@ -125,7 +124,6 @@ impl ConfigSnapshot {
     pub(crate) fn text(&self) -> Option<&str> {
         self.text.as_deref()
     }
-    #[allow(dead_code, reason = "accessor is currently unused in production")]
     pub(crate) fn mode(&self) -> &RuntimeMode {
         &self.mode
     }

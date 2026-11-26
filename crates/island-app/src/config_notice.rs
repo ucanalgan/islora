@@ -1,10 +1,24 @@
 //! Maps the startup migration report and config mode to what the user sees (2C-4).
 
-// Wired into the app in 2C-4 S2 and S3.
+// ConfigStatus is wired into settings in 2C-4 S3.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use crate::platform::config_migrate::{FallbackReason, MigrationReport};
 use island_core::config_state::RuntimeMode;
+use island_core::{Activity, Icon, Kind, Millis};
+
+pub(crate) const STARTUP_NOTICE_MS: Millis = 6_000;
+
+pub(crate) fn startup_activity(notice: StartupNotice, now: Millis) -> Activity {
+    let (title, detail) = notice.text();
+    Activity {
+        title: title.to_owned(),
+        detail: detail.to_owned(),
+        icon: Some(Icon::Warning),
+        expires_at: Some(now + STARTUP_NOTICE_MS),
+        ..Activity::new(Kind::Notification)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartupNotice {
@@ -119,6 +133,28 @@ mod tests {
     use crate::platform::config_migrate::FallbackReason;
     use island_core::config_state::{ChangeFingerprint, FailureStage, ProtectedBackupName};
     use std::io::ErrorKind;
+
+    #[test]
+    fn startup_activity_is_a_short_warning_notification() {
+        for notice in [
+            StartupNotice::MigrationFailed,
+            StartupNotice::Recovery,
+            StartupNotice::ReadOnly,
+        ] {
+            let (title, detail) = notice.text();
+            let activity = startup_activity(notice, 1_000);
+            assert_eq!(activity.kind, island_core::Kind::Notification);
+            assert_eq!(activity.icon, Some(island_core::Icon::Warning));
+            assert_eq!(activity.title, title);
+            assert_eq!(activity.detail, detail);
+            assert_eq!(activity.expires_at, Some(7_000));
+        }
+    }
+
+    #[test]
+    fn startup_notice_ms_is_six_seconds() {
+        assert_eq!(STARTUP_NOTICE_MS, 6_000);
+    }
 
     fn reports() -> Vec<Option<MigrationReport>> {
         use FallbackReason::*;

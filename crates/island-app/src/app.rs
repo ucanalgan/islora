@@ -53,6 +53,8 @@ use windows::Win32::UI::Shell::ABN_FULLSCREENAPP;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Result, w};
 
+use crate::config_notice;
+use crate::platform::config_migrate::MigrationReport;
 use crate::platform::config_store;
 use crate::platform::settings_window::{
     self, MSG_OPEN_SETTINGS, MSG_SETTINGS_CLOSED, SettingsWindow,
@@ -197,6 +199,9 @@ impl OpenView {
 }
 
 struct App {
+    /// The startup migration report, taken once; the settings status (2C-4 S3) reads it.
+    #[allow(dead_code, reason = "settings status reads the report in 2C-4 S3")]
+    migration_report: Option<MigrationReport>,
     island_window: HWND,
     edge_window: HWND,
     placement: Placement,
@@ -413,7 +418,15 @@ pub fn run() -> Result<()> {
     }
 
     let started = Instant::now();
+    let startup_config = config_store::snapshot();
+    let migration_report = startup_config
+        .as_ref()
+        .and_then(|s| s.take_migration_report());
+    let startup_notice = startup_config
+        .as_ref()
+        .and_then(|s| config_notice::startup_notice(migration_report.as_ref(), s.mode()));
     let mut app = App {
+        migration_report,
         island_window,
         edge_window,
         placement,
@@ -513,6 +526,12 @@ pub fn run() -> Result<()> {
     };
     app.apply_material();
     app.notification_queue.set_muted(app.muted_apps.clone());
+    if let Some(notice) = startup_notice {
+        let now = app.now();
+        app.island
+            .upsert(config_notice::startup_activity(notice, now));
+        app.refresh();
+    }
     if std::env::args().any(|a| a == "--demo-quick-controls") {
         app.island.open_quick_controls(app.now(), None);
         app.refresh();
