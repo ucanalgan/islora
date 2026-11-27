@@ -150,6 +150,10 @@ pub struct ArtifactInventory {
     pub protected_backups: Vec<ProtectedBackupName>,
     /// Number of leftover draft files.
     pub leftover_drafts: usize,
+    /// Leftovers that make any restore ambiguous (`config.toml.bak.new`, `config.toml.recover`, `config.pre-migration*.bak`).
+    pub ambiguous_leftovers: bool,
+    /// Whether a failure record file exists, readable or not.
+    pub failure_record_present: bool,
     /// Fingerprint recorded for a previous migration failure, if present.
     pub recorded_failure: Option<ChangeFingerprint>,
 }
@@ -161,6 +165,8 @@ impl ArtifactInventory {
             || !self.protected_backups.is_empty()
             || self.leftover_drafts > 0
             || self.recorded_failure.is_some()
+            || self.ambiguous_leftovers
+            || self.failure_record_present
     }
 }
 
@@ -476,51 +482,138 @@ pub struct RecoveryCandidate {
 pub enum CandidateSelection {
     /// Restore this source.
     Restore(CandidateSource),
-    /// Valid sources have different content fingerprints.
+    /// Two different files claim the same top rank.
     Ambiguous,
     /// No valid source exists.
     NoneValid,
 }
 
-/// Select a valid candidate only when all valid fingerprints agree.
+/// Select a valid rolling backup, or the highest-sequence valid protected backup.
+/// Different files at the top rank are ambiguous.
 pub fn select_candidate(candidates: &[RecoveryCandidate]) -> CandidateSelection {
-    let mut fingerprint = None;
-    let mut selected: Option<&CandidateSource> = None;
+    let mut rolling_observation = None;
     for candidate in candidates {
-        let CandidateValidity::Valid {
-            fingerprint: current,
-            ..
-        } = candidate.validity
-        else {
-            continue;
-        };
-        if fingerprint.is_some_and(|previous| previous != current) {
-            return CandidateSelection::Ambiguous;
-        }
-        fingerprint = Some(current);
-        selected = match (selected, &candidate.source) {
-            (None, source) => Some(source),
-            (Some(CandidateSource::RollingBackup), _) => selected,
-            (_, CandidateSource::RollingBackup) => Some(&candidate.source),
-            (Some(CandidateSource::Protected(old)), CandidateSource::Protected(new)) => {
-                let key = |name: &ProtectedBackupName| {
-                    (
-                        name.sequence(),
-                        name.source_schema(),
-                        name.fingerprint().value(),
-                    )
-                };
-                if key(new) > key(old) {
-                    Some(&candidate.source)
-                } else {
-                    selected
-                }
+        if let (
+            CandidateSource::RollingBackup,
+            CandidateValidity::Valid {
+                schema,
+                fingerprint,
+            },
+        ) = (&candidate.source, &candidate.validity)
+        {
+            if rolling_observation.is_some_and(|previous| previous != (*schema, *fingerprint)) {
+                return CandidateSelection::Ambiguous;
             }
-        };
+            rolling_observation = Some((*schema, *fingerprint));
+        }
     }
-    selected
+    if rolling_observation.is_some() {
+        return CandidateSelection::Restore(CandidateSource::RollingBackup);
+    }
+    let mut top: Option<&ProtectedBackupName> = None;
+    let mut ambiguous = false;
+    for candidate in candidates {
+        if let (CandidateSource::Protected(name), CandidateValidity::Valid { .. }) =
+            (&candidate.source, &candidate.validity)
+        {
+            match top {
+                None => top = Some(name),
+                Some(old) if name.sequence() > old.sequence() => {
+                    top = Some(name);
+                    ambiguous = false;
+                }
+                Some(old) if name.sequence() == old.sequence() && name != old => {
+                    ambiguous = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if ambiguous {
+        CandidateSelection::Ambiguous
+    } else {
+        top.cloned().map_or(CandidateSelection::NoneValid, |name| {
+            CandidateSelection::Restore(CandidateSource::Protected(name))
+        })
+    }
+}
+
+/// Check a protected backup's observed content against its name: the name records the
+/// fingerprint and schema of the bytes it holds, so a mismatch marks a renamed or foreign file.
+pub fn protected_validity(
+    name: &ProtectedBackupName,
+    observed: CandidateValidity,
+) -> CandidateValidity {
+    match observed {
+        CandidateValidity::Valid {
+            schema,
+            fingerprint,
+        } if schema != name.source_schema() || fingerprint != name.fingerprint() => {
+            CandidateValidity::Invalid
+        }
+        other => other,
+    }
+}
+
+/// A pure decision about how to handle recovery candidates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecoveryPlan {
+    /// Restore this source; its schema and fingerprint are as observed.
+    Restore {
+        source: CandidateSource,
+        schema: u32,
+        fingerprint: ChangeFingerprint,
+    },
+    /// Leftovers or two top-ranked files make the choice unsafe; restore nothing.
+    Blocked,
+    /// Candidates exist but none is valid.
+    NoneValid,
+    /// No candidate was offered.
+    NothingToRestore,
+}
+
+/// Plan recovery after validating protected names and checking for ambiguous leftovers.
+pub fn plan_recovery(
+    inventory: &ArtifactInventory,
+    candidates: &[RecoveryCandidate],
+) -> RecoveryPlan {
+    if inventory.ambiguous_leftovers {
+        return RecoveryPlan::Blocked;
+    }
+    if candidates.is_empty() {
+        return RecoveryPlan::NothingToRestore;
+    }
+    let checked: Vec<_> = candidates
+        .iter()
         .cloned()
-        .map_or(CandidateSelection::NoneValid, CandidateSelection::Restore)
+        .map(|mut candidate| {
+            if let CandidateSource::Protected(name) = &candidate.source {
+                candidate.validity = protected_validity(name, candidate.validity);
+            }
+            candidate
+        })
+        .collect();
+    match select_candidate(&checked) {
+        CandidateSelection::Ambiguous => RecoveryPlan::Blocked,
+        CandidateSelection::NoneValid => RecoveryPlan::NoneValid,
+        CandidateSelection::Restore(source) => checked
+            .iter()
+            .find_map(|candidate| match (&candidate.source, &candidate.validity) {
+                (
+                    candidate_source,
+                    CandidateValidity::Valid {
+                        schema,
+                        fingerprint,
+                    },
+                ) if *candidate_source == source => Some(RecoveryPlan::Restore {
+                    source: source.clone(),
+                    schema: *schema,
+                    fingerprint: *fingerprint,
+                }),
+                _ => None,
+            })
+            .unwrap_or(RecoveryPlan::NoneValid),
+    }
 }
 
 #[cfg(test)]
@@ -683,6 +776,8 @@ mod tests {
                 protected_backups: vec![backup(1)],
                 leftover_drafts: 1,
                 recorded_failure: Some(f),
+                ambiguous_leftovers: false,
+                failure_record_present: false,
             },
         ]
     }
@@ -1053,7 +1148,10 @@ mod tests {
                 vec![low.clone(), high.clone()],
                 CandidateSelection::Restore(high.source.clone()),
             ),
-            (vec![low.clone(), other], CandidateSelection::Ambiguous),
+            (
+                vec![low.clone(), other.clone()],
+                CandidateSelection::Restore(other.source.clone()),
+            ),
             (
                 vec![low.clone(), future],
                 CandidateSelection::Restore(low.source.clone()),
@@ -1071,7 +1169,299 @@ mod tests {
         );
         assert_eq!(
             select_candidate(&[low.clone(), tie.clone()]),
-            select_candidate(&[tie, low])
+            CandidateSelection::Ambiguous
+        );
+        assert_eq!(select_candidate(&[tie, low]), CandidateSelection::Ambiguous);
+    }
+
+    fn candidate(source: CandidateSource, validity: CandidateValidity) -> RecoveryCandidate {
+        RecoveryCandidate { source, validity }
+    }
+
+    fn valid(schema: u32, fingerprint: u64) -> CandidateValidity {
+        CandidateValidity::Valid {
+            schema,
+            fingerprint: ChangeFingerprint::from_value(fingerprint),
+        }
+    }
+
+    fn protected(sequence: u32, schema: u32, fingerprint: u64) -> RecoveryCandidate {
+        candidate(
+            CandidateSource::Protected(
+                ProtectedBackupName::new(
+                    sequence,
+                    schema,
+                    ChangeFingerprint::from_value(fingerprint),
+                )
+                .unwrap(),
+            ),
+            valid(schema, fingerprint),
+        )
+    }
+
+    fn assert_selection_both(
+        a: RecoveryCandidate,
+        b: RecoveryCandidate,
+        expected: CandidateSelection,
+    ) {
+        assert_eq!(select_candidate(&[a.clone(), b.clone()]), expected);
+        assert_eq!(select_candidate(&[b, a]), expected);
+    }
+
+    fn assert_plan_both(
+        inventory: &ArtifactInventory,
+        a: RecoveryCandidate,
+        b: RecoveryCandidate,
+        expected: RecoveryPlan,
+    ) {
+        assert_eq!(plan_recovery(inventory, &[a.clone(), b.clone()]), expected);
+        assert_eq!(plan_recovery(inventory, &[b, a]), expected);
+    }
+
+    #[test]
+    fn select_candidate_prefers_valid_rolling_over_newer_protected() {
+        assert_selection_both(
+            candidate(CandidateSource::RollingBackup, valid(1, 1)),
+            protected(9, 2, 2),
+            CandidateSelection::Restore(CandidateSource::RollingBackup),
+        );
+    }
+
+    #[test]
+    fn select_candidate_falls_back_to_highest_protected_sequence() {
+        let low = protected(1, 1, 1);
+        let high = protected(3, 1, 3);
+        let expected = CandidateSelection::Restore(high.source.clone());
+        assert_selection_both(low.clone(), high.clone(), expected.clone());
+        for validity in [
+            CandidateValidity::Invalid,
+            CandidateValidity::Future,
+            CandidateValidity::Unreadable,
+        ] {
+            let rolling = candidate(CandidateSource::RollingBackup, validity);
+            for mut candidates in [
+                vec![rolling.clone(), low.clone(), high.clone()],
+                vec![high.clone(), low.clone(), rolling],
+            ] {
+                assert_eq!(select_candidate(&candidates), expected);
+                candidates.reverse();
+                assert_eq!(select_candidate(&candidates), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn select_candidate_same_top_sequence_is_ambiguous() {
+        assert_selection_both(
+            protected(3, 1, 1),
+            protected(3, 1, 2),
+            CandidateSelection::Ambiguous,
+        );
+        assert_selection_both(
+            candidate(CandidateSource::RollingBackup, valid(1, 1)),
+            candidate(CandidateSource::RollingBackup, valid(1, 2)),
+            CandidateSelection::Ambiguous,
+        );
+        let a = protected(1, 1, 1);
+        let b = protected(1, 1, 2);
+        let high = protected(2, 1, 3);
+        for candidates in [
+            vec![a.clone(), b.clone(), high.clone()],
+            vec![high.clone(), b, a],
+        ] {
+            assert_eq!(
+                select_candidate(&candidates),
+                CandidateSelection::Restore(high.source.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn select_candidate_rolling_schema_mismatch_is_ambiguous() {
+        let first = candidate(CandidateSource::RollingBackup, valid(1, 42));
+        let second = candidate(CandidateSource::RollingBackup, valid(2, 42));
+        assert_selection_both(first, second, CandidateSelection::Ambiguous);
+    }
+
+    #[test]
+    fn select_candidate_same_file_twice_is_not_ambiguous() {
+        let p = protected(3, 1, 1);
+        assert_selection_both(p.clone(), p.clone(), CandidateSelection::Restore(p.source));
+        let r = candidate(CandidateSource::RollingBackup, valid(1, 1));
+        assert_selection_both(
+            r.clone(),
+            r,
+            CandidateSelection::Restore(CandidateSource::RollingBackup),
+        );
+    }
+
+    #[test]
+    fn select_candidate_skips_non_valid() {
+        let p = protected(1, 1, 1);
+        for validity in [
+            CandidateValidity::Invalid,
+            CandidateValidity::Future,
+            CandidateValidity::Unreadable,
+        ] {
+            assert_selection_both(
+                p.clone(),
+                candidate(CandidateSource::RollingBackup, validity),
+                CandidateSelection::Restore(p.source.clone()),
+            );
+        }
+    }
+
+    #[test]
+    fn select_candidate_none_valid() {
+        assert_eq!(select_candidate(&[]), CandidateSelection::NoneValid);
+        assert_selection_both(
+            candidate(CandidateSource::RollingBackup, CandidateValidity::Future),
+            candidate(
+                CandidateSource::Protected(backup(1)),
+                CandidateValidity::Unreadable,
+            ),
+            CandidateSelection::NoneValid,
+        );
+    }
+
+    #[test]
+    fn protected_validity_rejects_name_mismatch() {
+        let name = ProtectedBackupName::new(1, 2, ChangeFingerprint::from_value(3)).unwrap();
+        assert_eq!(
+            protected_validity(&name, valid(1, 3)),
+            CandidateValidity::Invalid
+        );
+        assert_eq!(
+            protected_validity(&name, valid(2, 4)),
+            CandidateValidity::Invalid
+        );
+        assert_eq!(protected_validity(&name, valid(2, 3)), valid(2, 3));
+        for v in [
+            CandidateValidity::Future,
+            CandidateValidity::Invalid,
+            CandidateValidity::Unreadable,
+        ] {
+            assert_eq!(protected_validity(&name, v.clone()), v);
+        }
+    }
+
+    #[test]
+    fn plan_recovery_blocks_on_ambiguous_leftovers() {
+        let inventory = ArtifactInventory {
+            ambiguous_leftovers: true,
+            ..Default::default()
+        };
+        assert_eq!(plan_recovery(&inventory, &[]), RecoveryPlan::Blocked);
+        assert_plan_both(
+            &inventory,
+            candidate(CandidateSource::RollingBackup, valid(1, 1)),
+            protected(2, 1, 2),
+            RecoveryPlan::Blocked,
+        );
+    }
+
+    #[test]
+    fn plan_recovery_distinguishes_none_valid_and_nothing() {
+        let inventory = ArtifactInventory::default();
+        assert_eq!(
+            plan_recovery(&inventory, &[]),
+            RecoveryPlan::NothingToRestore
+        );
+        assert_plan_both(
+            &inventory,
+            candidate(CandidateSource::RollingBackup, CandidateValidity::Invalid),
+            candidate(
+                CandidateSource::Protected(backup(1)),
+                CandidateValidity::Future,
+            ),
+            RecoveryPlan::NoneValid,
+        );
+        assert_plan_both(
+            &inventory,
+            protected(2, 1, 1),
+            protected(2, 1, 2),
+            RecoveryPlan::Blocked,
+        );
+    }
+
+    #[test]
+    fn plan_recovery_applies_protected_validity() {
+        let low = protected(1, 1, 1);
+        let mut high = protected(2, 1, 2);
+        high.validity = valid(1, 3);
+        let expected = RecoveryPlan::Restore {
+            source: low.source.clone(),
+            schema: 1,
+            fingerprint: ChangeFingerprint::from_value(1),
+        };
+        assert_plan_both(&ArtifactInventory::default(), low, high, expected);
+    }
+
+    #[test]
+    fn plan_recovery_tie_broken_by_protected_validity() {
+        let good = protected(4, 2, 10);
+        let mut bad = protected(4, 2, 11);
+        bad.validity = valid(2, 12);
+        let expected = RecoveryPlan::Restore {
+            source: good.source.clone(),
+            schema: 2,
+            fingerprint: ChangeFingerprint::from_value(10),
+        };
+        assert_plan_both(&ArtifactInventory::default(), good, bad, expected);
+    }
+
+    #[test]
+    fn plan_recovery_rolling_beats_protected_tie() {
+        let rolling = candidate(CandidateSource::RollingBackup, valid(1, 20));
+        let first = protected(4, 2, 10);
+        let second = protected(4, 2, 11);
+        let expected = RecoveryPlan::Restore {
+            source: CandidateSource::RollingBackup,
+            schema: 1,
+            fingerprint: ChangeFingerprint::from_value(20),
+        };
+        let candidates = [rolling, first, second];
+        for order in [[0, 1, 2], [2, 1, 0]] {
+            let ordered: Vec<_> = order.into_iter().map(|i| candidates[i].clone()).collect();
+            assert_eq!(
+                plan_recovery(&ArtifactInventory::default(), &ordered),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn plan_recovery_restore_carries_schema_and_fingerprint() {
+        let rolling = candidate(CandidateSource::RollingBackup, valid(5, 42));
+        let expected = RecoveryPlan::Restore {
+            source: CandidateSource::RollingBackup,
+            schema: 5,
+            fingerprint: ChangeFingerprint::from_value(42),
+        };
+        assert_plan_both(
+            &ArtifactInventory::default(),
+            rolling,
+            protected(9, 1, 2),
+            expected,
+        );
+    }
+
+    #[test]
+    fn has_recovery_artifacts_counts_new_fields() {
+        assert!(!ArtifactInventory::default().has_recovery_artifacts());
+        assert!(
+            ArtifactInventory {
+                ambiguous_leftovers: true,
+                ..Default::default()
+            }
+            .has_recovery_artifacts()
+        );
+        assert!(
+            ArtifactInventory {
+                failure_record_present: true,
+                ..Default::default()
+            }
+            .has_recovery_artifacts()
         );
     }
 }

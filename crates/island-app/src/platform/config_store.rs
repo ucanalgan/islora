@@ -153,7 +153,11 @@ impl fmt::Debug for ConfigSnapshot {
 }
 
 fn inventory(dir: &ConfigDir) -> ArtifactInventory {
-    let mut inventory = ArtifactInventory::default();
+    let mut inventory = ArtifactInventory {
+        // Filled from the single inventory in 2D-2 S2; settings.rs still blocks these today.
+        ambiguous_leftovers: false,
+        ..Default::default()
+    };
     if let Ok(entries) = dir.entries() {
         for name in entries {
             if name.eq_ignore_ascii_case("config.toml.bak") {
@@ -164,7 +168,7 @@ fn inventory(dir: &ConfigDir) -> ArtifactInventory {
             }
             // Count failure-record presence as evidence without interpreting its contents.
             if name.eq_ignore_ascii_case(config_commit::FAILURE_RECORD_NAME) {
-                inventory.leftover_drafts += 1;
+                inventory.failure_record_present = true;
             }
             if settings::is_stale_draft_name(&name) {
                 inventory.leftover_drafts += 1;
@@ -3088,6 +3092,8 @@ mod tests {
         .unwrap();
         let found = inventory(&ConfigDir::open(&base).unwrap());
         assert_eq!(found.recorded_failure, Some(record.source));
+        assert!(found.failure_record_present);
+        assert_eq!(found.leftover_drafts, 0);
     }
 
     #[test]
@@ -3099,10 +3105,10 @@ mod tests {
         let folder = base.join("Islora");
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), b"corrupt").unwrap();
-        assert_eq!(
-            inventory(&ConfigDir::open(&folder).unwrap()).recorded_failure,
-            None
-        );
+        let found = inventory(&ConfigDir::open(&folder).unwrap());
+        assert_eq!(found.recorded_failure, None);
+        assert!(found.failure_record_present);
+        assert_eq!(found.leftover_drafts, 0);
         let snapshot = bootstrap_at(&base, false);
         assert_eq!(snapshot.mode(), &RuntimeMode::Recovery);
         assert!(!folder.join("config.toml").exists());
