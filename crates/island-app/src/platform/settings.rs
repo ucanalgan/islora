@@ -6,7 +6,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::config_commit;
-use super::config_fs::{ConfigDir, Draft, VerifiedFile, WriterLock, WriterMutex};
+#[cfg(test)]
+use super::config_fs::Draft;
+use super::config_fs::{ConfigDir, VerifiedFile, WriterLock, WriterMutex};
 use super::config_recovery;
 #[cfg(test)]
 pub(crate) use super::config_store::locked_update_at;
@@ -94,15 +96,9 @@ fn is_new_install(path: &Path) -> bool {
 #[cfg(test)]
 fn is_new_install_in(dir: &ConfigDir) -> bool {
     matches!(inspect_in(dir, PRIMARY_NAME), Ok(false))
-        && !config_recovery::inventory(dir).map_or(true, |i| has_evidence(&i))
+        && !config_recovery::inventory(dir).map_or(true, |i| config_recovery::has_evidence(&i))
 }
-/// Stale drafts never contain restorable content and do not prevent a new install.
-fn has_evidence(inventory: &island_core::config_state::ArtifactInventory) -> bool {
-    let mut without_drafts = inventory.clone();
-    without_drafts.leftover_drafts = 0;
-    without_drafts.has_recovery_artifacts()
-}
-fn inspect_in(dir: &ConfigDir, name: &str) -> io::Result<bool> {
+pub(crate) fn inspect_in(dir: &ConfigDir, name: &str) -> io::Result<bool> {
     match VerifiedFile::open(dir, std::ffi::OsStr::new(name)) {
         Ok(_) => Ok(true),
         Err(error) => {
@@ -249,34 +245,25 @@ pub(crate) fn prepare_storage_locked(base: &Path) -> io::Result<(bool, WriterLoc
             }
         }
     }
-    let primary_present = inspect_in(dir, PRIMARY_NAME)?;
-    let first_run = if primary_present {
-        false
-    } else {
-        let inventory = config_recovery::inventory(dir)?;
-        if inventory.ambiguous_leftovers {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "configuration recovery artifacts need review",
-            ));
-        }
-        if !inspect_in(dir, "config.toml.bak")? && has_evidence(&inventory) {
+    let first_run = match config_recovery::recover_locked(dir)? {
+        config_recovery::RecoveryOutcome::Present
+        | config_recovery::RecoveryOutcome::Restored { .. } => false,
+        config_recovery::RecoveryOutcome::Missing { evidence: true } => {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "configuration is missing and recovery artifacts need review",
             ));
         }
-        !has_evidence(&inventory)
+        config_recovery::RecoveryOutcome::Missing { evidence: false } => {
+            let template = format!(
+                "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
+            );
+            let mut text = island_core::settings::reset_all(&template);
+            text.push_str("config_version = \"2\"\n");
+            config_commit::commit_primary(dir, &path, &text, None)?;
+            true
+        }
     };
-    recover_in(dir, &path)?;
-    if !inspect_in(dir, PRIMARY_NAME)? {
-        let template = format!(
-            "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
-        );
-        let mut text = island_core::settings::reset_all(&template);
-        text.push_str("config_version = \"2\"\n");
-        config_commit::commit_primary(dir, &path, &text, None)?;
-    }
     Ok((first_run, lock))
 }
 
@@ -536,81 +523,6 @@ fn read_in(dir: &ConfigDir, path: &Path) -> io::Result<String> {
     let mut file = VerifiedFile::open(dir, name(path)?).map_err(io::Error::from)?;
     read_verified(&mut file)
 }
-#[cfg(test)]
-fn recover(path: &Path) -> io::Result<()> {
-    let dir = ConfigDir::open(path.parent().unwrap()).map_err(io::Error::from)?;
-    recover_in(&dir, path)
-}
-/// An incomplete draft is never promoted: recover the last completed file.
-fn recover_in(dir: &ConfigDir, path: &Path) -> io::Result<()> {
-    recover_in_with_hook(
-        dir,
-        path,
-        #[cfg(test)]
-        || {},
-    )
-}
-fn recover_in_with_hook(
-    dir: &ConfigDir,
-    path: &Path,
-    #[cfg(test)] hook: impl FnOnce(),
-) -> io::Result<()> {
-    let backup = path.with_extension("toml.bak");
-    let primary = name(path)?
-        .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid name"))?;
-    let backup_name = name(&backup)?
-        .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid name"))?;
-    if !inspect_in(dir, primary)? && inspect_in(dir, backup_name)? {
-        let mut source = VerifiedFile::open_source(dir, name(&backup)?).map_err(io::Error::from)?;
-        #[cfg(test)]
-        hook();
-        let candidate = read_verified(&mut source)?;
-        match island_core::migration::prepare(&candidate) {
-            Ok(
-                island_core::migration::MigrationOutcome::Prepared { .. }
-                | island_core::migration::MigrationOutcome::AlreadyCurrent,
-            ) => {}
-            Ok(island_core::migration::MigrationOutcome::Future { .. }) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "future configuration backup needs review",
-                ));
-            }
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "configuration backup is invalid",
-                ));
-            }
-        }
-        let security = source.security().map_err(io::Error::from)?;
-        let mut recovery =
-            Draft::create(dir, name(path)?, Some(&security)).map_err(io::Error::from)?;
-        recovery
-            .write(candidate.as_bytes())
-            .map_err(io::Error::from)?;
-        if recovery.read_back().map_err(io::Error::from)? != candidate.as_bytes() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "configuration backup changed during recovery",
-            ));
-        }
-        recovery
-            .rename(
-                dir,
-                name(path)?,
-                Some(&security),
-                Some((source, name(&backup)?)),
-                false,
-                None,
-            )
-            .map_err(io::Error::from)?;
-    }
-    Ok(())
-}
-
 pub fn open_in_editor() {
     let Some(path) = path() else { return };
     // Handing a file to its app can take a while, which the UI must not wait for.
@@ -1016,7 +928,7 @@ pub(crate) mod tests {
             b"config_version = \"2\"\n",
         )
         .unwrap();
-        prepare_storage_at(&base).unwrap();
+        assert!(!prepare_storage_at(&base).unwrap());
         assert!(!base.join("DynamicIsland").exists());
         assert_eq!(std::fs::read(&path).unwrap(), b"config_version = \"2\"\n");
     }
@@ -1761,7 +1673,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         std::fs::remove_file(original.join("settings/config.toml")).unwrap();
-        recover_in(&dir, &path).unwrap();
+        config_recovery::recover_locked(&dir).unwrap();
         assert_eq!(
             read_in(&dir, &path).unwrap(),
             "config_version = \"2\"\n# backup\n"
@@ -1898,7 +1810,7 @@ pub(crate) mod tests {
             .unwrap();
         assert!(expected.same_dacl(&actual));
         std::fs::remove_file(&path).unwrap();
-        recover_in(&dir, &path).unwrap();
+        config_recovery::recover_locked(&dir).unwrap();
         let recovered = VerifiedFile::open(&dir, name(&path).unwrap())
             .unwrap()
             .security()
@@ -2364,7 +2276,7 @@ pub(crate) mod tests {
         let backup = path.with_extension("toml.bak");
         std::fs::write(&backup, "config_version = \"2\"\n").unwrap();
         let dir = ConfigDir::open(&folder).unwrap();
-        let result = recover_in_with_hook(&dir, &path, || {
+        let result = config_recovery::recover_locked_with_hook(&dir, || {
             std::fs::rename(&backup, folder.join("old.toml")).unwrap();
             std::fs::write(&backup, "config_version = \"2\"\n# swapped\n").unwrap();
         });
@@ -2445,7 +2357,8 @@ pub(crate) mod tests {
         std::fs::write(path.with_extension("toml.new"), "partial").unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(!is_new_install(&path));
-        recover(&path).unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        config_recovery::recover_locked(&dir).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "original = \"safe\"\n"

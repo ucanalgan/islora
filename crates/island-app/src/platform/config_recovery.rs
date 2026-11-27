@@ -16,6 +16,73 @@ use super::{
 
 const ROLLING_BACKUP_NAME: &str = "config.toml.bak";
 
+/// What startup or a reload found for the primary after recovery ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryOutcome {
+    /// The primary already existed; nothing was listed or written.
+    Present,
+    /// The primary was missing and was restored from a backup of this schema.
+    Restored { schema: u32 },
+    /// The primary remains missing; evidence excludes stale drafts.
+    Missing { evidence: bool },
+}
+
+pub(crate) fn has_evidence(inventory: &ArtifactInventory) -> bool {
+    let mut without_drafts = inventory.clone();
+    without_drafts.leftover_drafts = 0;
+    without_drafts.has_recovery_artifacts()
+}
+
+/// The caller holds the WriterLock and has already swept stale drafts.
+pub(crate) fn recover_locked(dir: &ConfigDir) -> io::Result<RecoveryOutcome> {
+    recover_locked_with_hook(
+        dir,
+        #[cfg(test)]
+        || {},
+    )
+}
+
+pub(crate) fn recover_locked_with_hook(
+    dir: &ConfigDir,
+    #[cfg(test)] hook: impl FnOnce(),
+) -> io::Result<RecoveryOutcome> {
+    use island_core::config_state::{RecoveryPlan, plan_recovery};
+    if settings::inspect_in(dir, settings::PRIMARY_NAME)? {
+        return Ok(RecoveryOutcome::Present);
+    }
+    let inventory = inventory(dir)?;
+    let candidates = candidates(dir, &inventory);
+    match plan_recovery(&inventory, &candidates) {
+        RecoveryPlan::Blocked => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "configuration recovery artifacts need review",
+        )),
+        RecoveryPlan::Restore {
+            source,
+            schema,
+            fingerprint,
+        } => {
+            let name = match source {
+                CandidateSource::RollingBackup => ROLLING_BACKUP_NAME.to_owned(),
+                CandidateSource::Protected(name) => name.file_name(),
+            };
+            #[cfg(test)]
+            config_commit::restore_primary_with_hook(dir, OsStr::new(&name), fingerprint, hook)?;
+            #[cfg(not(test))]
+            config_commit::restore_primary(dir, OsStr::new(&name), fingerprint)?;
+            if schema == u32::try_from(migration::CURRENT_VERSION).unwrap_or(u32::MAX)
+                && let Err(error) = config_commit::clear_failure(dir)
+            {
+                eprintln!("recovery failure record cleanup failed: {:?}", error.kind());
+            }
+            Ok(RecoveryOutcome::Restored { schema })
+        }
+        RecoveryPlan::NoneValid | RecoveryPlan::NothingToRestore => Ok(RecoveryOutcome::Missing {
+            evidence: has_evidence(&inventory),
+        }),
+    }
+}
+
 /// Classify original bytes with the primary rule, rejecting candidates with no
 /// non-comment, non-blank line retained by the unsupported-line filter. A
 /// supported line is any key = value line accepted by the core parser on its
@@ -95,7 +162,6 @@ fn read_candidate(dir: &ConfigDir, name: &OsStr) -> CandidateValidity {
 
 /// Observe every restore candidate, rolling backup first. Protected validity is
 /// not filtered here; `plan_recovery` applies `protected_validity`.
-#[allow(dead_code)] // Called from recover_locked in 2D-2 S5.
 pub(crate) fn candidates(dir: &ConfigDir, inventory: &ArtifactInventory) -> Vec<RecoveryCandidate> {
     let mut found = Vec::new();
     if inventory.rolling_backup {
@@ -192,6 +258,114 @@ mod tests {
         let path = settings::tests::temp_base();
         let dir = ConfigDir::open(&path).unwrap();
         (path, dir)
+    }
+
+    #[test]
+    fn recover_locked_present_primary_lists_nothing() {
+        let (path, dir) = folder();
+        fs::write(path.join(settings::PRIMARY_NAME), b"existing").unwrap();
+        fs::write(path.join("config.toml.recover"), b"ambiguous").unwrap();
+        assert_eq!(recover_locked(&dir).unwrap(), RecoveryOutcome::Present);
+    }
+
+    #[test]
+    fn recover_locked_missing_reports_evidence() {
+        let (path, dir) = folder();
+        assert_eq!(
+            recover_locked(&dir).unwrap(),
+            RecoveryOutcome::Missing { evidence: false }
+        );
+        fs::write(path.join("config.toml.1-2-3.tmp"), b"draft").unwrap();
+        assert_eq!(
+            recover_locked(&dir).unwrap(),
+            RecoveryOutcome::Missing { evidence: false }
+        );
+        fs::write(path.join(config_commit::FAILURE_RECORD_NAME), b"failure").unwrap();
+        assert_eq!(
+            recover_locked(&dir).unwrap(),
+            RecoveryOutcome::Missing { evidence: true }
+        );
+    }
+
+    #[test]
+    fn recover_locked_blocked_is_invalid_data() {
+        for ambiguous in [true, false] {
+            let (path, dir) = folder();
+            let first = b"config_version = \"2\"\n# first\n";
+            let second = b"config_version = \"2\"\n# second\n";
+            let files = if ambiguous {
+                vec![
+                    (ROLLING_BACKUP_NAME.to_owned(), first.as_slice()),
+                    ("config.toml.bak.new".to_owned(), second.as_slice()),
+                ]
+            } else {
+                vec![
+                    (
+                        ProtectedBackupName::new(3, 2, ChangeFingerprint::of(first))
+                            .unwrap()
+                            .file_name(),
+                        first.as_slice(),
+                    ),
+                    (
+                        ProtectedBackupName::new(3, 2, ChangeFingerprint::of(second))
+                            .unwrap()
+                            .file_name(),
+                        second.as_slice(),
+                    ),
+                ]
+            };
+            for (name, bytes) in &files {
+                fs::write(path.join(name), bytes).unwrap();
+            }
+            assert_eq!(
+                recover_locked(&dir).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert!(!path.join(settings::PRIMARY_NAME).exists());
+            assert_eq!(fs::read_dir(&*path).unwrap().count(), files.len());
+            for (name, bytes) in files {
+                assert_eq!(fs::read(path.join(name)).unwrap(), bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn recover_locked_clear_error_keeps_restore() {
+        let (path, dir) = folder();
+        let bytes = b"config_version = \"2\"\n";
+        fs::write(path.join(ROLLING_BACKUP_NAME), bytes).unwrap();
+        fs::create_dir(path.join(config_commit::FAILURE_RECORD_NAME)).unwrap();
+        assert_eq!(
+            recover_locked(&dir).unwrap(),
+            RecoveryOutcome::Restored { schema: 2 }
+        );
+        assert_eq!(fs::read(path.join(settings::PRIMARY_NAME)).unwrap(), bytes);
+        assert!(path.join(config_commit::FAILURE_RECORD_NAME).is_dir());
+    }
+
+    #[test]
+    fn recover_locked_stops_after_restore_error() {
+        let (path, dir) = folder();
+        let original = b"config_version = \"2\"\n";
+        let protected = b"config_version = \"2\"\n# protected\n";
+        let backup = path.join(ROLLING_BACKUP_NAME);
+        let name = ProtectedBackupName::new(1, 2, ChangeFingerprint::of(protected))
+            .unwrap()
+            .file_name();
+        fs::write(&backup, original).unwrap();
+        fs::write(path.join(&name), protected).unwrap();
+        let result = recover_locked_with_hook(&dir, || {
+            fs::remove_file(&backup).unwrap();
+            fs::write(&backup, b"config_version = \"2\"\n# swapped\n").unwrap();
+        });
+        assert!(result.is_err());
+        assert!(!path.join(settings::PRIMARY_NAME).exists());
+        assert_eq!(
+            fs::read(&backup).unwrap(),
+            b"config_version = \"2\"\n# swapped\n"
+        );
+        assert_eq!(fs::read(path.join(name)).unwrap(), protected);
+        assert_eq!(fs::read_dir(&*path).unwrap().count(), 2);
     }
 
     #[test]

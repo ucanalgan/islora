@@ -2178,7 +2178,17 @@ mod tests {
     }
 
     fn acceptance_write_protected(folder: &Path, sequence: u32, source: &str) -> String {
-        let name = acceptance_backup(sequence, source).file_name();
+        let schema = match island_core::migration::prepare(source).unwrap() {
+            island_core::migration::MigrationOutcome::AlreadyCurrent => 2,
+            island_core::migration::MigrationOutcome::Prepared { .. } => 1,
+            island_core::migration::MigrationOutcome::Future { .. } => {
+                panic!("unexpected future fixture")
+            }
+        };
+        let name =
+            ProtectedBackupName::new(sequence, schema, ChangeFingerprint::of(source.as_bytes()))
+                .unwrap()
+                .file_name();
         let path = folder.join(&name);
         fs::write(&path, source).unwrap();
         let mut permissions = fs::metadata(&path).unwrap().permissions();
@@ -2309,7 +2319,7 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_q_recovery_evidence_without_rolling_backup_stays_recovery() {
+    fn acceptance_q_protected_legacy_restores_with_migration_suppressed() {
         let _serial = TEST_WRITER_SERIAL
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -2321,15 +2331,248 @@ mod tests {
         let failure = acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1);
         fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), &failure).unwrap();
         let expected = [
+            (settings::PRIMARY_NAME, ACCEPTANCE_LEGACY),
             (protected.as_str(), ACCEPTANCE_LEGACY),
             (config_commit::FAILURE_RECORD_NAME, failure.as_str()),
         ];
+        for _ in 0..2 {
+            assert_acceptance_snapshot(
+                &bootstrap_at(&base, true),
+                RuntimeMode::LegacyCompatible,
+                ACCEPTANCE_LEGACY,
+                MigrationReport::Fallback(FallbackReason::Suppressed),
+                true,
+            );
+            assert_acceptance_files(&folder, &expected);
+        }
+    }
+
+    fn acceptance_t_fixture() -> (settings::tests::Temp, PathBuf) {
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        (base, folder)
+    }
+
+    fn acceptance_t_normal_twice(
+        base: &Path,
+        folder: &Path,
+        source: &str,
+        expected: &[(&str, &str)],
+    ) {
+        for _ in 0..2 {
+            assert_acceptance_snapshot(
+                &bootstrap_at(base, true),
+                RuntimeMode::Normal,
+                source,
+                MigrationReport::NotNeeded,
+                true,
+            );
+            assert_acceptance_files(folder, expected);
+        }
+    }
+
+    #[test]
+    fn acceptance_t_protected_backup_restores_when_rolling_missing() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_t_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let current = acceptance_current();
+        let name = acceptance_write_protected(&folder, 1, &current);
+        acceptance_t_normal_twice(
+            &base,
+            &folder,
+            &current,
+            &[(settings::PRIMARY_NAME, &current), (&name, &current)],
+        );
+    }
+
+    #[test]
+    fn acceptance_t_newest_protected_backup_wins() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_t_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let first = "config_version = \"2\"\n# first\n";
+        let second = "config_version = \"2\"\n# second\n";
+        let a = acceptance_write_protected(&folder, 1, first);
+        let b = acceptance_write_protected(&folder, 2, second);
+        acceptance_t_normal_twice(
+            &base,
+            &folder,
+            second,
+            &[(settings::PRIMARY_NAME, second), (&a, first), (&b, second)],
+        );
+    }
+
+    #[test]
+    fn acceptance_t_valid_rolling_backup_beats_protected() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_t_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let current = acceptance_current();
+        let protected = acceptance_write_protected(&folder, 1, &current);
+        let rolling = "config_version = \"2\"\n# rolling\n";
+        fs::write(folder.join("config.toml.bak"), rolling).unwrap();
+        acceptance_t_normal_twice(
+            &base,
+            &folder,
+            rolling,
+            &[
+                (settings::PRIMARY_NAME, rolling),
+                ("config.toml.bak", rolling),
+                (&protected, &current),
+            ],
+        );
+    }
+
+    #[test]
+    fn acceptance_t_invalid_rolling_backup_falls_back_to_protected() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for rolling in [
+            "config_version = \"99\"\n",
+            "config_version = \"2\"\nconfig_version = \"2\"\n",
+        ] {
+            let (base, folder) = acceptance_t_fixture();
+            let _cleanup = RemoveProtectedReadOnly(folder.clone());
+            let current = acceptance_current();
+            let protected = acceptance_write_protected(&folder, 1, &current);
+            fs::write(folder.join("config.toml.bak"), rolling).unwrap();
+            acceptance_t_normal_twice(
+                &base,
+                &folder,
+                &current,
+                &[
+                    (settings::PRIMARY_NAME, &current),
+                    ("config.toml.bak", rolling),
+                    (&protected, &current),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn acceptance_t_equal_top_sequence_blocks_restore() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_t_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let atext = "config_version = \"2\"\n# a\n";
+        let btext = "config_version = \"2\"\n# b\n";
+        let a = acceptance_write_protected(&folder, 2, atext);
+        let b = acceptance_write_protected(&folder, 2, btext);
         for _ in 0..2 {
             acceptance_assert_recovery(
                 bootstrap_at(&base, true),
                 &folder.join(settings::PRIMARY_NAME),
             );
-            assert_acceptance_files(&folder, &expected);
+            assert_acceptance_files(&folder, &[(&a, atext), (&b, btext)]);
+        }
+    }
+
+    #[test]
+    fn acceptance_t_unsupported_lines_are_restored_verbatim() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_t_fixture();
+        let rolling = "config_version = \"2\"\r\nunsupported line\r\n";
+        fs::write(folder.join("config.toml.bak"), rolling).unwrap();
+        acceptance_t_normal_twice(
+            &base,
+            &folder,
+            rolling,
+            &[
+                (settings::PRIMARY_NAME, rolling),
+                ("config.toml.bak", rolling),
+            ],
+        );
+    }
+
+    #[test]
+    fn acceptance_t_current_restore_clears_failure_record() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_t_fixture();
+        let current = acceptance_current();
+        fs::write(folder.join("config.toml.bak"), &current).unwrap();
+        fs::write(
+            folder.join(config_commit::FAILURE_RECORD_NAME),
+            acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1),
+        )
+        .unwrap();
+        acceptance_t_normal_twice(
+            &base,
+            &folder,
+            &current,
+            &[
+                (settings::PRIMARY_NAME, &current),
+                ("config.toml.bak", &current),
+            ],
+        );
+    }
+
+    #[test]
+    fn acceptance_t_legacy_restore_keeps_suppressing_failure_record() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_t_fixture();
+        let failure = acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1);
+        fs::write(folder.join("config.toml.bak"), ACCEPTANCE_LEGACY).unwrap();
+        fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), &failure).unwrap();
+        for _ in 0..2 {
+            assert_acceptance_snapshot(
+                &bootstrap_at(&base, true),
+                RuntimeMode::LegacyCompatible,
+                ACCEPTANCE_LEGACY,
+                MigrationReport::Fallback(FallbackReason::Suppressed),
+                true,
+            );
+            assert_acceptance_files(
+                &folder,
+                &[
+                    (settings::PRIMARY_NAME, ACCEPTANCE_LEGACY),
+                    ("config.toml.bak", ACCEPTANCE_LEGACY),
+                    (config_commit::FAILURE_RECORD_NAME, &failure),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn acceptance_t_misnamed_protected_backup_is_not_restored() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (base, folder) = acceptance_t_fixture();
+        let _cleanup = RemoveProtectedReadOnly(folder.clone());
+        let name = acceptance_write_protected(&folder, 1, "config_version = \"2\"\n# name\n");
+        let path = folder.join(&name);
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
+        let actual = "config_version = \"2\"\n# actual\n";
+        fs::write(&path, actual).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+        for _ in 0..2 {
+            acceptance_assert_recovery(
+                bootstrap_at(&base, true),
+                &folder.join(settings::PRIMARY_NAME),
+            );
+            assert_acceptance_files(&folder, &[(&name, actual)]);
         }
     }
 
@@ -2367,7 +2610,10 @@ mod tests {
         let failure = acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1);
         fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), &failure).unwrap();
         let path = folder.join(settings::PRIMARY_NAME);
+        let ambiguous = folder.join("config.toml.recover");
+        fs::write(&ambiguous, b"ambiguous").unwrap();
         let initial = bootstrap_at(&base, true);
+        fs::remove_file(&ambiguous).unwrap();
         assert_eq!(initial.mode(), &RuntimeMode::Recovery);
         assert_eq!(initial.text(), None);
         assert!(!initial.writes_allowed());
@@ -2441,7 +2687,10 @@ mod tests {
         let failure = acceptance_failure(FailureStage::Commit, ACCEPTANCE_LEGACY, 1);
         fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), &failure).unwrap();
         let path = folder.join(settings::PRIMARY_NAME);
+        let ambiguous = folder.join("config.toml.recover");
+        fs::write(&ambiguous, b"ambiguous").unwrap();
         let initial = bootstrap_at(&base, true);
+        fs::remove_file(&ambiguous).unwrap();
         assert_eq!(initial.mode(), &RuntimeMode::Recovery);
         assert_eq!(initial.text(), None);
         assert!(!initial.writes_allowed());

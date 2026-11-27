@@ -245,7 +245,6 @@ pub(crate) fn commit_primary_with_hook(
 /// fingerprint it observed. The backup is only read: it is never deleted, renamed or
 /// changed, and its attributes stay as they are. The primary is created only if it does
 /// not exist (no-replace rename) and is verified after the rename.
-#[allow(dead_code)] // Called from recover_locked in 2D-2 S5.
 pub(crate) fn restore_primary(
     dir: &ConfigDir,
     source_name: &std::ffi::OsStr,
@@ -260,7 +259,7 @@ pub(crate) fn restore_primary(
     )
 }
 
-fn restore_primary_with_hook(
+pub(crate) fn restore_primary_with_hook(
     dir: &ConfigDir,
     source_name: &std::ffi::OsStr,
     expected: island_core::config_state::ChangeFingerprint,
