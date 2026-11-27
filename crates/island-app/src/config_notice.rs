@@ -110,7 +110,7 @@ impl ConfigStatus {
             ),
             Self::Recovery => (
                 "Ayar dosyas\u{131} onar\u{131}m bekliyor; de\u{11f}i\u{15f}iklikler kaydedilmiyor.",
-                "Dosyay\u{131} \"Ayar dosyas\u{131}n\u{131} a\u{e7}\" ile d\u{fc}zeltip Islora'y\u{131} yeniden ba\u{15f}lat\u{131}n.",
+                "Dosyay\u{131} d\u{fc}zeltip 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin.",
             ),
             Self::ReadOnly => (
                 "Ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait; salt okunur.",
@@ -118,7 +118,7 @@ impl ConfigStatus {
             ),
             Self::RestartNeeded => (
                 "Ayarlar \u{15f}u anda kaydedilemiyor.",
-                "Islora'y\u{131} yeniden ba\u{15f}lat\u{131}n.",
+                "'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin.",
             ),
         }
     }
@@ -475,8 +475,18 @@ mod tests {
                     !line.contains("config.toml")
                         && !line.contains('\\')
                         && !line.contains(".toml")
+                        && !line.contains(".bak")
                 );
             }
+        }
+    }
+
+    #[test]
+    fn reload_texts_name_the_reload_action() {
+        for status in [ConfigStatus::Recovery, ConfigStatus::RestartNeeded] {
+            let line = status.lines().1;
+            assert!(line.contains("'Takvimi ve ayarlar\u{131} yenile'"));
+            assert!(!line.contains("yeniden ba\u{15f}lat"));
         }
     }
 
@@ -521,7 +531,7 @@ mod tests {
             ConfigStatus::Recovery.lines(),
             (
                 "Ayar dosyas\u{131} onar\u{131}m bekliyor; de\u{11f}i\u{15f}iklikler kaydedilmiyor.",
-                "Dosyay\u{131} \"Ayar dosyas\u{131}n\u{131} a\u{e7}\" ile d\u{fc}zeltip Islora'y\u{131} yeniden ba\u{15f}lat\u{131}n."
+                "Dosyay\u{131} d\u{fc}zeltip 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin."
             )
         );
         assert_eq!(
@@ -535,7 +545,7 @@ mod tests {
             ConfigStatus::RestartNeeded.lines(),
             (
                 "Ayarlar \u{15f}u anda kaydedilemiyor.",
-                "Islora'y\u{131} yeniden ba\u{15f}lat\u{131}n."
+                "'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin."
             )
         );
     }
