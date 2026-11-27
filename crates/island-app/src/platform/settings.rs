@@ -198,6 +198,10 @@ pub fn first_run() -> bool {
 static PREPARATION_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static STORAGE_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
+pub(crate) fn mark_storage_prepared() {
+    STORAGE_STATE.store(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) fn is_stale_draft_name(name: &std::ffi::OsStr) -> bool {
     let value = name.to_string_lossy();
     if let Some(unique) = value
@@ -215,6 +219,16 @@ pub(crate) fn is_stale_draft_name(name: &std::ffi::OsStr) -> bool {
                 .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
     } else {
         false
+    }
+}
+
+pub(crate) fn sweep_stale_drafts(dir: &ConfigDir) {
+    if let Ok(entries) = dir.entries() {
+        for entry in entries {
+            if is_stale_draft_name(&entry) {
+                let _ = VerifiedFile::delete_verified(dir, &entry);
+            }
+        }
     }
 }
 
@@ -238,13 +252,7 @@ pub(crate) fn prepare_storage_locked(base: &Path) -> io::Result<(bool, WriterLoc
     let lock = WriterLock::with_mutex(&folder, mutex).map_err(io::Error::from)?;
     let path = folder.join(PRIMARY_NAME);
     let dir = lock.directory();
-    if let Ok(entries) = dir.entries() {
-        for entry in entries {
-            if is_stale_draft_name(&entry) {
-                let _ = VerifiedFile::delete_verified(dir, &entry);
-            }
-        }
-    }
+    sweep_stale_drafts(dir);
     let first_run = match config_recovery::recover_locked(dir)? {
         config_recovery::RecoveryOutcome::Present
         | config_recovery::RecoveryOutcome::Restored { .. } => false,

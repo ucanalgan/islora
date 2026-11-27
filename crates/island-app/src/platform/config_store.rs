@@ -88,7 +88,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::config_fs::{ConfigDir, VerifiedFile, WriterLock};
+use super::config_fs::{ConfigDir, VerifiedFile, WriterLock, WriterMutex};
 use super::settings;
 use island_core::config_state::{ArtifactInventory, plan_startup};
 
@@ -360,7 +360,7 @@ fn install_newer(
     snapshot
 }
 
-/// Acceptance row #26: live recovery is not implemented yet.
+/// Refresh never restores the primary; Reload can run recovery under the writer lock.
 /// A missing primary on refresh was removed mid-session, so it is Recovery, never a new install.
 fn refresh_mode(observation: &PrimaryObservation, inventory: &ArtifactInventory) -> RuntimeMode {
     if matches!(observation, PrimaryObservation::Missing) {
@@ -375,7 +375,7 @@ fn observe_refresh(
     previous: Option<&ConfigSnapshot>,
     sequence: u64,
 ) -> ConfigSnapshot {
-    // A preparation failure remains refused until restart.
+    // A preparation failure remains refused until a locked reload or restart.
     let mut storage_ready = previous.is_some_and(|snapshot| snapshot.storage_ready);
     let result = folder.and_then(|path| ConfigDir::open(&path).map_err(io::Error::from));
     let (read, inventory) = match result {
@@ -458,6 +458,93 @@ fn refresh_in(slot: &Mutex<Option<Arc<ConfigSnapshot>>>, base: &Path) -> Arc<Con
 // Installs are still ordered by the write sequence.
 pub(crate) fn refresh() -> Arc<ConfigSnapshot> {
     refresh_folder(&STORE, config_folder())
+}
+
+/// What a Reload did. Every variant carries the snapshot installed afterwards.
+#[allow(dead_code)] // Called from App::reload in 2D-2 S7.
+#[derive(Debug)]
+pub(crate) enum ReloadOutcome {
+    /// The ready, non-Recovery primary was refreshed without taking the lock.
+    Refreshed(Arc<ConfigSnapshot>),
+    /// Recovery ran under the lock and the primary is present; the report is freshly NotNeeded.
+    Repaired(Arc<ConfigSnapshot>),
+    /// The lock was busy or recovery failed; the refreshed snapshot remains installed.
+    StillRefused(Arc<ConfigSnapshot>, FallbackReason),
+}
+
+fn reload_folder(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    folder: io::Result<PathBuf>,
+) -> ReloadOutcome {
+    reload_folder_with(slot, folder, settings::mark_storage_prepared)
+}
+
+fn reload_folder_with(
+    slot: &Mutex<Option<Arc<ConfigSnapshot>>>,
+    folder: io::Result<PathBuf>,
+    mark_prepared: impl FnOnce(),
+) -> ReloadOutcome {
+    let folder = match folder {
+        Ok(folder) => folder,
+        Err(error) => {
+            return ReloadOutcome::StillRefused(
+                refresh_folder(slot, Err(error)),
+                FallbackReason::Unprepared,
+            );
+        }
+    };
+    let refreshed = refresh_folder(slot, Ok(folder.clone()));
+    if refreshed.storage_ready && refreshed.mode != RuntimeMode::Recovery {
+        return ReloadOutcome::Refreshed(refreshed);
+    }
+    if !folder.is_dir() {
+        return ReloadOutcome::StillRefused(refreshed, FallbackReason::Unprepared);
+    }
+    let result = WriterMutex::acquire().and_then(|mutex| WriterLock::with_mutex(&folder, mutex));
+    let lock = match result {
+        Ok(lock) => lock,
+        Err(error) => {
+            let error = io::Error::from(error);
+            let reason = if error.kind() == io::ErrorKind::WouldBlock
+                || matches!(error.raw_os_error(), Some(32 | 33))
+            {
+                FallbackReason::Busy
+            } else {
+                FallbackReason::Unprepared
+            };
+            return ReloadOutcome::StillRefused(refreshed, reason);
+        }
+    };
+    let dir = lock.directory();
+    settings::sweep_stale_drafts(dir);
+    match config_recovery::recover_locked(dir) {
+        Ok(
+            config_recovery::RecoveryOutcome::Present
+            | config_recovery::RecoveryOutcome::Restored { .. },
+        ) => {}
+        Ok(config_recovery::RecoveryOutcome::Missing { .. }) | Err(_) => {
+            return ReloadOutcome::StillRefused(refreshed, FallbackReason::Unprepared);
+        }
+    }
+    let mut snapshot = observe_directory(dir, false, next_sequence(), &mut || {}).0;
+    snapshot.storage_ready = snapshot.text.is_some();
+    snapshot.migration_report = Arc::new(Mutex::new(Some(MigrationReport::NotNeeded)));
+    let installed = install_newer(slot, Arc::new(snapshot));
+    if installed.storage_ready {
+        mark_prepared();
+    }
+    drop(lock);
+    ReloadOutcome::Repaired(installed)
+}
+
+#[cfg(test)]
+fn reload_in(slot: &Mutex<Option<Arc<ConfigSnapshot>>>, base: &Path) -> ReloadOutcome {
+    reload_folder_with(slot, Ok(base.join("Islora")), || {})
+}
+
+#[allow(dead_code)] // Called from App::reload in 2D-2 S7.
+pub(crate) fn reload() -> ReloadOutcome {
+    reload_folder(&STORE, config_folder())
 }
 
 fn read_locked(lock: &WriterLock, path: &Path) -> io::Result<String> {
@@ -2598,7 +2685,306 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_r_live_repair_needs_restart() {
+    fn acceptance_u_normal_reload_takes_no_lock() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let snapshot = bootstrap_at(&base, true);
+        let slot = Mutex::new(Some(Arc::new(snapshot)));
+        let _lock = WriterLock::acquire(&base.join("Islora")).unwrap();
+        let outcome = std::thread::scope(|s| s.spawn(|| reload_in(&slot, &base)).join().unwrap());
+        let ReloadOutcome::Refreshed(snapshot) = outcome else {
+            panic!("expected refresh")
+        };
+        assert_eq!(snapshot.mode(), &RuntimeMode::Normal);
+        assert!(snapshot.writes_allowed());
+    }
+
+    #[test]
+    fn acceptance_u_reload_restores_deleted_primary() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, true))));
+        let folder = base.join("Islora");
+        let primary = folder.join(settings::PRIMARY_NAME);
+        let current = acceptance_current();
+        fs::write(folder.join("config.toml.bak"), &current).unwrap();
+        fs::remove_file(&primary).unwrap();
+        assert_eq!(refresh_in(&slot, &base).mode(), &RuntimeMode::Recovery);
+        let ReloadOutcome::Repaired(snapshot) = reload_in(&slot, &base) else {
+            panic!("expected repair")
+        };
+        assert_eq!(fs::read(&primary).unwrap(), current.as_bytes());
+        assert_eq!(
+            fs::read(folder.join("config.toml.bak")).unwrap(),
+            current.as_bytes()
+        );
+        assert_eq!(snapshot.mode(), &RuntimeMode::Normal);
+        assert!(snapshot.writes_allowed());
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+    }
+
+    #[test]
+    fn acceptance_u_reload_after_unprepared_start() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let current = acceptance_current();
+        fs::write(folder.join(settings::PRIMARY_NAME), &current).unwrap();
+        let lock = WriterLock::acquire(&folder).unwrap();
+        let initial = std::thread::scope(|s| s.spawn(|| bootstrap_at(&base, true)).join().unwrap());
+        assert!(!initial.storage_ready);
+        assert!(!initial.writes_allowed());
+        drop(lock);
+        let slot = Mutex::new(Some(Arc::new(initial)));
+        let ReloadOutcome::Repaired(snapshot) = reload_in(&slot, &base) else {
+            panic!("expected repair")
+        };
+        assert!(snapshot.storage_ready && snapshot.writes_allowed());
+        assert_eq!(
+            fs::read(folder.join(settings::PRIMARY_NAME)).unwrap(),
+            current.as_bytes()
+        );
+    }
+
+    #[test]
+    fn acceptance_u_busy_reload_stays_refused() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, true))));
+        let current = acceptance_current();
+        fs::write(folder.join("config.toml.bak"), &current).unwrap();
+        fs::remove_file(folder.join(settings::PRIMARY_NAME)).unwrap();
+        let lock = WriterLock::acquire(&folder).unwrap();
+        let outcome = std::thread::scope(|s| s.spawn(|| reload_in(&slot, &base)).join().unwrap());
+        let ReloadOutcome::StillRefused(snapshot, FallbackReason::Busy) = outcome else {
+            panic!("expected busy")
+        };
+        assert_eq!(snapshot.mode(), &RuntimeMode::Recovery);
+        assert!(!snapshot.writes_allowed());
+        assert!(!folder.join(settings::PRIMARY_NAME).exists());
+        assert_eq!(
+            fs::read(folder.join("config.toml.bak")).unwrap(),
+            current.as_bytes()
+        );
+        drop(lock);
+    }
+
+    #[test]
+    fn acceptance_u_blocked_reload_stays_refused() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, true))));
+        let current = acceptance_current();
+        fs::write(folder.join("config.toml.bak"), &current).unwrap();
+        fs::write(folder.join("config.toml.recover"), b"ambiguous").unwrap();
+        fs::remove_file(folder.join(settings::PRIMARY_NAME)).unwrap();
+        let ReloadOutcome::StillRefused(snapshot, FallbackReason::Unprepared) =
+            reload_in(&slot, &base)
+        else {
+            panic!("expected refusal")
+        };
+        assert_eq!(snapshot.mode(), &RuntimeMode::Recovery);
+        assert!(!snapshot.writes_allowed());
+        assert_acceptance_files(
+            &folder,
+            &[
+                ("config.toml.bak", &current),
+                ("config.toml.recover", "ambiguous"),
+            ],
+        );
+    }
+
+    #[test]
+    fn acceptance_u_legacy_restore_on_reload_is_not_migrated() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, true))));
+        fs::write(folder.join("config.toml.bak"), ACCEPTANCE_LEGACY).unwrap();
+        fs::remove_file(folder.join(settings::PRIMARY_NAME)).unwrap();
+        let ReloadOutcome::Repaired(snapshot) = reload_in(&slot, &base) else {
+            panic!("expected repair")
+        };
+        assert_eq!(snapshot.mode(), &RuntimeMode::LegacyCompatible);
+        assert!(snapshot.writes_allowed());
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_acceptance_files(
+            &folder,
+            &[
+                (settings::PRIMARY_NAME, ACCEPTANCE_LEGACY),
+                ("config.toml.bak", ACCEPTANCE_LEGACY),
+            ],
+        );
+    }
+
+    #[test]
+    fn acceptance_u_reload_never_creates_folder_or_template() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        let slot = Mutex::new(Some(Arc::new(observe_folder(Ok(folder.clone()), false))));
+        let ReloadOutcome::StillRefused(snapshot, FallbackReason::Unprepared) =
+            reload_in(&slot, &base)
+        else {
+            panic!("expected refusal")
+        };
+        assert!(!snapshot.writes_allowed());
+        assert!(!folder.exists());
+        fs::create_dir(&folder).unwrap();
+        let ReloadOutcome::StillRefused(snapshot, FallbackReason::Unprepared) =
+            reload_in(&slot, &base)
+        else {
+            panic!("expected refusal")
+        };
+        assert_eq!(snapshot.mode(), &RuntimeMode::Recovery);
+        assert!(!snapshot.writes_allowed());
+        assert!(!folder.join(settings::PRIMARY_NAME).exists());
+        assert_acceptance_files(&folder, &[]);
+    }
+
+    #[test]
+    fn missing_reload_retains_last_known_text() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let initial = Arc::new(bootstrap_at(&base, true));
+        let old_text = initial.text().unwrap().to_owned();
+        let slot = Mutex::new(Some(initial));
+        fs::remove_file(base.join("Islora").join(settings::PRIMARY_NAME)).unwrap();
+        let ReloadOutcome::StillRefused(snapshot, FallbackReason::Unprepared) =
+            reload_in(&slot, &base)
+        else {
+            panic!("expected refusal");
+        };
+        assert_eq!(snapshot.text(), Some(old_text.as_str()));
+        assert_eq!(snapshot.mode(), &RuntimeMode::Recovery);
+        assert!(!snapshot.writes_allowed());
+        assert!(Arc::ptr_eq(
+            &snapshot,
+            slot.lock().unwrap().as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn reload_updates_production_storage_gate_only_after_repair() {
+        const CHILD: &str = "ISLORA_TEST_RELOAD_STORAGE_GATE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let _serial = TEST_WRITER_SERIAL
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let base = settings::tests::temp_base();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("platform::config_store::tests::reload_updates_production_storage_gate_only_after_repair")
+                .env(CHILD, "1")
+                .env("APPDATA", &*base)
+                .env("LOCALAPPDATA", &*base)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = PathBuf::from(std::env::var_os("APPDATA").unwrap());
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        let current = acceptance_current();
+        fs::write(folder.join("config.toml.bak"), &current).unwrap();
+        let ambiguous = folder.join("config.toml.recover");
+        fs::write(&ambiguous, b"ambiguous").unwrap();
+        let snapshot = bootstrap_prepared(
+            &base,
+            settings::prepare_storage_locked_recorded(&base),
+            true,
+            || {},
+        );
+        assert!(!settings::storage_writable());
+        let slot = Mutex::new(Some(Arc::new(snapshot)));
+        assert!(matches!(
+            reload_folder(&slot, Ok(folder.clone())),
+            ReloadOutcome::StillRefused(_, FallbackReason::Unprepared)
+        ));
+        assert!(!settings::storage_writable());
+        fs::remove_file(ambiguous).unwrap();
+        assert!(matches!(
+            reload_folder(&slot, Ok(folder.clone())),
+            ReloadOutcome::Repaired(_)
+        ));
+        assert!(settings::storage_writable());
+        assert_eq!(
+            fs::read(folder.join(settings::PRIMARY_NAME)).unwrap(),
+            current.as_bytes()
+        );
+    }
+
+    #[test]
+    fn acceptance_u_stale_report_is_replaced() {
+        let _serial = TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let base = settings::tests::temp_base();
+        let folder = base.join("Islora");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join(settings::PRIMARY_NAME), acceptance_current()).unwrap();
+        let lock = WriterLock::acquire(&folder).unwrap();
+        let initial = std::thread::scope(|s| s.spawn(|| bootstrap_at(&base, true)).join().unwrap());
+        assert_eq!(
+            *initial.migration_report.lock().unwrap(),
+            Some(MigrationReport::Fallback(FallbackReason::Busy))
+        );
+        drop(lock);
+        let old = Arc::new(initial);
+        let slot = Mutex::new(Some(Arc::clone(&old)));
+        let ReloadOutcome::Repaired(snapshot) = reload_in(&slot, &base) else {
+            panic!("expected repair")
+        };
+        assert!(!Arc::ptr_eq(
+            &old.migration_report,
+            &snapshot.migration_report
+        ));
+        assert_eq!(
+            snapshot.take_migration_report(),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(
+            old.take_migration_report(),
+            Some(MigrationReport::Fallback(FallbackReason::Busy))
+        );
+    }
+
+    #[test]
+    fn acceptance_r_live_repair_by_reload() {
         let _serial = TEST_WRITER_SERIAL
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -2647,7 +3033,9 @@ mod tests {
         ));
         assert_acceptance_files(&folder, &expected);
 
-        let restarted = bootstrap_at(&base, true);
+        let ReloadOutcome::Repaired(restarted) = reload_in(&slot, &base) else {
+            panic!("expected repair")
+        };
         assert_acceptance_snapshot(
             &restarted,
             RuntimeMode::Normal,
@@ -2656,7 +3044,7 @@ mod tests {
             true,
         );
         assert_acceptance_files(&folder, &expected);
-        let restarted_slot = Mutex::new(Some(Arc::new(restarted)));
+        let restarted_slot = Mutex::new(Some(restarted));
         update_in(&restarted_slot, &path, "indicator_style", "edge").unwrap();
         let updated = text_in(&restarted_slot).unwrap();
         assert_eq!(
