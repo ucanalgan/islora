@@ -9,6 +9,7 @@ use island_core::migration::{MigrationError, MigrationOutcome};
 
 use super::config_commit;
 use super::config_migrate::{self, FallbackReason, MigrationReport};
+use super::config_recovery;
 use super::settings::{classify_ignoring_unsupported, prepared_write, read_verified};
 
 /// Classify the result of reading the primary configuration.
@@ -89,7 +90,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use super::config_fs::{ConfigDir, VerifiedFile, WriterLock};
 use super::settings;
-use island_core::config_state::{ArtifactInventory, ProtectedBackupName, plan_startup};
+use island_core::config_state::{ArtifactInventory, plan_startup};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -152,37 +153,6 @@ impl fmt::Debug for ConfigSnapshot {
     }
 }
 
-fn inventory(dir: &ConfigDir) -> ArtifactInventory {
-    let mut inventory = ArtifactInventory {
-        // Filled from the single inventory in 2D-2 S2; settings.rs still blocks these today.
-        ambiguous_leftovers: false,
-        ..Default::default()
-    };
-    if let Ok(entries) = dir.entries() {
-        for name in entries {
-            if name.eq_ignore_ascii_case("config.toml.bak") {
-                inventory.rolling_backup = true;
-            }
-            if let Some(parsed) = name.to_str().and_then(ProtectedBackupName::parse) {
-                inventory.protected_backups.push(parsed);
-            }
-            // Count failure-record presence as evidence without interpreting its contents.
-            if name.eq_ignore_ascii_case(config_commit::FAILURE_RECORD_NAME) {
-                inventory.failure_record_present = true;
-            }
-            if settings::is_stale_draft_name(&name) {
-                inventory.leftover_drafts += 1;
-            }
-        }
-    }
-    if let island_core::config_state::StoredFailure::Valid(record) =
-        config_commit::read_failure(dir)
-    {
-        inventory.recorded_failure = Some(record.source);
-    }
-    inventory
-}
-
 fn observe_folder(folder: io::Result<PathBuf>, storage_ready: bool) -> ConfigSnapshot {
     observe_folder_at(folder, storage_ready, next_sequence())
 }
@@ -216,7 +186,7 @@ fn observe_directory(
     checkpoint: &mut impl FnMut(),
 ) -> (ConfigSnapshot, StartupOutcome) {
     checkpoint();
-    let inventory = inventory(dir);
+    let inventory = config_recovery::inventory_or_closed(dir);
     checkpoint();
     let read = VerifiedFile::open(dir, settings::PRIMARY_NAME.as_ref())
         .map_err(io::Error::from)
@@ -410,7 +380,7 @@ fn observe_refresh(
     let result = folder.and_then(|path| ConfigDir::open(&path).map_err(io::Error::from));
     let (read, inventory) = match result {
         Ok(dir) => {
-            let inventory = inventory(&dir);
+            let inventory = config_recovery::inventory_or_closed(&dir);
             let read = VerifiedFile::open(&dir, settings::PRIMARY_NAME.as_ref())
                 .map_err(io::Error::from)
                 .and_then(|mut file| settings::read_verified(&mut file));
@@ -631,7 +601,9 @@ fn finish(
             let inventory = path
                 .parent()
                 .and_then(|p| ConfigDir::open(p).ok())
-                .map_or_else(ArtifactInventory::default, |dir| inventory(&dir));
+                .map_or_else(config_recovery::closed, |dir| {
+                    config_recovery::inventory_or_closed(&dir)
+                });
             let mode = effective_outcome(plan_startup(&observe(Ok(text.clone())), &inventory));
             let snapshot = Arc::new(ConfigSnapshot {
                 sequence,
@@ -1418,7 +1390,11 @@ mod tests {
             read_value(&migrated, "media_layout").as_deref(),
             Some("compact")
         );
-        let protected = || inventory(&ConfigDir::open(&folder).unwrap()).protected_backups;
+        let protected = || {
+            config_recovery::inventory(&ConfigDir::open(&folder).unwrap())
+                .unwrap()
+                .protected_backups
+        };
         let backups = protected();
         assert_eq!(backups.len(), 1);
         let backup = folder.join(backups[0].file_name());
@@ -1611,7 +1587,8 @@ mod tests {
         assert_eq!(refreshed.text().unwrap().as_bytes(), legacy);
         assert_eq!(std::fs::read(&path).unwrap(), legacy);
         assert!(
-            inventory(&ConfigDir::open(&folder).unwrap())
+            config_recovery::inventory(&ConfigDir::open(&folder).unwrap())
+                .unwrap()
                 .protected_backups
                 .is_empty()
         );
@@ -2729,7 +2706,8 @@ mod tests {
         assert!(!snapshot.writes_allowed());
         assert!(!path.exists());
         assert_eq!(
-            inventory(&ConfigDir::open(&folder).unwrap())
+            config_recovery::inventory(&ConfigDir::open(&folder).unwrap())
+                .unwrap()
                 .protected_backups
                 .len(),
             1
@@ -3090,7 +3068,7 @@ mod tests {
             record.encode(),
         )
         .unwrap();
-        let found = inventory(&ConfigDir::open(&base).unwrap());
+        let found = config_recovery::inventory(&ConfigDir::open(&base).unwrap()).unwrap();
         assert_eq!(found.recorded_failure, Some(record.source));
         assert!(found.failure_record_present);
         assert_eq!(found.leftover_drafts, 0);
@@ -3105,7 +3083,7 @@ mod tests {
         let folder = base.join("Islora");
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join(config_commit::FAILURE_RECORD_NAME), b"corrupt").unwrap();
-        let found = inventory(&ConfigDir::open(&folder).unwrap());
+        let found = config_recovery::inventory(&ConfigDir::open(&folder).unwrap()).unwrap();
         assert_eq!(found.recorded_failure, None);
         assert!(found.failure_record_present);
         assert_eq!(found.leftover_drafts, 0);
@@ -3120,8 +3098,10 @@ mod tests {
         let upper = settings::tests::temp_base();
         std::fs::write(lower.join("config.toml.bak"), b"backup").unwrap();
         std::fs::write(upper.join("CONFIG.TOML.BAK"), b"backup").unwrap();
-        let lower_inventory = inventory(&ConfigDir::open(&lower).unwrap());
-        let upper_inventory = inventory(&ConfigDir::open(&upper).unwrap());
+        let lower_inventory =
+            config_recovery::inventory(&ConfigDir::open(&lower).unwrap()).unwrap();
+        let upper_inventory =
+            config_recovery::inventory(&ConfigDir::open(&upper).unwrap()).unwrap();
         assert!(lower_inventory.rolling_backup);
         assert_eq!(upper_inventory, lower_inventory);
     }

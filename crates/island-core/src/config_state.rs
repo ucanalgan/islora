@@ -154,6 +154,8 @@ pub struct ArtifactInventory {
     pub ambiguous_leftovers: bool,
     /// Whether a failure record file exists, readable or not.
     pub failure_record_present: bool,
+    /// Other files that count as evidence but are never restored: `config.toml.new`, or a name that is not valid Unicode.
+    pub other_evidence: bool,
     /// Fingerprint recorded for a previous migration failure, if present.
     pub recorded_failure: Option<ChangeFingerprint>,
 }
@@ -167,6 +169,7 @@ impl ArtifactInventory {
             || self.recorded_failure.is_some()
             || self.ambiguous_leftovers
             || self.failure_record_present
+            || self.other_evidence
     }
 }
 
@@ -778,6 +781,7 @@ mod tests {
                 recorded_failure: Some(f),
                 ambiguous_leftovers: false,
                 failure_record_present: false,
+                other_evidence: false,
             },
         ]
     }
@@ -1448,6 +1452,13 @@ mod tests {
 
     #[test]
     fn has_recovery_artifacts_counts_new_fields() {
+        assert!(
+            ArtifactInventory {
+                other_evidence: true,
+                ..Default::default()
+            }
+            .has_recovery_artifacts()
+        );
         assert!(!ArtifactInventory::default().has_recovery_artifacts());
         assert!(
             ArtifactInventory {

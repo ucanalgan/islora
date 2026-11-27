@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::config_commit;
 use super::config_fs::{ConfigDir, Draft, VerifiedFile, WriterLock, WriterMutex};
+use super::config_recovery;
 #[cfg(test)]
 pub(crate) use super::config_store::locked_update_at;
 #[cfg(test)]
@@ -90,9 +91,16 @@ fn is_new_install(path: &Path) -> bool {
     };
     is_new_install_in(&dir)
 }
+#[cfg(test)]
 fn is_new_install_in(dir: &ConfigDir) -> bool {
     matches!(inspect_in(dir, PRIMARY_NAME), Ok(false))
-        && !has_recovery_artifacts(dir).unwrap_or(true)
+        && !config_recovery::inventory(dir).map_or(true, |i| has_evidence(&i))
+}
+/// Stale drafts never contain restorable content and do not prevent a new install.
+fn has_evidence(inventory: &island_core::config_state::ArtifactInventory) -> bool {
+    let mut without_drafts = inventory.clone();
+    without_drafts.leftover_drafts = 0;
+    without_drafts.has_recovery_artifacts()
 }
 fn inspect_in(dir: &ConfigDir, name: &str) -> io::Result<bool> {
     match VerifiedFile::open(dir, std::ffi::OsStr::new(name)) {
@@ -117,33 +125,6 @@ fn verified_file(path: &Path) -> io::Result<VerifiedFile> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "configuration has no name"))?;
     let dir = ConfigDir::open(parent).map_err(io::Error::from)?;
     VerifiedFile::open(&dir, name).map_err(io::Error::from)
-}
-
-fn has_recovery_artifacts(dir: &ConfigDir) -> io::Result<bool> {
-    artifacts(dir, false)
-}
-fn has_ambiguous_recovery_artifacts(dir: &ConfigDir) -> io::Result<bool> {
-    artifacts(dir, true)
-}
-fn artifacts(dir: &ConfigDir, ambiguous: bool) -> io::Result<bool> {
-    for name in dir.entries().map_err(io::Error::from)? {
-        let Some(name) = name.to_str() else {
-            return Ok(true);
-        };
-        let protected = island_core::config_state::ProtectedBackupName::parse(name).is_some();
-        let name = name.to_ascii_lowercase();
-        if matches!(name.as_str(), "config.toml.bak.new" | "config.toml.recover")
-            || (!ambiguous
-                && (matches!(
-                    name.as_str(),
-                    "config.toml.bak" | "config.toml.new" | "config.toml.failure"
-                ) || protected))
-            || (name.starts_with("config.pre-migration") && name.ends_with(".bak"))
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 pub(crate) fn path() -> Option<PathBuf> {
@@ -268,22 +249,25 @@ pub(crate) fn prepare_storage_locked(base: &Path) -> io::Result<(bool, WriterLoc
             }
         }
     }
-    let first_run = is_new_install_in(dir);
-    if !inspect_in(dir, PRIMARY_NAME)? && has_ambiguous_recovery_artifacts(dir)? {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "configuration recovery artifacts need review",
-        ));
-    }
-    if !inspect_in(dir, PRIMARY_NAME)?
-        && !inspect_in(dir, "config.toml.bak")?
-        && has_recovery_artifacts(dir)?
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "configuration is missing and recovery artifacts need review",
-        ));
-    }
+    let primary_present = inspect_in(dir, PRIMARY_NAME)?;
+    let first_run = if primary_present {
+        false
+    } else {
+        let inventory = config_recovery::inventory(dir)?;
+        if inventory.ambiguous_leftovers {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "configuration recovery artifacts need review",
+            ));
+        }
+        if !inspect_in(dir, "config.toml.bak")? && has_evidence(&inventory) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "configuration is missing and recovery artifacts need review",
+            ));
+        }
+        !has_evidence(&inventory)
+    };
     recover_in(dir, &path)?;
     if !inspect_in(dir, PRIMARY_NAME)? {
         let template = format!(
@@ -2223,6 +2207,32 @@ pub(crate) mod tests {
         assert!(!folder.join("config.toml.1-2-3.tmp").exists());
         assert!(!folder.join("config.toml.bak.1-2-3.tmp").exists());
         assert!(folder.join("config.toml.other.tmp").exists());
+    }
+
+    #[test]
+    fn stale_drafts_do_not_prevent_new_install() {
+        let folder = temp_base();
+        std::fs::write(folder.join("config.toml.1-2-3.tmp"), b"draft").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        assert!(is_new_install_in(&dir));
+    }
+
+    #[test]
+    fn missing_primary_with_config_new_refuses_template() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("config.toml.new"), b"draft").unwrap();
+        let error = prepare_storage_at(&base).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            error.to_string(),
+            "configuration is missing and recovery artifacts need review"
+        );
+        assert!(!folder.join(PRIMARY_NAME).exists());
     }
 
     #[test]
