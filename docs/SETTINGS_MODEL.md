@@ -20,7 +20,7 @@ Settings are written to the same `config.toml`, with a synced draft and backup. 
 | Quick Controls | `quick_controls_timeout` | 8 seconds; zero disables automatic collapse |
 | General | `autostart`, `monitor` | startup enabled on a new install; system monitor selection |
 
-Absent and invalid overrides resolve independently. A valid new presentation key wins over its own legacy fallback: minimal means ring/compact, balanced means edge/standard, and detailed means context/informative. Old generated values cannot be distinguished from deliberate choices. No migration or rewriting of `ui_density` occurs here.
+Absent and invalid overrides resolve independently in the core settings model. A valid new presentation key wins over its own legacy fallback: minimal means ring/compact, balanced means edge/standard, and detailed means context/informative. The application presentation reader now applies this legacy fallback only to input accepted by the migration core as legacy; current and future schemas ignore `ui_density`, and invalid input uses presentation defaults. The core `Settings::read` API itself still retains its legacy fallback for compatibility. Old generated values cannot be distinguished from deliberate choices. No automatic migration or rewriting of `ui_density` occurs here.
 
 The wave style availability reports its parent-disabled reason independently of motion constraints. Stored child choices survive disabling the wave. Energy Saver and transparency can constrain material, and Energy Saver or reduced motion can constrain wave behavior without changing the file. Only runtime signals already available to the app are used.
 

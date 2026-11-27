@@ -53,6 +53,9 @@ use windows::Win32::UI::Shell::ABN_FULLSCREENAPP;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Result, w};
 
+use crate::config_notice;
+use crate::platform::config_migrate::MigrationReport;
+use crate::platform::config_store;
 use crate::platform::settings_window::{
     self, MSG_OPEN_SETTINGS, MSG_SETTINGS_CLOSED, SettingsWindow,
 };
@@ -196,6 +199,8 @@ impl OpenView {
 }
 
 struct App {
+    /// The startup migration report, taken once; the settings status (2C-4 S3) reads it.
+    migration_report: Option<MigrationReport>,
     island_window: HWND,
     edge_window: HWND,
     placement: Placement,
@@ -322,7 +327,8 @@ pub fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let first_run = settings::is_first_run();
+    // A second copy must not migrate the running copy's configuration.
+    crate::platform::config_store::bootstrap(!second_copy);
 
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)? };
     TASKBAR_CREATED.store(
@@ -381,7 +387,7 @@ pub fn run() -> Result<()> {
     if std::env::args().any(|a| a == "--local-timers") {
         island.offer_only_timers();
     }
-    // Before the calendar thread, which reads the same file.
+    // Apply the snapshot's settings before the calendar thread starts.
     apply_settings(&mut island);
     start_with_windows_by_default();
     let reported = fullscreen::fullscreen_now();
@@ -411,7 +417,15 @@ pub fn run() -> Result<()> {
     }
 
     let started = Instant::now();
+    let startup_config = config_store::snapshot();
+    let migration_report = startup_config
+        .as_ref()
+        .and_then(|s| s.take_migration_report());
+    let startup_notice = startup_config
+        .as_ref()
+        .and_then(|s| config_notice::startup_notice(migration_report.as_ref(), s.mode()));
     let mut app = App {
+        migration_report,
         island_window,
         edge_window,
         placement,
@@ -433,7 +447,11 @@ pub fn run() -> Result<()> {
         wave_style,
         battery_saver: false,
         media: MediaSource::start(island_window, started, argument_after("--only-session")),
-        calendar: CalendarSource::start(island_window, argument_after("--calendar-file")),
+        calendar: CalendarSource::start(
+            island_window,
+            argument_after("--calendar-file"),
+            calendar_address(),
+        ),
         events: Vec::new(),
         focus_watch: FocusWatch::start(island_window),
         focus_state: FocusTracker::default(),
@@ -507,6 +525,12 @@ pub fn run() -> Result<()> {
     };
     app.apply_material();
     app.notification_queue.set_muted(app.muted_apps.clone());
+    if let Some(notice) = startup_notice {
+        let now = app.now();
+        app.island
+            .upsert(config_notice::startup_activity(notice, now));
+        app.refresh();
+    }
     if std::env::args().any(|a| a == "--demo-quick-controls") {
         app.island.open_quick_controls(app.now(), None);
         app.refresh();
@@ -565,7 +589,7 @@ pub fn run() -> Result<()> {
     APP.with(|cell| *cell.borrow_mut() = Some(app));
 
     // The island hides when idle, so nothing else would show that the app started.
-    let welcome = first_run && std::env::args().len() == 1;
+    let welcome = settings::first_run() && std::env::args().len() == 1;
     if welcome || std::env::args().any(|a| a == "--settings-offscreen") {
         with_app(App::open_settings);
     }
@@ -597,6 +621,21 @@ pub fn run() -> Result<()> {
     hotkey::unregister(island_window);
     APP.with(|cell| cell.borrow_mut().take());
     Ok(())
+}
+
+/// The migration report the app keeps after a Reload. Only a repairing reload replaces it
+/// (with the fresh report its snapshot carries); a plain refresh or a refused reload keeps it.
+fn report_after_reload(
+    current: Option<MigrationReport>,
+    outcome: &config_store::ReloadOutcome,
+) -> Option<MigrationReport> {
+    match outcome {
+        config_store::ReloadOutcome::Repaired(snapshot) => {
+            snapshot.take_migration_report().or(current)
+        }
+        config_store::ReloadOutcome::Refreshed(_)
+        | config_store::ReloadOutcome::StillRefused(_, _) => current,
+    }
 }
 
 impl App {
@@ -1571,8 +1610,15 @@ impl App {
                 true
             }) {
                 self.active_notification = Some((notice, until));
+                if config_store::take_reload_request() {
+                    self.reload();
+                }
                 self.refresh();
+                self.sync_settings_window();
                 return;
+            }
+            if config_store::take_reload_request() {
+                self.reload();
             }
         }
         self.island.remove(Kind::ExternalNotification);
@@ -1663,6 +1709,8 @@ impl App {
     }
 
     fn reload(&mut self) {
+        let outcome = config_store::reload();
+        self.migration_report = report_after_reload(self.migration_report.take(), &outcome);
         apply_settings(&mut self.island);
         self.preferences = stored_preferences();
         self.renderer.set_preferences(self.preferences);
@@ -1701,7 +1749,7 @@ impl App {
             }
         }
         self.update_native_osd();
-        self.calendar.refresh();
+        self.calendar.set_address(calendar_address());
         self.sound_wave = stored_sound_wave();
         self.reduced_motion = stored_reduced_motion();
         self.quick_timeout = stored_quick_timeout();
@@ -1732,7 +1780,7 @@ impl App {
             window.bring_to_front();
             return;
         }
-        let address = settings::read()
+        let address = config_store::text()
             .and_then(|text| config::read_value(&text, "calendar_ics_url"))
             .unwrap_or_default();
         let page = argument_after("--settings-page")
@@ -1776,6 +1824,15 @@ impl App {
             autostart: autostart::is_on(),
             demo_running: self.demo_step.is_some(),
             calendar_note: None,
+            config_status: config_store::snapshot()
+                .and_then(|s| {
+                    config_notice::status(
+                        self.migration_report.as_ref(),
+                        s.mode(),
+                        s.writes_allowed(),
+                    )
+                })
+                .map(config_notice::ConfigStatus::lines),
         }
     }
 
@@ -2063,31 +2120,17 @@ impl App {
             }
             Action::SaveCalendar => calendar_note = self.save_calendar(),
             Action::Autostart => {
-                let previous = match autostart::snapshot() {
-                    Ok(previous) => previous,
-                    Err(error) => {
-                        eprintln!("could not read Windows startup setting: {error}");
-                        settings::report_error(
-                            "Windows başlangıç ayarı okunamadı; değişiklik yapılmadı.",
-                        );
-                        return;
-                    }
-                };
-                let on = !autostart::is_on();
-                if autostart::set(on) {
-                    settings::persist_or_rollback(
-                        "autostart",
-                        if on { "on" } else { "off" },
-                        || autostart::restore(previous.as_deref()),
-                    );
-                } else {
-                    let restored = autostart::restore(previous.as_deref());
-                    settings::report_error(if restored {
-                        "Windows başlangıç ayarı uygulanamadı; önceki kayıt geri yüklendi."
-                    } else {
-                        "Windows başlangıç ayarı uygulanamadı ve önceki kayıt doğrulanamadı. Windows başlangıç ayarlarını kontrol edin."
-                    });
-                }
+                report_autostart_result(settings::locked_update(|text, save| {
+                    autostart_transaction(
+                        text,
+                        save,
+                        false,
+                        autostart::snapshot,
+                        autostart::is_on,
+                        autostart::set,
+                        autostart::restore,
+                    )
+                }));
             }
             Action::Demo => self.toggle_demo(),
             Action::Reload => self.reload(),
@@ -2098,6 +2141,9 @@ impl App {
                 }
                 return;
             }
+        }
+        if config_store::take_reload_request() {
+            self.reload();
         }
         let state = SettingsState {
             calendar_note,
@@ -2116,6 +2162,9 @@ impl App {
         };
         if let Err(restored) = result {
             settings::report_persistence_failure(restored);
+        }
+        if config_store::take_reload_request() {
+            self.reload();
         }
         self.refresh();
         self.sync_settings_window();
@@ -2237,9 +2286,9 @@ impl App {
         }
         if let Err(error) = settings::try_remember("calendar_ics_url", &address) {
             eprintln!("calendar settings could not be saved: {error}");
-            return Some("Takvim adresi kaydedilemedi; dosya erisimini kontrol edin");
+            return Some(calendar_save_note(&error));
         }
-        self.calendar.refresh();
+        self.calendar.set_address(Some(address.clone()));
         Some(if address.is_empty() {
             "Takvim adresi kaldırıldı"
         } else {
@@ -3494,29 +3543,29 @@ fn monitor_count() -> u32 {
 }
 
 fn stored_notices_off() -> Vec<String> {
-    settings::read().map_or_else(Vec::new, |text| config::read_notices_off(&text))
+    config_store::text().map_or_else(Vec::new, |text| config::read_notices_off(&text))
 }
 
 fn stored_windows_notifications() -> bool {
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_value(&text, "windows_notifications"))
         .as_deref()
         == Some("on")
 }
 
 fn stored_monitor() -> Option<String> {
-    settings::read().and_then(|text| config::read_value(&text, "monitor"))
+    config_store::text().and_then(|text| config::read_value(&text, "monitor"))
 }
 
 fn stored_focus_hides_notifications() -> bool {
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_value(&text, "focus_hides_notifications"))
         .as_deref()
         != Some("off")
 }
 
 fn stored_muted_apps() -> Vec<String> {
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_value(&text, "muted_apps"))
         .map_or_else(Vec::new, |value| {
             value
@@ -3533,25 +3582,66 @@ fn stored_style() -> IslandStyle {
     if std::env::args().any(|a| a == "--notch") {
         return IslandStyle::Notch;
     }
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_island_style(&text))
         .unwrap_or_default()
 }
 
 fn stored_material() -> Material {
-    settings::read()
+    config_store::text()
         .and_then(|text| config::read_material(&text))
         .unwrap_or_default()
 }
 
 fn stored_preferences() -> island_core::presentation::PresentationPreferences {
-    settings::read().map_or_else(Default::default, |text| {
-        island_core::settings::Settings::read(&text).presentation()
-    })
+    config_store::text().map_or_else(Default::default, |text| presentation_for_config(&text))
+}
+
+fn presentation_for_config(text: &str) -> island_core::presentation::PresentationPreferences {
+    use island_core::migration::{CriticalKey, MigrationError, MigrationOutcome};
+    use island_core::settings::Settings;
+    let without_density =
+        || Settings::read(&config::remove_settings(text, &["ui_density"])).presentation();
+    match settings::classify_ignoring_unsupported(text) {
+        Ok(MigrationOutcome::Prepared { .. }) => Settings::read(text).presentation(),
+        Ok(MigrationOutcome::AlreadyCurrent | MigrationOutcome::Future { .. }) => without_density(),
+        // The presentation keys or the schema version that scopes the legacy
+        // fallback are themselves in doubt.
+        Err(
+            MigrationError::DuplicateCriticalKey(
+                CriticalKey::ConfigVersion
+                | CriticalKey::UiDensity
+                | CriticalKey::IndicatorStyle
+                | CriticalKey::MediaLayout,
+            )
+            | MigrationError::MalformedCriticalSetting(
+                CriticalKey::ConfigVersion
+                | CriticalKey::UiDensity
+                | CriticalKey::IndicatorStyle
+                | CriticalKey::MediaLayout,
+            )
+            | MigrationError::InvalidModernValue(
+                CriticalKey::ConfigVersion
+                | CriticalKey::UiDensity
+                | CriticalKey::IndicatorStyle
+                | CriticalKey::MediaLayout,
+            )
+            | MigrationError::InvalidLegacyValue
+            | MigrationError::InvalidSchemaVersion,
+        ) => Default::default(),
+        // Unsupported lines are stripped before the classification retry.
+        Err(MigrationError::UnsupportedFormat { .. }) => without_density(),
+        // Size and output failures retain the default presentation.
+        Err(
+            MigrationError::OutputTooLarge
+            | MigrationError::InvalidOutput
+            | MigrationError::InputTooLarge,
+        ) => Default::default(),
+    }
 }
 
 fn stored_sound_wave() -> bool {
-    settings::read().is_none_or(|text| {
+    config_store::text().is_none_or(|text| {
         island_core::settings::Settings::read(&text)
             .music
             .sound_wave()
@@ -3559,7 +3649,7 @@ fn stored_sound_wave() -> bool {
 }
 
 fn stored_reduced_motion() -> bool {
-    settings::read().is_some_and(|text| {
+    config_store::text().is_some_and(|text| {
         island_core::settings::Settings::read(&text)
             .appearance
             .reduced_motion()
@@ -3567,7 +3657,7 @@ fn stored_reduced_motion() -> bool {
 }
 
 fn stored_quick_timeout() -> u64 {
-    settings::read().map_or(8, |text| {
+    config_store::text().map_or(8, |text| {
         island_core::settings::Settings::read(&text)
             .quick_controls
             .timeout_seconds()
@@ -3575,7 +3665,7 @@ fn stored_quick_timeout() -> u64 {
 }
 
 fn stored_wave_style() -> WaveStyle {
-    settings::read().map_or(WaveStyle::Normal, |text| {
+    config_store::text().map_or(WaveStyle::Normal, |text| {
         island_core::settings::Settings::read(&text)
             .music
             .wave_style()
@@ -3619,16 +3709,36 @@ fn prints_address() -> bool {
 }
 
 fn stored_progress_style() -> ProgressStyle {
-    settings::read()
+    config_store::text()
         .map(|text| config::read_progress_style(&text))
         .unwrap_or_default()
+}
+
+fn calendar_save_note(error: &std::io::Error) -> &'static str {
+    if let Some(mode) = config_store::refused_mode(error) {
+        match mode {
+            config_store::RefusedMode::ReadOnly => {
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait."
+            }
+            config_store::RefusedMode::Recovery => {
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor."
+            }
+            config_store::RefusedMode::NotReady => {
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin."
+            }
+        }
+    } else if crate::platform::config_commit::is_primary_changed(error) {
+        "Takvim adresi kaydedilemedi; config.toml baska bir program tarafindan degistirildi"
+    } else {
+        "Takvim adresi kaydedilemedi; dosya erisimini kontrol edin"
+    }
 }
 
 fn change_start_mode(
     island: &mut Island,
     mode: StartMode,
     save: impl FnOnce(&str) -> std::io::Result<()>,
-) -> Option<std::result::Result<(), bool>> {
+) -> Option<std::result::Result<(), settings::SaveFailure>> {
     let previous = island.start_mode();
     if !island.set_start_mode(mode) {
         return None;
@@ -3646,40 +3756,111 @@ fn change_start_mode(
 /// by tests and for pictures never touch the real list.
 fn start_with_windows_by_default() {
     let testing = std::env::args().any(|a| a == "--only-session" || a == "--second-copy");
-    let Some(text) = settings::read() else { return };
-    if testing || config::read_autostart(&text).is_some() {
+    if testing {
         return;
     }
-    let previous = match autostart::snapshot() {
+    let result = settings::locked_update(|text, save| {
+        autostart_transaction(
+            text,
+            save,
+            true,
+            autostart::snapshot,
+            autostart::is_on,
+            autostart::set,
+            autostart::restore,
+        )
+    });
+    if let Err(error) = &result {
+        eprintln!("default Windows startup setting skipped: {error}");
+        return;
+    }
+    if autostart_refusal_is_silent(&result) {
+        return;
+    }
+    report_autostart_result(result);
+}
+
+fn autostart_refusal_is_silent(result: &std::io::Result<AutostartOutcome>) -> bool {
+    matches!(result, Ok(AutostartOutcome::SaveFailed(failure)) if failure.refused.is_some())
+}
+
+#[derive(Debug, PartialEq)]
+enum AutostartOutcome {
+    NoChange,
+    SnapshotFailed,
+    ApplyFailed(bool),
+    SaveFailed(settings::SaveFailure),
+}
+
+fn autostart_transaction(
+    text: &str,
+    save: &mut dyn FnMut(&str, &str) -> std::io::Result<()>,
+    default_only: bool,
+    snapshot: impl FnOnce() -> std::io::Result<Option<String>>,
+    is_on: impl FnOnce() -> bool,
+    set: impl FnOnce(bool) -> bool,
+    restore: impl FnOnce(Option<&str>) -> bool,
+) -> std::io::Result<AutostartOutcome> {
+    if default_only && !applies_default_autostart(text) {
+        return Ok(AutostartOutcome::NoChange);
+    }
+    let previous = match snapshot() {
         Ok(previous) => previous,
         Err(error) => {
             eprintln!("could not read Windows startup setting: {error}");
-            settings::report_error("Windows başlangıç ayarı okunamadı; değişiklik yapılmadı.");
-            return;
+            return Ok(AutostartOutcome::SnapshotFailed);
         }
     };
-    if autostart::set(true) {
-        settings::persist_or_rollback("autostart", "on", || {
-            autostart::restore(previous.as_deref())
-        });
-    } else {
-        let restored = autostart::restore(previous.as_deref());
-        settings::report_error(if restored {
+    let on = default_only || !is_on();
+    if !set(on) {
+        return Ok(AutostartOutcome::ApplyFailed(restore(previous.as_deref())));
+    }
+    if let Err(error) = save("autostart", if on { "on" } else { "off" }) {
+        eprintln!("settings could not be saved: {error}");
+        return Ok(AutostartOutcome::SaveFailed(
+            settings::SaveFailure::from_error(&error, restore(previous.as_deref())),
+        ));
+    }
+    Ok(AutostartOutcome::NoChange)
+}
+
+fn report_autostart_result(result: std::io::Result<AutostartOutcome>) {
+    match result {
+        Ok(AutostartOutcome::NoChange) => {}
+        Ok(AutostartOutcome::SnapshotFailed) => {
+            settings::report_error("Windows başlangıç ayarı okunamadı; değişiklik yapılmadı.")
+        }
+        Ok(AutostartOutcome::ApplyFailed(restored)) => settings::report_error(if restored {
             "Windows başlangıç ayarı uygulanamadı; önceki kayıt geri yüklendi."
         } else {
             "Windows başlangıç ayarı uygulanamadı ve önceki kayıt doğrulanamadı. Windows başlangıç ayarlarını kontrol edin."
-        });
+        }),
+        Ok(AutostartOutcome::SaveFailed(restored)) => {
+            settings::report_persistence_failure(restored)
+        }
+        Err(error) => {
+            eprintln!("could not lock Windows startup setting: {error}");
+            settings::report_persistence_failure(settings::SaveFailure::from_error(&error, true));
+        }
     }
 }
 
+/// The default applies only when no choice is recorded and the choice could
+/// be recorded: a file the ordinary writer refuses, including one the added
+/// setting would push past the size limit, leaves the registry alone.
+fn applies_default_autostart(text: &str) -> bool {
+    config::read_autostart(text).is_none()
+        && settings::prepared_write(text, "autostart", "on").is_ok()
+}
+
 fn stored_task_layout() -> TaskLayout {
-    settings::read()
+    config_store::text()
         .map(|text| config::read_task_layout(&text))
         .unwrap_or_default()
 }
 
 fn apply_settings(island: &mut Island) {
-    let text = settings::read().unwrap_or_default();
+    let text = config_store::text().unwrap_or_default();
     island.set_progress_style(config::read_progress_style(&text));
     island.set_task_layout(config::read_task_layout(&text));
     island.set_presets(config::read_presets(&text).unwrap_or(TIMER_PRESETS));
@@ -4117,9 +4298,327 @@ unsafe extern "system" fn edge_proc(
     }
 }
 
+fn calendar_address() -> Option<String> {
+    config_store::text().and_then(|text| config::read_value(&text, "calendar_ics_url"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::config_migrate::FallbackReason;
+
+    #[test]
+    fn reload_refresh_or_refusal_keeps_current_report() {
+        let current = Some(MigrationReport::Fallback(FallbackReason::Busy));
+        let refreshed = config_store::ReloadOutcome::Refreshed(config_store::test_snapshot(None));
+        let refused = config_store::ReloadOutcome::StillRefused(
+            config_store::test_snapshot(None),
+            FallbackReason::Busy,
+        );
+        assert_eq!(report_after_reload(current.clone(), &refreshed), current);
+        assert_eq!(report_after_reload(current.clone(), &refused), current);
+    }
+
+    #[test]
+    fn reload_repair_replaces_report_and_keeps_it_if_snapshot_has_none() {
+        let current = Some(MigrationReport::Fallback(FallbackReason::Busy));
+        let repaired = config_store::ReloadOutcome::Repaired(config_store::test_snapshot(Some(
+            MigrationReport::NotNeeded,
+        )));
+        assert_eq!(
+            report_after_reload(current.clone(), &repaired),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(report_after_reload(current.clone(), &repaired), current);
+    }
+
+    #[test]
+    fn autostart_rollback_holds_writer_lock() {
+        let _serial = crate::platform::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!(
+            "islora-autostart-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&base).unwrap();
+        let path = base.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let contender = base.clone();
+        let outcome = settings::locked_update_at(&path, |text, _| {
+            autostart_transaction(
+                text,
+                &mut |_, _| Err(std::io::Error::other("injected")),
+                false,
+                || Ok(Some("previous".into())),
+                || false,
+                |_| true,
+                |previous| {
+                    assert_eq!(previous, Some("previous"));
+                    let error = std::thread::spawn(move || {
+                        crate::platform::config_fs::WriterLock::acquire(&contender)
+                            .err()
+                            .unwrap()
+                    })
+                    .join()
+                    .unwrap();
+                    assert!(matches!(
+                        error,
+                        crate::platform::config_fs::ConfigFsError::Locked
+                    ));
+                    true
+                },
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            outcome,
+            AutostartOutcome::SaveFailed(settings::SaveFailure {
+                restored: true,
+                conflict: false,
+                refused: None,
+            })
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn calendar_save_note_distinguishes_conflict() {
+        for (mode, expected) in [
+            (
+                config_store::RefusedMode::ReadOnly,
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait.",
+            ),
+            (
+                config_store::RefusedMode::Recovery,
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor.",
+            ),
+            (
+                config_store::RefusedMode::NotReady,
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin.",
+            ),
+        ] {
+            let text = calendar_save_note(&config_store::mode_refused(mode));
+            assert_eq!(text, expected);
+            assert!(!text.contains("config.toml"));
+            assert!(!text.bytes().any(|b| b.is_ascii_digit()));
+        }
+        let conflict = std::io::Error::other(crate::platform::config_fs::PrimaryChanged);
+        assert_eq!(
+            calendar_save_note(&conflict),
+            "Takvim adresi kaydedilemedi; config.toml baska bir program tarafindan degistirildi"
+        );
+        let ordinary = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            calendar_save_note(&ordinary),
+            "Takvim adresi kaydedilemedi; dosya erisimini kontrol edin"
+        );
+    }
+
+    #[test]
+    fn autostart_each_refusal_is_silent() {
+        for mode in [
+            config_store::RefusedMode::ReadOnly,
+            config_store::RefusedMode::Recovery,
+            config_store::RefusedMode::NotReady,
+        ] {
+            let result = Ok(AutostartOutcome::SaveFailed(settings::SaveFailure {
+                restored: true,
+                conflict: false,
+                refused: Some(mode),
+            }));
+            assert!(autostart_refusal_is_silent(&result));
+        }
+        assert!(!autostart_refusal_is_silent(&Ok(
+            AutostartOutcome::NoChange
+        )));
+    }
+
+    #[test]
+    fn autostart_unverified_save_reports_failed_restore() {
+        let mut save = |_: &str, _: &str| {
+            Err(std::io::Error::other(
+                crate::platform::config_commit::CommitUnverified,
+            ))
+        };
+        let outcome = autostart_transaction(
+            "",
+            &mut save,
+            false,
+            || Ok(Some("previous".into())),
+            || false,
+            |_| true,
+            |previous| {
+                assert_eq!(previous, Some("previous"));
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            AutostartOutcome::SaveFailed(settings::SaveFailure {
+                restored: false,
+                conflict: false,
+                refused: None,
+            })
+        );
+    }
+
+    #[test]
+    fn presentation_fallback_is_scoped_to_validated_legacy_input() {
+        use island_core::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
+        let legacy = "ui_density = \"minimal\"";
+        assert_eq!(
+            presentation_for_config(legacy),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Compact
+            }
+        );
+        for version in ["2", "3"] {
+            let text = format!(
+                "config_version = \"{version}\"\nui_density = \"detailed\"\nindicator_style = \"ring\"\n"
+            );
+            assert_eq!(
+                presentation_for_config(&text),
+                PresentationPreferences {
+                    indicator_style: IndicatorStyle::Ring,
+                    media_layout: MediaLayout::Standard
+                }
+            );
+        }
+        let invalid = "ui_density = \"minimal\"\nui_density = \"detailed\"";
+        assert_eq!(
+            presentation_for_config(invalid),
+            PresentationPreferences::default()
+        );
+        let current = "config_version = \"2\"\nui_density = \"detailed\"\nindicator_style = \"ring\"\nmedia_layout = \"compact\"\n";
+        let reset = island_core::settings::reset_feature(
+            current,
+            island_core::settings::Feature::MusicPlayer,
+        );
+        assert_eq!(
+            presentation_for_config(&reset),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Standard
+            }
+        );
+    }
+
+    #[test]
+    fn presentation_survives_errors_unrelated_to_presentation() {
+        use island_core::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
+        let current = "config_version = \"2\"\nstray line\nui_density = \"detailed\"\nindicator_style = \"ring\"\n";
+        assert_eq!(
+            presentation_for_config(current),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Standard
+            }
+        );
+        let future = "[section]\nconfig_version = \"3\"\nui_density = \"minimal\"\nindicator_style = \"context\"\n";
+        assert_eq!(
+            presentation_for_config(future),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Context,
+                media_layout: MediaLayout::Standard
+            }
+        );
+        for legacy in [
+            "stray line\nui_density = \"minimal\"\n",
+            "[section]\nconfig_version = \"1\"\nui_density = \"minimal\"\n",
+        ] {
+            assert_eq!(
+                presentation_for_config(legacy),
+                PresentationPreferences {
+                    indicator_style: IndicatorStyle::Ring,
+                    media_layout: MediaLayout::Compact
+                }
+            );
+        }
+        let explicit = "stray line\nui_density = \"minimal\"\nmedia_layout = \"informative\"\n";
+        assert_eq!(
+            presentation_for_config(explicit),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Informative
+            }
+        );
+        let invalid = "config_version = \"2\"\nindicator_style = \"unknown\"\n";
+        assert_eq!(
+            presentation_for_config(invalid),
+            PresentationPreferences::default()
+        );
+    }
+
+    #[test]
+    fn oversized_presentation_config_uses_defaults() {
+        let text = format!(
+            "config_version = \"2\"\nindicator_style = \"ring\"\n#{}",
+            "x".repeat(island_core::migration::MAX_CONFIG_BYTES)
+        );
+        assert_eq!(
+            presentation_for_config(&text),
+            island_core::presentation::PresentationPreferences::default()
+        );
+    }
+
+    #[test]
+    fn presentation_classification_ignores_unsupported_lines() {
+        use island_core::presentation::{IndicatorStyle, MediaLayout, PresentationPreferences};
+        for text in [
+            "stray\nmedia_layout = \"compact\"\nmedia_layout = \"informative\"\n",
+            "stray\nconfig_version = \"bad\"\nui_density = \"minimal\"\n",
+            "stray\nindicator_style = \"ring\" trailing\n",
+        ] {
+            assert_eq!(
+                presentation_for_config(text),
+                PresentationPreferences::default(),
+                "{text:?}"
+            );
+        }
+        assert_eq!(
+            presentation_for_config("config_version = \"01\"\nui_density = \"minimal\"\n"),
+            PresentationPreferences {
+                indicator_style: IndicatorStyle::Ring,
+                media_layout: MediaLayout::Compact
+            }
+        );
+    }
+
+    #[test]
+    fn default_autostart_is_skipped_when_the_configuration_cannot_be_written() {
+        assert!(applies_default_autostart("config_version = \"2\"\n"));
+        assert!(applies_default_autostart(
+            "config_version = \"2\"\nstray line\n"
+        ));
+        assert!(applies_default_autostart("ui_density = \"minimal\"\n"));
+        for text in [
+            "config_version = \"3\"\n",
+            "config_version = \"bad\"\n",
+            "config_version = \"2\"\nmedia_layout = \"compact\"\nmedia_layout = \"compact\"\n",
+            "config_version = \"2\"\nindicator_style = \"ring\" trailing\n",
+            "config_version = \"2\"\nautostart = \"off\"\n",
+            "config_version = \"2\"\nautostart = \"on\"\n",
+        ] {
+            assert!(!applies_default_autostart(text), "{text:?}");
+        }
+        let max = island_core::migration::MAX_CONFIG_BYTES;
+        let header = "config_version = \"2\"\n";
+        let addition = "autostart = \"on\"\n".len();
+        let padded = |len: usize| format!("{header}#{}\n", "x".repeat(len - header.len() - 2));
+        let fits = padded(max - addition);
+        assert_eq!(fits.len() + addition, max);
+        assert!(applies_default_autostart(&fits));
+        let overflows = padded(max - addition + 1);
+        assert!(overflows.len() <= max);
+        assert!(!applies_default_autostart(&overflows));
+    }
 
     #[test]
     fn shared_start_mode_change_restores_state_when_saving_fails() {
@@ -4134,7 +4633,11 @@ mod tests {
             change_start_mode(&mut island, requested, |_| Err(std::io::Error::other(
                 "save failed"
             ))),
-            Some(Err(true))
+            Some(Err(settings::SaveFailure {
+                restored: true,
+                conflict: false,
+                refused: None,
+            }))
         );
         assert_eq!(island.start_mode(), previous);
         assert_eq!(

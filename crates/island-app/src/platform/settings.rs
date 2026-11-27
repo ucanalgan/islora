@@ -1,12 +1,27 @@
 //! The settings file, which the user edits by hand and may hold a secret.
+//! If deleted at runtime, try_remember fails and shows the save-failed dialog;
+//! preparation creates the file only at startup.
 
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
+use super::config_commit;
+#[cfg(test)]
+use super::config_fs::Draft;
+use super::config_fs::{ConfigDir, VerifiedFile, WriterLock, WriterMutex};
+use super::config_recovery;
+#[cfg(test)]
+pub(crate) use super::config_store::locked_update_at;
+#[cfg(test)]
+use super::config_store::try_remember_path;
 use island_core::config::write_value;
+use island_core::migration::{CriticalKey, MigrationError, MigrationOutcome, prepare};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, w};
+
+/// The primary configuration file name, whose security a protected backup copies.
+pub(crate) const PRIMARY_NAME: &str = "config.toml";
 
 const TEMPLATE: &str = "\
 # Islora ayarları
@@ -71,82 +86,207 @@ const PROGRESS_SETTINGS: &str = "
 progress_style = \"ring\"
 ";
 
-/// Whether this is the very first start on this account.
-pub fn is_first_run() -> bool {
-    path().is_some_and(|path| is_new_install(&path))
-}
-
+#[cfg(test)]
 fn is_new_install(path: &Path) -> bool {
-    !path.exists() && !path.with_extension("toml.bak").is_file()
+    let Ok(dir) = ConfigDir::open(path.parent().unwrap()) else {
+        return true;
+    };
+    is_new_install_in(&dir)
+}
+#[cfg(test)]
+fn is_new_install_in(dir: &ConfigDir) -> bool {
+    matches!(inspect_in(dir, PRIMARY_NAME), Ok(false))
+        && !config_recovery::inventory(dir).map_or(true, |i| config_recovery::has_evidence(&i))
+}
+pub(crate) fn inspect_in(dir: &ConfigDir, name: &str) -> io::Result<bool> {
+    match VerifiedFile::open(dir, std::ffi::OsStr::new(name)) {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            let error = io::Error::from(error);
+            if error.kind() == io::ErrorKind::NotFound {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+#[cfg(test)]
+fn verified_file(path: &Path) -> io::Result<VerifiedFile> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "configuration has no parent")
+    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "configuration has no name"))?;
+    let dir = ConfigDir::open(parent).map_err(io::Error::from)?;
+    VerifiedFile::open(&dir, name).map_err(io::Error::from)
 }
 
-fn path() -> Option<PathBuf> {
+pub(crate) fn path() -> Option<PathBuf> {
     let roaming = PathBuf::from(std::env::var_os("APPDATA")?);
     let folder = roaming.join("Islora");
-    // Settings from when the app had another name come along.
-    if !folder.exists() {
-        let _ = std::fs::rename(roaming.join("DynamicIsland"), &folder);
-    }
-    Some(folder.join("config.toml"))
+    Some(folder.join(PRIMARY_NAME))
 }
 
-/// Creates the file on first run, so there is something to fill in.
-pub fn read() -> Option<String> {
-    let path = path()?;
-    match try_read_path(&path) {
-        Ok(text) => Some(text),
-        Err(error) => {
-            eprintln!("settings could not be read: {error}");
-            None
+#[cfg(test)]
+fn try_read_path(path: &Path) -> io::Result<String> {
+    read_bounded(path)
+}
+
+/// Prepare storage once, before readers start. The mutex also covers the
+/// bootstrap interval before the directory and its lock file exist.
+pub fn prepare_storage() -> io::Result<bool> {
+    let base = PathBuf::from(
+        std::env::var_os("APPDATA")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))?,
+    );
+    let result = prepare_storage_at(&base);
+    record_preparation(&result, &STORAGE_STATE, &FIRST_RUN);
+    result
+}
+
+fn record_preparation(
+    result: &io::Result<bool>,
+    state: &std::sync::atomic::AtomicU8,
+    first: &std::sync::atomic::AtomicBool,
+) {
+    record_preparation_result(result.as_ref().copied(), state, first);
+}
+
+fn record_preparation_result(
+    result: Result<bool, &io::Error>,
+    state: &std::sync::atomic::AtomicU8,
+    first: &std::sync::atomic::AtomicBool,
+) {
+    match result {
+        Ok(first_run) => {
+            if first_run {
+                first.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            state.store(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Err(error) if preparation_is_busy(error) => {}
+        Err(_) => state.store(2, std::sync::atomic::Ordering::Relaxed),
+    }
+}
+
+pub(crate) fn prepare_storage_locked_recorded(base: &Path) -> io::Result<(bool, WriterLock)> {
+    prepare_storage_locked_recorded_with(base, &STORAGE_STATE, &FIRST_RUN)
+}
+
+fn prepare_storage_locked_recorded_with(
+    base: &Path,
+    state: &std::sync::atomic::AtomicU8,
+    first: &std::sync::atomic::AtomicBool,
+) -> io::Result<(bool, WriterLock)> {
+    let result = prepare_storage_locked(base);
+    record_preparation_result(result.as_ref().map(|(first, _)| *first), state, first);
+    result
+}
+
+fn preparation_is_busy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock || matches!(error.raw_os_error(), Some(32 | 33))
+}
+
+static FIRST_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn first_run() -> bool {
+    FIRST_RUN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static PREPARATION_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static STORAGE_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn mark_storage_prepared() {
+    STORAGE_STATE.store(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn is_stale_draft_name(name: &std::ffi::OsStr) -> bool {
+    let value = name.to_string_lossy();
+    if let Some(unique) = value
+        .strip_prefix("config.toml.")
+        .and_then(|s| s.strip_suffix(".tmp"))
+    {
+        let unique = unique
+            .strip_prefix("bak.")
+            .or_else(|| unique.strip_prefix("failure."))
+            .unwrap_or(unique);
+        let parts: Vec<_> = unique.split('-').collect();
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    } else {
+        false
+    }
+}
+
+pub(crate) fn sweep_stale_drafts(dir: &ConfigDir) {
+    if let Ok(entries) = dir.entries() {
+        for entry in entries {
+            if is_stale_draft_name(&entry) {
+                let _ = VerifiedFile::delete_verified(dir, &entry);
+            }
         }
     }
 }
 
-/// Existing recovery and first-run creation remain explicit side effects.
-fn try_read_path(path: &Path) -> io::Result<String> {
-    recover(path)?;
-    if !path.exists() {
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "configuration has no parent directory",
-            )
-        })?;
-        std::fs::create_dir_all(parent)?;
-        let template = format!(
-            "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
-        );
-        // Keep the editable guidance, but leave resettable preferences absent
-        // until the user chooses them. The calendar entry is integration data.
-        let text = island_core::settings::reset_all(&template);
-        replace(path, &text)?;
+pub(crate) fn prepare_storage_at(base: &Path) -> io::Result<bool> {
+    prepare_storage_locked(base).map(|(first_run, _lock)| first_run)
+}
+
+/// The caller holds the per-user writer lock until the returned WriterLock is dropped.
+/// Folder rename and creation by path occur under the WriterMutex before a folder handle exists.
+pub(crate) fn prepare_storage_locked(base: &Path) -> io::Result<(bool, WriterLock)> {
+    let folder = base.join("Islora");
+    let mutex = WriterMutex::acquire().map_err(io::Error::from)?;
+    if !folder.exists() {
+        match std::fs::rename(base.join("DynamicIsland"), &folder) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
     }
-    read_bounded(path)
+    std::fs::create_dir_all(&folder)?;
+    let lock = WriterLock::with_mutex(&folder, mutex).map_err(io::Error::from)?;
+    let path = folder.join(PRIMARY_NAME);
+    let dir = lock.directory();
+    sweep_stale_drafts(dir);
+    let first_run = match config_recovery::recover_locked(dir)? {
+        config_recovery::RecoveryOutcome::Present
+        | config_recovery::RecoveryOutcome::Restored { .. } => false,
+        config_recovery::RecoveryOutcome::Missing { evidence: true } => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "configuration is missing and recovery artifacts need review",
+            ));
+        }
+        config_recovery::RecoveryOutcome::Missing { evidence: false } => {
+            let template = format!(
+                "{TEMPLATE}{START_SETTINGS}{NOTICE_SETTINGS}{LEVEL_NOTICES}{WAVE_SETTINGS}{WAVE_STYLE_SETTINGS}{MATERIAL_SETTINGS}{PROGRESS_SETTINGS}"
+            );
+            let mut text = island_core::settings::reset_all(&template);
+            text.push_str("config_version = \"2\"\n");
+            config_commit::commit_primary(dir, &path, &text, None)?;
+            true
+        }
+    };
+    Ok((first_run, lock))
 }
 
 /// Refuse oversized or non-UTF-8 settings without replacing or truncating
-/// the file. Recheck while reading because it may grow after metadata lookup.
+/// the file. Read one byte beyond the limit to detect oversized input.
+#[cfg(test)]
 fn read_bounded(path: &Path) -> io::Result<String> {
-    let file = std::fs::File::open(path)?;
-    let limit = island_core::migration::MAX_CONFIG_BYTES;
-    if file.metadata()?.len() > limit as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "configuration exceeds the size limit",
-        ));
-    }
-    read_bounded_content(file, limit)
+    let mut file = verified_file(path)?;
+    read_verified(&mut file)
 }
 
-fn read_bounded_content(reader: impl Read, limit: usize) -> io::Result<String> {
-    let mut bytes = Vec::new();
-    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "configuration exceeds the size limit",
-        ));
-    }
+pub(crate) fn read_verified(file: &mut VerifiedFile) -> io::Result<String> {
+    let bytes = file
+        .read_bounded(island_core::migration::MAX_CONFIG_BYTES)
+        .map_err(io::Error::from)?;
     String::from_utf8(bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -155,12 +295,169 @@ fn read_bounded_content(reader: impl Read, limit: usize) -> io::Result<String> {
     })
 }
 
+pub fn storage_writable() -> bool {
+    let _guard = PREPARATION_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    match STORAGE_STATE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => true,
+        0 => prepare_storage().is_ok(),
+        _ => false,
+    }
+}
+
 /// Applies a complete update through the same backup and recovery path.
 pub fn try_remember(key: &str, value: &str) -> io::Result<()> {
-    let path =
-        path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is unavailable"))?;
-    let text = try_read_path(&path)?;
-    replace(&path, &write_value(&text, key, value))
+    super::config_store::update(key, value)
+}
+
+/// Why an ordinary write must leave the configuration alone. Variants name a
+/// category and at most a critical key, never a configuration value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriteRefusal {
+    FutureSchema,
+    InvalidSchemaVersion,
+    DuplicateCriticalKey(CriticalKey),
+    MalformedCriticalSetting(CriticalKey),
+    TooLarge,
+    UpdateTooLarge,
+}
+
+impl From<WriteRefusal> for io::Error {
+    fn from(refusal: WriteRefusal) -> Self {
+        match refusal {
+            WriteRefusal::FutureSchema => io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "future configuration is read-only",
+            ),
+            WriteRefusal::InvalidSchemaVersion => io::Error::new(
+                io::ErrorKind::InvalidData,
+                "configuration schema version is invalid",
+            ),
+            WriteRefusal::DuplicateCriticalKey(key) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("configuration has a duplicate {} setting", key.name()),
+            ),
+            WriteRefusal::MalformedCriticalSetting(key) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("configuration has a malformed {} setting", key.name()),
+            ),
+            WriteRefusal::TooLarge => io::Error::new(
+                io::ErrorKind::InvalidData,
+                "configuration exceeds the size limit",
+            ),
+            WriteRefusal::UpdateTooLarge => io::Error::new(
+                io::ErrorKind::InvalidData,
+                "updated configuration exceeds the size limit",
+            ),
+        }
+    }
+}
+
+/// Classify critical settings after omitting lines the core cannot interpret.
+pub(crate) fn classify_ignoring_unsupported(
+    text: &str,
+) -> Result<MigrationOutcome, MigrationError> {
+    let initial = prepare(text);
+    // The migration parser stops at the first unsupported line. Classify each
+    // line with the same parser and omit only unsupported lines on a retry,
+    // so critical settings later in the file are still checked together.
+    if matches!(initial, Err(MigrationError::UnsupportedFormat { .. })) {
+        let mut supported = String::new();
+        for (index, line) in text.split_inclusive('\n').enumerate() {
+            let line = if index == 0 {
+                line.strip_prefix('\u{feff}').unwrap_or(line)
+            } else {
+                line
+            };
+            // A BOM is special only on the original first line.
+            let protect_bom = index > 0 && line.starts_with('\u{feff}');
+            let protected;
+            let candidate = if protect_bom {
+                protected = format!(" {line}");
+                protected.as_str()
+            } else {
+                line
+            };
+            if !matches!(
+                prepare(candidate),
+                Err(MigrationError::UnsupportedFormat { .. })
+            ) {
+                if supported.is_empty() && protect_bom {
+                    supported.push(' ');
+                }
+                supported.push_str(line);
+            }
+        }
+        prepare(&supported)
+    } else {
+        initial
+    }
+}
+
+/// Whether an ordinary write may replace this configuration. Only a future or
+/// invalid schema version, a duplicate or malformed critical key, or an
+/// oversized source refuses it. Content the migration core merely cannot
+/// migrate (unsupported lines, invalid presentation values) stays writable,
+/// because the line writer preserves every line it does not change.
+pub(crate) fn write_permission(text: &str) -> Result<(), WriteRefusal> {
+    match classify_ignoring_unsupported(text) {
+        Ok(MigrationOutcome::Future { .. }) => Err(WriteRefusal::FutureSchema),
+        Err(MigrationError::InvalidSchemaVersion) => Err(WriteRefusal::InvalidSchemaVersion),
+        Err(MigrationError::DuplicateCriticalKey(key)) => {
+            Err(WriteRefusal::DuplicateCriticalKey(key))
+        }
+        Err(MigrationError::MalformedCriticalSetting(key)) => {
+            Err(WriteRefusal::MalformedCriticalSetting(key))
+        }
+        Err(MigrationError::InputTooLarge) => Err(WriteRefusal::TooLarge),
+        Ok(MigrationOutcome::Prepared { .. } | MigrationOutcome::AlreadyCurrent)
+        | Err(
+            MigrationError::UnsupportedFormat { .. }
+            | MigrationError::InvalidLegacyValue
+            | MigrationError::InvalidModernValue(_)
+            | MigrationError::OutputTooLarge
+            | MigrationError::InvalidOutput,
+        ) => Ok(()),
+    }
+}
+
+/// The text an ordinary write of `key = value` would store, or why that write
+/// must leave the configuration alone, including when the result would
+/// exceed the size limit.
+pub(crate) fn prepared_write(text: &str, key: &str, value: &str) -> Result<String, WriteRefusal> {
+    write_permission(text)?;
+    let updated = write_value(text, key, value);
+    if updated.len() > island_core::migration::MAX_CONFIG_BYTES {
+        return Err(WriteRefusal::UpdateTooLarge);
+    }
+    Ok(updated)
+}
+
+pub(crate) fn locked_update<T>(
+    action: impl FnOnce(&str, &mut dyn FnMut(&str, &str) -> io::Result<()>) -> io::Result<T>,
+) -> io::Result<T> {
+    super::config_store::update_with(action)
+}
+
+/// Details of a failed settings save and its rollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SaveFailure {
+    /// Whether the previous state was restored.
+    pub(crate) restored: bool,
+    /// Whether another program changed the primary configuration file.
+    pub(crate) conflict: bool,
+    /// The write was refused before anything was written, and why.
+    pub(crate) refused: Option<super::config_store::RefusedMode>,
+}
+
+impl SaveFailure {
+    /// Classify a save error and record the rollback result.
+    pub(crate) fn from_error(error: &io::Error, restored: bool) -> Self {
+        Self {
+            restored,
+            conflict: config_commit::is_primary_changed(error),
+            refused: super::config_store::refused_mode(error),
+        }
+    }
 }
 
 /// Complete a change already applied at runtime. The rollback must report
@@ -168,12 +465,12 @@ pub fn try_remember(key: &str, value: &str) -> io::Result<()> {
 pub(crate) fn save_with_rollback(
     save: impl FnOnce() -> io::Result<()>,
     rollback: impl FnOnce() -> bool,
-) -> Result<(), bool> {
+) -> Result<(), SaveFailure> {
     match save() {
         Ok(()) => Ok(()),
         Err(error) => {
             eprintln!("settings could not be saved: {error}");
-            Err(rollback())
+            Err(SaveFailure::from_error(&error, rollback()))
         }
     }
 }
@@ -188,12 +485,49 @@ pub fn persist_or_rollback(key: &str, value: &str, rollback: impl FnOnce() -> bo
     }
 }
 
-pub(crate) fn report_persistence_failure(restored: bool) {
-    report_error(if restored {
-        "Ayar kaydedilemedi. Önceki seçim geri yüklendi. config.toml erişimini kontrol edin."
-    } else {
-        "Ayar kaydedilemedi ve önceki durum geri yüklenemedi. Değişiklik bu oturumda veya Windows'ta etkin kalmış olabilir. Ayarları kontrol edin."
-    });
+pub(crate) fn persistence_failure_message(failure: SaveFailure) -> &'static str {
+    // A refusal occurs before commit, so it cannot also be a conflict.
+    if let Some(refused) = failure.refused {
+        use super::config_store::RefusedMode;
+        return match (refused, failure.restored) {
+            (RefusedMode::ReadOnly, true) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait, salt okunur. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi."
+            }
+            (RefusedMode::ReadOnly, false) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait, salt okunur ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin."
+            }
+            (RefusedMode::Recovery, true) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyebilirsiniz."
+            }
+            (RefusedMode::Recovery, false) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin."
+            }
+            (RefusedMode::NotReady, true) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin."
+            }
+            (RefusedMode::NotReady, false) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin."
+            }
+        };
+    }
+    match (failure.restored, failure.conflict) {
+        (true, false) => {
+            "Ayar kaydedilemedi. Önceki seçim geri yüklendi. config.toml erişimini kontrol edin."
+        }
+        (false, false) => {
+            "Ayar kaydedilemedi ve önceki durum geri yüklenemedi. Değişiklik bu oturumda veya Windows'ta etkin kalmış olabilir. Ayarları kontrol edin."
+        }
+        (true, true) => {
+            "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. Dosyadaki de\u{11f}i\u{15f}ikli\u{11f}i kontrol edip tekrar deneyin."
+        }
+        (false, true) => {
+            "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi ve \u{f6}nceki durum geri y\u{fc}klenemedi. De\u{11f}i\u{15f}iklik bu oturumda veya Windows'ta etkin kalm\u{131}\u{15f} olabilir. Ayarlar\u{131} kontrol edin."
+        }
+    }
+}
+
+pub(crate) fn report_persistence_failure(failure: SaveFailure) {
+    report_error(persistence_failure_message(failure));
 }
 
 pub fn report_error(message: &str) {
@@ -204,40 +538,15 @@ pub fn report_error(message: &str) {
     }
 }
 
-/// A crash half way must not cost the user their calendar address.
-fn replace(path: &Path, text: &str) -> io::Result<()> {
-    let draft = path.with_extension("toml.new");
-    let mut file = std::fs::File::create(&draft)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    if path.exists() {
-        let backup_draft = path.with_extension("toml.bak.new");
-        std::fs::copy(path, &backup_draft)?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&backup_draft)?
-            .sync_all()?;
-        std::fs::rename(backup_draft, path.with_extension("toml.bak"))?;
-    }
-    std::fs::rename(draft, path)
+pub(crate) fn name(path: &Path) -> io::Result<&std::ffi::OsStr> {
+    path.file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "configuration has no name"))
 }
-
-/// An incomplete draft is never promoted: recover the last completed file.
-fn recover(path: &Path) -> io::Result<()> {
-    let backup = path.with_extension("toml.bak");
-    if !path.exists() && backup.is_file() {
-        let recovery = path.with_extension("toml.recover");
-        std::fs::copy(backup, &recovery)?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&recovery)?
-            .sync_all()?;
-        std::fs::rename(recovery, path)?;
-    }
-    Ok(())
+#[cfg(test)]
+fn read_in(dir: &ConfigDir, path: &Path) -> io::Result<String> {
+    let mut file = VerifiedFile::open(dir, name(path)?).map_err(io::Error::from)?;
+    read_verified(&mut file)
 }
-
 pub fn open_in_editor() {
     let Some(path) = path() else { return };
     // Handing a file to its app can take a while, which the UI must not wait for.
@@ -255,8 +564,801 @@ pub fn open_in_editor() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    static NEXT_TEMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    pub(crate) struct Temp(PathBuf);
+    impl std::ops::Deref for Temp {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for Temp {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    // Restore access before Temp removes files, including after an assertion panics.
+    struct RestoreDacl<'a> {
+        folder: &'a Path,
+        security: super::super::config_fs::FileSecurity,
+    }
+    impl Drop for RestoreDacl<'_> {
+        fn drop(&mut self) {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+            if let Ok(entries) = std::fs::read_dir(self.folder) {
+                for entry in entries.flatten() {
+                    if let Ok(file) = std::fs::OpenOptions::new()
+                        .access_mode((READ_CONTROL | WRITE_DAC).0)
+                        .open(entry.path())
+                    {
+                        self.security.restore_dacl(&file);
+                    }
+                }
+            }
+        }
+    }
+    pub(crate) fn temp_base() -> Temp {
+        let path = std::env::temp_dir().join(format!(
+            "islora-prepare-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Temp(path)
+    }
+
+    #[test]
+    fn locked_update_serializes_writers_and_rejects_oversized_value() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let path = base.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\nautostart = \"off\"\n").unwrap();
+        let contender = base.clone();
+        locked_update_at(&path, |_, save| {
+            let error = std::thread::spawn(move || WriterLock::acquire(&contender).err().unwrap())
+                .join()
+                .unwrap();
+            assert!(matches!(
+                error,
+                super::super::config_fs::ConfigFsError::Locked
+            ));
+            save("autostart", "on")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            island_core::config::read_value(&std::fs::read_to_string(&path).unwrap(), "autostart")
+                .as_deref(),
+            Some("on")
+        );
+        let large = "x".repeat(island_core::migration::MAX_CONFIG_BYTES + 1);
+        let error = locked_update_at(&path, |_, save| save("x", &large)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn unverified_save_fails_and_stops_chained_saves() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let path = base.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let hook_path = path.clone();
+        config_commit::AFTER_PRIMARY_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(hook_path, "external").unwrap();
+            }));
+        });
+        let result = save_with_rollback(
+            || {
+                locked_update_at(&path, |_, save| {
+                    let error = save("autostart", "on").unwrap_err();
+                    assert!(config_commit::is_commit_unverified(&error));
+                    let error = save("sound_wave", "off").unwrap_err();
+                    assert!(config_commit::is_commit_unverified(&error));
+                    Ok(())
+                })
+            },
+            || true,
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+            "config_version = \"2\"\n"
+        );
+    }
+
+    #[test]
+    fn unverified_save_preserves_failed_rollback_result() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let path = base.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let hook_path = path.clone();
+        config_commit::AFTER_PRIMARY_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(hook_path, "external").unwrap();
+            }));
+        });
+        let result = locked_update_at(&path, |_, save| {
+            Ok(save_with_rollback(|| save("autostart", "on"), || false))
+        });
+        assert_eq!(
+            result.unwrap(),
+            Err(SaveFailure {
+                restored: false,
+                conflict: false,
+                refused: None,
+            })
+        );
+    }
+
+    #[test]
+    fn locked_update_preserves_multiple_saves() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let path = base.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        locked_update_at(&path, |_, save| {
+            save("autostart", "on")?;
+            save("sound_wave", "off")
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(
+            island_core::config::read_value(&text, "autostart").as_deref(),
+            Some("on")
+        );
+        assert_eq!(
+            island_core::config::read_value(&text, "sound_wave").as_deref(),
+            Some("off")
+        );
+    }
+
+    #[test]
+    fn locked_prepare_holds_writer_lock_until_drop() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let other = temp_base();
+        let (_, lock) = prepare_storage_locked(&base).unwrap();
+        let contender = other.to_path_buf();
+        let error = std::thread::spawn(move || prepare_storage_at(&contender).unwrap_err())
+            .join()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        drop(lock);
+        let contender = other.to_path_buf();
+        assert!(
+            std::thread::spawn(move || prepare_storage_at(&contender))
+                .join()
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn prepare_storage_at_drops_lock_on_return() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        prepare_storage_at(&base).unwrap();
+        let folder = base.join("Islora");
+        std::thread::spawn(move || {
+            let _lock = WriterLock::acquire(&folder).unwrap();
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn locked_prepare_matches_unlocked_result() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let locked_base = temp_base();
+        let unlocked_base = temp_base();
+        let (locked_first, lock) = prepare_storage_locked(&locked_base).unwrap();
+        drop(lock);
+        let contender = unlocked_base.to_path_buf();
+        let unlocked_first = std::thread::spawn(move || prepare_storage_at(&contender).unwrap())
+            .join()
+            .unwrap();
+        assert_eq!(locked_first, unlocked_first);
+        let names = |base: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(base.join("Islora"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&locked_base), names(&unlocked_base));
+        assert_eq!(
+            std::fs::read(locked_base.join("Islora/config.toml")).unwrap(),
+            std::fs::read(unlocked_base.join("Islora/config.toml")).unwrap()
+        );
+    }
+
+    #[test]
+    fn preparation_failure_disables_writes() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("config.toml.failure"), b"failure").unwrap();
+        let result = prepare_storage_at(&base);
+        assert!(result.is_err());
+        assert!(!preparation_is_busy(result.as_ref().unwrap_err()));
+        let state = std::sync::atomic::AtomicU8::new(0);
+        let first = std::sync::atomic::AtomicBool::new(false);
+        record_preparation(&result, &state, &first);
+        assert_eq!(state.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(!first.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn busy_preparation_then_retry_retains_first_run() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let state = std::sync::atomic::AtomicU8::new(0);
+        let first = std::sync::atomic::AtomicBool::new(false);
+        let mutex = WriterMutex::acquire().unwrap();
+        let other = base.clone();
+        let result = std::thread::spawn(move || prepare_storage_at(&other))
+            .join()
+            .unwrap();
+        record_preparation(&result, &state, &first);
+        assert_eq!(state.load(std::sync::atomic::Ordering::Relaxed), 0);
+        drop(mutex);
+        record_preparation(&prepare_storage_at(&base), &state, &first);
+        assert_eq!(state.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(first.load(std::sync::atomic::Ordering::Relaxed));
+        record_preparation(&prepare_storage_at(&base), &state, &first);
+        assert!(first.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn locked_recorded_preparation_preserves_state_semantics() {
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let state = AtomicU8::new(0);
+        let first = AtomicBool::new(false);
+        let (is_first, lock) = prepare_storage_locked_recorded_with(&base, &state, &first).unwrap();
+        assert!(is_first);
+        assert_eq!(state.load(Ordering::Relaxed), 1);
+        assert!(first.load(Ordering::Relaxed));
+
+        let busy_base = temp_base();
+        let busy_state = AtomicU8::new(0);
+        let busy_first = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let result = scope
+                .spawn(|| {
+                    prepare_storage_locked_recorded_with(&busy_base, &busy_state, &busy_first)
+                        .err()
+                        .unwrap()
+                })
+                .join()
+                .unwrap();
+            assert!(preparation_is_busy(&result));
+        });
+        assert_eq!(busy_state.load(Ordering::Relaxed), 0);
+        assert!(!busy_first.load(Ordering::Relaxed));
+        assert!(!busy_base.join("Islora").exists());
+        drop(lock);
+
+        let (is_first, lock) = prepare_storage_locked_recorded_with(&base, &state, &first).unwrap();
+        assert!(!is_first);
+        assert_eq!(state.load(Ordering::Relaxed), 1);
+        assert!(first.load(Ordering::Relaxed));
+        drop(lock);
+
+        let failed_base = temp_base();
+        let folder = failed_base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("config.toml.failure"), b"failure").unwrap();
+        let error = prepare_storage_locked_recorded_with(&failed_base, &state, &first)
+            .err()
+            .unwrap();
+        assert!(!preparation_is_busy(&error));
+        assert_eq!(state.load(Ordering::Relaxed), 2);
+        assert!(first.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn preparation_sharing_errors_are_retryable() {
+        for code in [32, 33] {
+            assert!(preparation_is_busy(&io::Error::from_raw_os_error(code)));
+        }
+        assert!(!preparation_is_busy(&io::Error::from_raw_os_error(5)));
+    }
+
+    #[test]
+    fn reads_leave_empty_and_recovery_directories_unchanged() {
+        let base = temp_base();
+        let path = base.join("config.toml");
+        assert!(try_read_path(&path).is_err());
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+        std::fs::write(base.join("config.toml.bak"), b"saved").unwrap();
+        std::fs::write(base.join("config.toml.recover"), b"draft").unwrap();
+        let listing = || {
+            let mut entries: Vec<_> = std::fs::read_dir(&base)
+                .unwrap()
+                .map(|e| {
+                    let e = e.unwrap();
+                    (e.file_name(), std::fs::read(e.path()).unwrap())
+                })
+                .collect();
+            entries.sort();
+            entries
+        };
+        let before = listing();
+        assert!(try_read_path(&path).is_err());
+        assert_eq!(listing(), before);
+    }
+
+    #[test]
+    fn preparation_is_idempotent_and_recovers_legacy_backup() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        assert!(prepare_storage_at(&base).unwrap());
+        let path = base.join("Islora/config.toml");
+        let before = std::fs::read(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(!prepare_storage_at(&base).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+        std::fs::remove_dir_all(base.join("Islora")).unwrap();
+        std::fs::create_dir(base.join("DynamicIsland")).unwrap();
+        std::fs::write(
+            base.join("DynamicIsland/config.toml.bak"),
+            b"config_version = \"2\"\n",
+        )
+        .unwrap();
+        assert!(!prepare_storage_at(&base).unwrap());
+        assert!(!base.join("DynamicIsland").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"config_version = \"2\"\n");
+    }
+
+    #[test]
+    fn busy_preparation_leaves_directory_unchanged() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let mutex = WriterMutex::acquire().unwrap();
+        let other = base.clone();
+        let error = std::thread::spawn(move || prepare_storage_at(&other).unwrap_err())
+            .join()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+        drop(mutex);
+    }
+
+    #[test]
+    fn locked_writer_preserves_configuration() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let path = base.join("config.toml");
+        std::fs::write(&path, b"config_version = \"2\"\n").unwrap();
+        let lock = WriterLock::acquire(&base).unwrap();
+        let target = path.clone();
+        let error = std::thread::spawn(move || try_remember_path(&target, "x", "y").unwrap_err())
+            .join()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(&path).unwrap(), b"config_version = \"2\"\n");
+        drop(lock);
+    }
+
+    #[test]
+    fn fresh_configuration_is_created_with_current_schema() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let folder = std::env::temp_dir().join(format!(
+            "islora-fresh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = folder.join("Islora").join("config.toml");
+        assert!(is_new_install(&path));
+        assert!(prepare_storage_at(&folder).unwrap());
+        assert!(!prepare_storage_at(&folder).unwrap());
+        let text = try_read_path(&path).unwrap();
+        assert_eq!(
+            island_core::config::read_value(&text, "config_version").as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            island_core::migration::prepare(&text),
+            Ok(island_core::migration::MigrationOutcome::AlreadyCurrent)
+        );
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(try_read_path(&path).unwrap(), text);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        assert!(!path.with_extension("toml.bak").exists());
+        assert!(!is_new_install(&path));
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder.join("Islora")).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn missing_primary_with_recovery_evidence_does_not_create_defaults() {
+        let folder = std::env::temp_dir().join(format!(
+            "islora-recovery-evidence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        for name in [
+            "config.toml.new",
+            "config.toml.bak.new",
+            "config.toml.recover",
+            "config.pre-migration.bak",
+            "config.pre-migration.2.bak",
+            "CONFIG.PRE-MIGRATION.3.BAK",
+        ] {
+            let artifact = folder.join(name);
+            std::fs::write(&artifact, "evidence").unwrap();
+            assert!(!is_new_install(&path));
+            assert!(try_read_path(&path).is_err());
+            assert!(!path.exists());
+            assert_eq!(std::fs::read_to_string(&artifact).unwrap(), "evidence");
+            std::fs::remove_file(artifact).unwrap();
+        }
+        assert!(is_new_install(&path));
+        let normal = folder.join("config.toml.bak");
+        let protected = folder.join("config.pre-migration.bak");
+        std::fs::write(&normal, "normal = \"saved\"\n").unwrap();
+        std::fs::write(&protected, "protected").unwrap();
+        assert!(try_read_path(&path).is_err());
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&normal).unwrap(),
+            "normal = \"saved\"\n"
+        );
+        assert_eq!(std::fs::read_to_string(&protected).unwrap(), "protected");
+        std::fs::remove_file(normal).unwrap();
+        std::fs::remove_file(protected).unwrap();
+        let protected = folder.join("config.pre-migration.bak");
+        std::fs::write(&protected, "protected").unwrap();
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        assert_eq!(try_read_path(&path).unwrap(), "config_version = \"2\"\n");
+        assert_eq!(std::fs::read_to_string(&protected).unwrap(), "protected");
+        std::fs::remove_file(protected).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn invalid_or_future_rolling_backup_is_not_restored() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let folder = std::env::temp_dir().join(format!(
+            "islora-invalid-backup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let base = folder;
+        let folder = base.join("Islora");
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        let backup = path.with_extension("toml.bak");
+        for candidate in ["ui_density = \"invalid\"\n", "config_version = \"8\"\n"] {
+            std::fs::write(&backup, candidate).unwrap();
+            assert!(prepare_storage_at(&base).is_err());
+            assert!(!path.exists());
+            assert!(!path.with_extension("toml.recover").exists());
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), candidate);
+        }
+        std::fs::remove_file(backup).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+        std::fs::remove_dir(base).unwrap();
+    }
+
+    #[test]
+    fn reparse_file_is_rejected_when_symlinks_are_available() {
+        let folder = std::env::temp_dir().join(format!(
+            "islora-reparse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let target = folder.join("target.toml");
+        let link = folder.join("config.toml");
+        std::fs::write(&target, "config_version = \"2\"\n").unwrap();
+        match std::os::windows::fs::symlink_file(&target, &link) {
+            Ok(()) => {
+                assert!(read_bounded(&link).is_err());
+                assert!(try_read_path(&link).is_err());
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    "config_version = \"2\"\n"
+                );
+                std::fs::remove_file(link).unwrap();
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+                ) || matches!(error.raw_os_error(), Some(50 | 1314)) =>
+            {
+                // Developer mode and symlink privileges are not prerequisites.
+                eprintln!(
+                    "symlink test skipped: creation is unavailable without additional system privileges or filesystem support"
+                );
+            }
+            Err(error) => panic!("symlink setup failed: {error}"),
+        }
+        std::fs::remove_file(target).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn settings_writes_reject_future_and_invalid_sources_without_creating_drafts() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let folder = std::env::temp_dir().join(format!(
+            "islora-write-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        for source in [
+            "config_version = \"3\"\ncalendar_ics_url = \"https://example.invalid/\"\n",
+            "config_version = \"2\"\nconfig_version = \"2\"\n",
+        ] {
+            std::fs::write(&path, source).unwrap();
+            assert!(try_remember_path(&path, "media_layout", "compact").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+            assert!(!path.with_extension("toml.new").exists());
+            assert!(!path.with_extension("toml.bak").exists());
+        }
+        let source = "config_version = \"2\"\n# preserve\nunknown = \"value\"\n";
+        std::fs::write(&path, source).unwrap();
+        try_remember_path(&path, "media_layout", "compact").unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# preserve\nunknown = \"value\"\n"));
+        assert_eq!(
+            island_core::config::read_value(&saved, "media_layout").as_deref(),
+            Some("compact")
+        );
+        std::fs::remove_file(path.with_extension("toml.bak")).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn unsupported_lines_do_not_block_ordinary_writes() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let folder = std::env::temp_dir().join(format!(
+            "islora-unsupported-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        for source in [
+            "config_version = \"2\"\nstray line\ncalendar_ics_url = \"https://example.invalid/\"\n",
+            "[section]\nconfig_version = \"2\"\nunknown = \"keep\"\n",
+            "stray\nui_density = \"minimal\"\n",
+        ] {
+            assert!(matches!(
+                prepare(source),
+                Err(MigrationError::UnsupportedFormat { .. })
+            ));
+            std::fs::write(&path, source).unwrap();
+            try_remember_path(&path, "media_layout", "compact").unwrap();
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(saved, write_value(source, "media_layout", "compact"));
+            assert_eq!(
+                std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+                source
+            );
+        }
+        std::fs::remove_file(path.with_extension("toml.bak")).unwrap();
+        for source in [
+            "config_version = \"3\"\nmedia_layout = \"standard\"\n",
+            "config_version = \"2\"\nindicator_style = \"ring\"\nindicator_style = \"ring\"\n",
+            "stray\nindicator_style = \"ring\"\nindicator_style = \"ring\"\n",
+        ] {
+            std::fs::write(&path, source).unwrap();
+            assert!(try_remember_path(&path, "media_layout", "compact").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+            assert!(!path.with_extension("toml.new").exists());
+            assert!(!path.with_extension("toml.bak").exists());
+        }
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn write_permission_refuses_only_unsafe_sources() {
+        for source in [
+            "",
+            "config_version = \"2\"\n",
+            "ui_density = \"minimal\"\n",
+            "config_version = \"2\"\nindicator_style = \"unknown\"\n",
+            "ui_density = \"unknown\"\n",
+            "orphan\n",
+            "[section]\n",
+        ] {
+            assert_eq!(write_permission(source), Ok(()), "{source:?}");
+        }
+        for (source, refusal) in [
+            ("config_version = \"3\"\n", WriteRefusal::FutureSchema),
+            (
+                "config_version = \"0\"\n",
+                WriteRefusal::InvalidSchemaVersion,
+            ),
+            (
+                "orphan\nmedia_layout = \"compact\"\nmedia_layout = \"compact\"\n",
+                WriteRefusal::DuplicateCriticalKey(CriticalKey::MediaLayout),
+            ),
+            (
+                "ui_density = \"minimal\" trailing\n",
+                WriteRefusal::MalformedCriticalSetting(CriticalKey::UiDensity),
+            ),
+            (
+                "\u{feff}config_version : 2\r\n",
+                WriteRefusal::MalformedCriticalSetting(CriticalKey::ConfigVersion),
+            ),
+        ] {
+            assert_eq!(write_permission(source), Err(refusal), "{source:?}");
+        }
+        let oversized = "#".repeat(island_core::migration::MAX_CONFIG_BYTES + 1);
+        assert_eq!(write_permission(&oversized), Err(WriteRefusal::TooLarge));
+        let marker = "SYNTHETIC_PRIVATE_MARKER";
+        let source = format!("calendar_ics_url = \"{marker}\"\nconfig_version = \"{marker}\"\n");
+        let error = io::Error::from(write_permission(&source).unwrap_err());
+        assert!(!error.to_string().contains(marker));
+    }
+
+    #[test]
+    fn unsupported_lines_do_not_hide_unsafe_settings() {
+        for (source, refusal) in [
+            ("bare\nconfig_version = \"3\"\n", WriteRefusal::FutureSchema),
+            (
+                "[section]\nconfig_version = \"3\"\n",
+                WriteRefusal::FutureSchema,
+            ),
+            (
+                "bare\nconfig_version = \"bad\"\n",
+                WriteRefusal::InvalidSchemaVersion,
+            ),
+            (
+                "bare\nconfig_version = \"18446744073709551616\"\n",
+                WriteRefusal::InvalidSchemaVersion,
+            ),
+            (
+                "[section]\nmedia_layout = \"compact\"\nmedia_layout = \"compact\"\n",
+                WriteRefusal::DuplicateCriticalKey(CriticalKey::MediaLayout),
+            ),
+            (
+                "bare\nindicator_style = \"ring\" trailing\n",
+                WriteRefusal::MalformedCriticalSetting(CriticalKey::IndicatorStyle),
+            ),
+            (
+                "\u{feff}bare\r\nconfig_version = \"3\"\r\n",
+                WriteRefusal::FutureSchema,
+            ),
+            (
+                "bare\n\u{feff}config_version = \"3\"\nconfig_version = \"3\"\n",
+                WriteRefusal::FutureSchema,
+            ),
+            (
+                "bare\nconfig_version 3",
+                WriteRefusal::MalformedCriticalSetting(CriticalKey::ConfigVersion),
+            ),
+            (
+                "x\r\n[s]\r\nui_density = \"minimal\"\r\ny\r\nui_density = \"minimal\"\r\n",
+                WriteRefusal::DuplicateCriticalKey(CriticalKey::UiDensity),
+            ),
+            ("config_version = \"3\"\nbare\n", WriteRefusal::FutureSchema),
+        ] {
+            assert_eq!(write_permission(source), Err(refusal), "{source:?}");
+        }
+        for source in [
+            "bare\n[section]\nconfig_version = \"2\"\nother bare\n",
+            "one\nconfig_version = \"2\"\ntwo\nindicator_style = \"ring\"\nthree\nmedia_layout = \"compact\"\n",
+            "config_version = \"2\"\nindicator_style = \"ring\"\nstray\n",
+            "config_version = \"2\"\nindicator_style = \"ring\"\nbare\n[section]\n",
+        ] {
+            assert_eq!(write_permission(source), Ok(()), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn prepared_write_refuses_an_update_past_the_size_limit() {
+        let max = island_core::migration::MAX_CONFIG_BYTES;
+        let header = "config_version = \"2\"\n";
+        let addition = "autostart = \"on\"\n".len();
+        let padded = |len: usize| format!("{header}#{}\n", "x".repeat(len - header.len() - 2));
+        let fits = padded(max - addition);
+        assert_eq!(
+            prepared_write(&fits, "autostart", "on"),
+            Ok(write_value(&fits, "autostart", "on"))
+        );
+        let overflows = padded(max - addition + 1);
+        assert_eq!(write_permission(&overflows), Ok(()));
+        assert_eq!(
+            prepared_write(&overflows, "autostart", "on"),
+            Err(WriteRefusal::UpdateTooLarge)
+        );
+        assert_eq!(
+            prepared_write("config_version = \"3\"\n", "autostart", "on"),
+            Err(WriteRefusal::FutureSchema)
+        );
+    }
 
     #[test]
     fn bounded_read_rejects_invalid_utf8_and_oversized_files_without_changes() {
@@ -282,6 +1384,8 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path).unwrap(), invalid);
         let max = island_core::migration::MAX_CONFIG_BYTES;
+        std::fs::write(&path, vec![b'x'; max - 1]).unwrap();
+        assert_eq!(read_bounded(&path).unwrap().len(), max - 1);
         std::fs::write(&path, vec![b'x'; max]).unwrap();
         assert_eq!(read_bounded(&path).unwrap().len(), max);
         std::fs::write(&path, vec![b'x'; max + 1]).unwrap();
@@ -295,13 +1399,190 @@ mod tests {
     }
 
     #[test]
-    fn bounded_content_read_detects_growth_after_metadata_check() {
-        let mut growing = std::io::Cursor::new(b"12345".to_vec());
-        assert_eq!(
-            read_bounded_content(&mut growing, 4).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
+    fn validation_error_does_not_disclose_configuration_values() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let folder = std::env::temp_dir().join(format!(
+            "islora-redaction-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.toml");
+        let marker = "SYNTHETIC_PRIVATE_MARKER";
+        let content = format!(
+            "calendar_ics_url = \"https://example.invalid/?token={marker}\"\nconfig_version = \"bad\"\n"
         );
-        assert_eq!(growing.position(), 5);
+        std::fs::write(&path, &content).unwrap();
+        let error = try_remember_path(&path, "media_layout", "compact").unwrap_err();
+        assert!(!error.to_string().contains(marker));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn persistence_failure_message_covers_all_outcomes() {
+        for (failure, expected) in [
+            (
+                SaveFailure {
+                    restored: true,
+                    conflict: false,
+                    refused: None,
+                },
+                "Ayar kaydedilemedi. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. config.toml eri\u{15f}imini kontrol edin.",
+            ),
+            (
+                SaveFailure {
+                    restored: false,
+                    conflict: false,
+                    refused: None,
+                },
+                "Ayar kaydedilemedi ve \u{f6}nceki durum geri y\u{fc}klenemedi. De\u{11f}i\u{15f}iklik bu oturumda veya Windows'ta etkin kalm\u{131}\u{15f} olabilir. Ayarlar\u{131} kontrol edin.",
+            ),
+            (
+                SaveFailure {
+                    restored: true,
+                    conflict: true,
+                    refused: None,
+                },
+                "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. Dosyadaki de\u{11f}i\u{15f}ikli\u{11f}i kontrol edip tekrar deneyin.",
+            ),
+            (
+                SaveFailure {
+                    restored: false,
+                    conflict: true,
+                    refused: None,
+                },
+                "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi ve \u{f6}nceki durum geri y\u{fc}klenemedi. De\u{11f}i\u{15f}iklik bu oturumda veya Windows'ta etkin kalm\u{131}\u{15f} olabilir. Ayarlar\u{131} kontrol edin.",
+            ),
+            (
+                SaveFailure {
+                    restored: true,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::ReadOnly),
+                },
+                "Ayar kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait, salt okunur. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi.",
+            ),
+            (
+                SaveFailure {
+                    restored: false,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::ReadOnly),
+                },
+                "Ayar kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait, salt okunur ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin.",
+            ),
+            (
+                SaveFailure {
+                    restored: true,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::Recovery),
+                },
+                "Ayar kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyebilirsiniz.",
+            ),
+            (
+                SaveFailure {
+                    restored: false,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::Recovery),
+                },
+                "Ayar kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin.",
+            ),
+            (
+                SaveFailure {
+                    restored: true,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::NotReady),
+                },
+                "Ayar kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin.",
+            ),
+            (
+                SaveFailure {
+                    restored: false,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::NotReady),
+                },
+                "Ayar kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin.",
+            ),
+        ] {
+            let text = persistence_failure_message(failure);
+            assert_eq!(text, expected);
+            if failure.refused.is_some() {
+                assert!(!text.contains("config.toml"));
+                assert!(!text.bytes().any(|b| b.is_ascii_digit()));
+            }
+        }
+    }
+
+    #[test]
+    fn save_failure_from_mode_refused_round_trips() {
+        use super::super::config_store::{RefusedMode, mode_refused};
+        for mode in [
+            RefusedMode::ReadOnly,
+            RefusedMode::Recovery,
+            RefusedMode::NotReady,
+        ] {
+            let failure = SaveFailure::from_error(&mode_refused(mode), true);
+            assert_eq!(failure.refused, Some(mode));
+            assert!(!failure.conflict);
+        }
+        let changed = SaveFailure::from_error(
+            &io::Error::other(super::super::config_fs::PrimaryChanged),
+            true,
+        );
+        assert_eq!(changed.refused, None);
+        assert!(changed.conflict);
+    }
+
+    #[test]
+    fn save_with_rollback_ordinary_failure_is_not_conflict() {
+        let result = save_with_rollback(
+            || Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            || true,
+        );
+        assert_eq!(
+            result,
+            Err(SaveFailure {
+                restored: true,
+                conflict: false,
+                refused: None,
+            })
+        );
+    }
+
+    #[test]
+    fn save_with_rollback_reports_conflict_on_external_edit() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        let original = "config_version = \"2\"\n";
+        let external = "config_version = \"2\"\n# external\n";
+        std::fs::write(&path, original).unwrap();
+        let result = save_with_rollback(
+            || {
+                locked_update_at(&path, |text, save| {
+                    assert_eq!(text, original);
+                    std::fs::write(&path, external).unwrap();
+                    save("theme", "black")
+                })
+            },
+            || true,
+        );
+        assert_eq!(
+            result,
+            Err(SaveFailure {
+                restored: true,
+                conflict: true,
+                refused: None,
+            })
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
     }
 
     #[test]
@@ -325,52 +1606,39 @@ mod tests {
                 true
             },
         );
-        assert_eq!(result, Err(true));
+        assert_eq!(
+            result,
+            Err(SaveFailure {
+                restored: true,
+                conflict: false,
+                refused: None,
+            })
+        );
         assert_eq!(
             (runtime.get(), renderer.get(), unrelated.get()),
             ("old", "old", "untouched")
         );
         assert_eq!(
             save_with_rollback(|| Err(io::Error::other("save failed")), || false),
-            Err(false)
+            Err(SaveFailure {
+                restored: false,
+                conflict: false,
+                refused: None,
+            })
         );
     }
 
     #[test]
-    fn draft_and_backup_failures_preserve_the_primary_file() {
-        let folder = std::env::temp_dir().join(format!(
-            "islora-write-stages-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&folder).unwrap();
+    fn backup_failure_preserves_primary_and_removes_drafts() {
+        let folder = temp_base();
         let path = folder.join("config.toml");
         let original =
             "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\"\n";
         std::fs::write(&path, original).unwrap();
-        let draft = path.with_extension("toml.new");
-        std::fs::create_dir(&draft).unwrap();
-        assert!(replace(&path, "new").is_err());
+        std::fs::create_dir(path.with_extension("toml.bak")).unwrap();
+        assert!(config_commit::replace(&path, "new").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        std::fs::remove_dir(&draft).unwrap();
-        let backup_draft = path.with_extension("toml.bak.new");
-        std::fs::create_dir(&backup_draft).unwrap();
-        assert!(replace(&path, "new").is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        std::fs::remove_file(draft).unwrap();
-        std::fs::remove_dir(backup_draft).unwrap();
-        let blocked_backup = path.with_extension("toml.bak");
-        std::fs::create_dir(&blocked_backup).unwrap();
-        assert!(replace(&path, "new").is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        std::fs::remove_file(path.with_extension("toml.new")).unwrap();
-        std::fs::remove_file(path.with_extension("toml.bak.new")).unwrap();
-        std::fs::remove_dir(blocked_backup).unwrap();
-        std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir(folder).unwrap();
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
     }
 
     #[test]
@@ -388,7 +1656,7 @@ mod tests {
         let original = "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\"\nmedia_layout = \"standard\"\n";
         std::fs::write(&path, original).unwrap();
         let updated = write_value(original, "media_layout", "informative");
-        replace(&path, &updated).unwrap();
+        config_commit::replace(&path, &updated).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
         assert!(updated.contains(
             "# keep\ncalendar_ics_url = \"https://example.test/?secret=1\"\nunknown = \"keep\""
@@ -412,18 +1680,736 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        assert!(replace(&folder.join("config.toml"), "new value").is_err());
+        assert!(config_commit::replace(&folder.join("config.toml"), "new value").is_err());
         assert!(!folder.exists());
     }
 
     #[test]
-    fn interrupted_update_recovers_last_complete_settings() {
-        let folder =
-            std::env::temp_dir().join(format!("islora-settings-recovery-{}", std::process::id()));
+    fn redirected_ancestor_keeps_replace_and_recover_in_held_directory() {
+        let base = temp_base();
+        let original = base.join("original");
+        let decoy = base.join("decoy");
+        let link = base.join("link");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::create_dir(&decoy).unwrap();
+        let make_link = |target: &Path| {
+            assert!(
+                std::process::Command::new("cmd")
+                    .args(["/c", "mklink", "/J"])
+                    .arg(&link)
+                    .arg(target)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        std::fs::create_dir(original.join("settings")).unwrap();
+        std::fs::create_dir(decoy.join("settings")).unwrap();
+        make_link(&original);
+        let path = link.join("settings/config.toml");
+        std::fs::write(
+            original.join("settings/config.toml"),
+            "config_version = \"2\"\n",
+        )
+        .unwrap();
+        std::fs::write(decoy.join("settings/config.toml"), "decoy").unwrap();
+        let dir = ConfigDir::open(&link.join("settings")).unwrap();
+        std::fs::remove_dir(&link).unwrap();
+        make_link(&decoy);
+        config_commit::commit_primary(
+            &dir,
+            &path,
+            "config_version = \"2\"\n# updated\n",
+            Some(read_in(&dir, &path).unwrap().as_bytes()),
+        )
+        .unwrap();
+        assert_eq!(
+            read_in(&dir, &path).unwrap(),
+            "config_version = \"2\"\n# updated\n"
+        );
+        std::fs::write(
+            original.join("settings/config.toml.bak"),
+            "config_version = \"2\"\n# backup\n",
+        )
+        .unwrap();
+        std::fs::remove_file(original.join("settings/config.toml")).unwrap();
+        config_recovery::recover_locked(&dir).unwrap();
+        assert_eq!(
+            read_in(&dir, &path).unwrap(),
+            "config_version = \"2\"\n# backup\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(decoy.join("settings/config.toml")).unwrap(),
+            "decoy"
+        );
+        std::fs::remove_dir(&link).unwrap();
+        drop(dir);
+    }
+
+    #[test]
+    fn handle_rename_supports_long_turkish_name() {
+        let base = temp_base();
+        let dir = ConfigDir::open(&base).unwrap();
+        let target = format!(
+            "{}-\u{0130}stanbul-\u{015f}\u{00f6}\u{011f}\u{00fc}\u{0131}.txt",
+            "long".repeat(45)
+        );
+        std::fs::write(base.join("source"), "content").unwrap();
+        VerifiedFile::rename(
+            &dir,
+            std::ffi::OsStr::new("source"),
+            std::ffi::OsStr::new(&target),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(base.join(target)).unwrap(),
+            "content"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn protected_dacl_survives_write_and_backup_recovery() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+            SetSecurityInfo,
+        };
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        };
+        use windows::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let stale = folder.join("config.toml.new");
+        std::fs::write(&stale, "foreign stale draft").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .access_mode((WRITE_DAC | READ_CONTROL).0)
+            .open(&path)
+            .unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let initial = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let _restore = RestoreDacl {
+            folder: &folder,
+            security: initial,
+        };
+        let sddl = format!(
+            "D:P(A;;FA;;;{})(A;;FA;;;SY)",
+            _restore.security.owner_sid_string()
+        );
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: valid SDDL and output pointer; the returned allocation is freed below.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &windows::core::HSTRING::from(sddl),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+        }
+        .unwrap();
+        let mut present = false.into();
+        let mut defaulted = false.into();
+        let mut acl = std::ptr::null_mut();
+        // SAFETY: descriptor is live and output pointers are valid.
+        unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) }
+            .unwrap();
+        // SAFETY: the file handle and ACL are live for this call.
+        let status = unsafe {
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(acl),
+                None,
+            )
+        };
+        // SAFETY: the conversion returned this LocalAlloc allocation once.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        }
+        assert_eq!(status.0, 0);
+        drop(file);
+        let expected = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let stale_security = VerifiedFile::open(&dir, "config.toml.new".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(!expected.same_dacl(&stale_security));
+        config_commit::commit_primary(
+            &dir,
+            &path,
+            "config_version = \"2\"\n# updated\n",
+            Some(read_in(&dir, &path).unwrap().as_bytes()),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&stale).unwrap(),
+            "foreign stale draft"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "config_version = \"2\"\n# updated\n"
+        );
+        let actual = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(expected.same_dacl(&actual));
+        std::fs::remove_file(&path).unwrap();
+        config_recovery::recover_locked(&dir).unwrap();
+        let recovered = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(expected.same_dacl(&recovered));
+    }
+
+    #[test]
+    fn changed_source_security_aborts_replacement() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        let original = "config_version = \"2\"\n";
+        std::fs::write(&path, original).unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let security = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let _restore = RestoreDacl {
+            folder: &folder,
+            security,
+        };
+        let file = std::fs::OpenOptions::new()
+            .access_mode((READ_CONTROL | WRITE_DAC).0)
+            .open(&path)
+            .unwrap();
+        assert!(
+            config_commit::commit_primary_with_hook(
+                &dir,
+                &path,
+                "new",
+                Some(original.as_bytes()),
+                || _restore.security.toggle_dacl_protection(&file)
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn unprotected_dacl_and_backup_match_primary() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+            SetSecurityInfo,
+        };
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
+            UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+        use windows::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let original = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let _restore = RestoreDacl {
+            folder: &folder,
+            security: original,
+        };
+        let sddl = format!(
+            "D:(A;;FA;;;{})(A;;FR;;;WD)",
+            _restore.security.owner_sid_string()
+        );
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: valid SDDL and output storage; the descriptor is freed below.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &windows::core::HSTRING::from(sddl),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+        }
+        .unwrap();
+        let mut present = false.into();
+        let mut defaulted = false.into();
+        let mut acl = std::ptr::null_mut();
+        // SAFETY: the descriptor and output pointers are valid.
+        unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) }
+            .unwrap();
+        let file = std::fs::OpenOptions::new()
+            .access_mode((READ_CONTROL | WRITE_DAC).0)
+            .open(&path)
+            .unwrap();
+        // SAFETY: the file handle and ACL remain live during the call.
+        let status = unsafe {
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(acl),
+                None,
+            )
+        };
+        // SAFETY: the descriptor is the allocation returned by the conversion.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        }
+        assert_eq!(status.0, 0);
+        drop(file);
+        let expected = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        std::fs::write(folder.join("sibling"), "").unwrap();
+        let sibling = VerifiedFile::open(&dir, "sibling".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(!expected.same_dacl(&sibling));
+        config_commit::commit_primary(
+            &dir,
+            &path,
+            "config_version = \"2\"\n# changed\n",
+            Some(read_in(&dir, &path).unwrap().as_bytes()),
+        )
+        .unwrap();
+        for item in [&path, &path.with_extension("toml.bak")] {
+            let actual = VerifiedFile::open(&dir, name(item).unwrap())
+                .unwrap()
+                .security()
+                .unwrap();
+            assert!(expected.same_dacl(&actual));
+        }
+    }
+
+    #[test]
+    fn foreign_owner_defaults_while_dacl_is_preserved() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSidToSidW, SE_FILE_OBJECT, SetSecurityInfo,
+        };
+        use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSID};
+        use windows::Win32::Storage::FileSystem::WRITE_OWNER;
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let before = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        let file = match std::fs::OpenOptions::new()
+            .access_mode(WRITE_OWNER.0)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("skipping foreign owner test: {e}");
+                return;
+            }
+        };
+        let mut sid = PSID::default();
+        // SAFETY: the SID string and output pointer are valid.
+        unsafe { ConvertStringSidToSidW(windows::core::w!("S-1-5-18"), &mut sid) }.unwrap();
+        // SAFETY: the file handle and SID remain valid during the call.
+        let status = unsafe {
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(sid),
+                None,
+                None,
+                None,
+            )
+        };
+        // SAFETY: the SID was allocated by ConvertStringSidToSidW.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sid.0)));
+        }
+        drop(file);
+        if status.0 != 0 {
+            eprintln!("skipping foreign owner test: Windows error {}", status.0);
+            return;
+        }
+        let foreign = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(!foreign.same_owner(&before));
+        config_commit::commit_primary(
+            &dir,
+            &path,
+            "config_version = \"2\"\n# changed\n",
+            Some(read_in(&dir, &path).unwrap().as_bytes()),
+        )
+        .unwrap();
+        let after = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(foreign.same_dacl(&after));
+        assert!(before.same_owner(&after));
+    }
+
+    #[test]
+    fn security_failures_leave_primary_untouched() {
+        use super::super::config_fs::FAIL_SECURITY;
+        for stage in [1, 2] {
+            let folder = temp_base();
+            let path = folder.join("config.toml");
+            let original = "config_version = \"2\"\n";
+            std::fs::write(&path, original).unwrap();
+            let dir = ConfigDir::open(&folder).unwrap();
+            FAIL_SECURITY.with(|failure| failure.set(stage));
+            assert!(
+                config_commit::commit_primary(&dir, &path, "new", Some(original.as_bytes()))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn held_source_can_be_rewound_for_backup() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "original").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let mut source = VerifiedFile::open_source(&dir, name(&path).unwrap()).unwrap();
+        assert_eq!(read_verified(&mut source).unwrap(), "original");
+        source.rewind().unwrap();
+        assert_eq!(read_verified(&mut source).unwrap(), "original");
+    }
+
+    #[test]
+    fn external_edit_between_locked_read_and_save_is_preserved() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        let original = "config_version = \"2\"\n";
+        let external = "config_version = \"2\"\n# external\n";
+        std::fs::write(&path, original).unwrap();
+        let error = locked_update_at(&path, |text, save| {
+            assert_eq!(text, original);
+            std::fs::write(&path, external).unwrap();
+            save("theme", "black")
+        })
+        .unwrap_err();
+        assert!(config_commit::is_primary_changed(&error), "{error:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+        assert!(!std::fs::read_dir(&folder).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn replaced_source_aborts_replacement() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        assert!(
+            config_commit::commit_primary_with_hook(
+                &dir,
+                &path,
+                "draft",
+                Some(b"config_version = \"2\"\n"),
+                || {
+                    std::fs::rename(&path, folder.join("old.toml")).unwrap();
+                    std::fs::write(&path, "external").unwrap();
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn preparation_cleans_only_verified_unique_drafts() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        for item in [
+            "config.toml.1-2-3.tmp",
+            "config.toml.bak.1-2-3.tmp",
+            "config.toml.other.tmp",
+        ] {
+            std::fs::write(folder.join(item), "secret").unwrap();
+        }
+        prepare_storage_at(&base).unwrap();
+        assert!(!folder.join("config.toml.1-2-3.tmp").exists());
+        assert!(!folder.join("config.toml.bak.1-2-3.tmp").exists());
+        assert!(folder.join("config.toml.other.tmp").exists());
+    }
+
+    #[test]
+    fn stale_drafts_do_not_prevent_new_install() {
+        let folder = temp_base();
+        std::fs::write(folder.join("config.toml.1-2-3.tmp"), b"draft").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        assert!(is_new_install_in(&dir));
+    }
+
+    #[test]
+    fn missing_primary_with_config_new_refuses_template() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("config.toml.new"), b"draft").unwrap();
+        let error = prepare_storage_at(&base).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            error.to_string(),
+            "configuration is missing and recovery artifacts need review"
+        );
+        assert!(!folder.join(PRIMARY_NAME).exists());
+    }
+
+    #[test]
+    fn failure_record_draft_is_stale() {
+        assert!(is_stale_draft_name(
+            "config.toml.failure.1-2-3.tmp".as_ref()
+        ));
+        for name in [
+            "config.toml.failure",
+            "config.protected.000001.v3.0000000000000000.bak",
+            "config.toml.failure.tmp",
+        ] {
+            assert!(!is_stale_draft_name(name.as_ref()));
+        }
+    }
+
+    #[test]
+    fn missing_primary_with_failure_record_refuses_template() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let failure = folder.join("config.toml.failure");
+        let draft = folder.join("config.toml.failure.1-2-3.tmp");
+        std::fs::write(&failure, b"failure").unwrap();
+        std::fs::write(&draft, b"draft").unwrap();
+        let snap = super::super::config_store::bootstrap_at(&base, false);
+        assert_eq!(
+            snap.mode(),
+            &island_core::config_state::RuntimeMode::Recovery
+        );
+        assert!(!folder.join("config.toml").exists());
+        assert_eq!(std::fs::read(failure).unwrap(), b"failure");
+        assert!(!draft.exists());
+    }
+
+    #[test]
+    fn protected_backup_next_to_valid_rolling_backup_restores() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let protected = folder.join("config.protected.000001.v3.0000000000000000.bak");
+        let rolling = b"config_version = \"2\"\n";
+        std::fs::write(&protected, b"protected").unwrap();
+        std::fs::write(folder.join("config.toml.bak"), rolling).unwrap();
+        let snap = super::super::config_store::bootstrap_at(&base, false);
+        assert_eq!(snap.mode(), &island_core::config_state::RuntimeMode::Normal);
+        assert_eq!(std::fs::read(folder.join("config.toml")).unwrap(), rolling);
+        assert_eq!(std::fs::read(protected).unwrap(), b"protected");
+    }
+
+    #[test]
+    fn preparation_preserves_protected_backups() {
+        use island_core::config_state::{ChangeFingerprint, ProtectedBackupName};
+
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
+        std::fs::create_dir(&folder).unwrap();
+        let bytes = b"protected backup";
+        let backup_name = ProtectedBackupName::new(1, 2, ChangeFingerprint::of(bytes))
+            .unwrap()
+            .file_name();
+        let backup = folder.join(&backup_name);
+        let stale = folder.join("config.toml.1-2-3.tmp");
+        std::fs::write(&backup, bytes).unwrap();
+        std::fs::write(&stale, b"draft").unwrap();
+        assert!(!is_stale_draft_name(backup_name.as_ref()));
+
+        assert_eq!(
+            prepare_storage_at(&base).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+
+        assert!(!stale.exists());
+        assert!(backup.exists());
+        assert_eq!(std::fs::read(backup).unwrap(), bytes);
+    }
+
+    #[test]
+    fn fallback_replaces_after_source_handle_is_dropped() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let source = VerifiedFile::open_source(&dir, name(&path).unwrap()).unwrap();
+        let security = source.security().unwrap();
+        let mut draft = Draft::create(&dir, name(&path).unwrap(), Some(&security)).unwrap();
+        draft.write(b"new").unwrap();
+        super::super::config_fs::FORCE_RENAME_FALLBACK.with(|v| v.set(true));
+        draft
+            .rename(
+                &dir,
+                name(&path).unwrap(),
+                Some(&security),
+                Some((source, name(&path).unwrap())),
+                true,
+                Some(b"old"),
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn first_run_collision_does_not_overwrite() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        let dir = ConfigDir::open(&folder).unwrap();
+        assert!(
+            config_commit::commit_primary_with_hook(&dir, &path, "draft", None, || {
+                std::fs::write(&path, "external").unwrap()
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+    }
+
+    #[test]
+    fn recovery_rejects_swapped_backup() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        let backup = path.with_extension("toml.bak");
+        std::fs::write(&backup, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let result = config_recovery::recover_locked_with_hook(&dir, || {
+            std::fs::rename(&backup, folder.join("old.toml")).unwrap();
+            std::fs::write(&backup, "config_version = \"2\"\n# swapped\n").unwrap();
+        });
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn failed_draft_rename_removes_owned_file() {
+        let folder = temp_base();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let mut draft = Draft::create(&dir, "config.toml".as_ref(), None).unwrap();
+        draft.write(b"draft").unwrap();
+        assert!(
+            draft
+                .rename(&dir, "invalid/name".as_ref(), None, None, false, None)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn first_run_inherits_folder_dacl() {
+        let _serial = super::super::config_fs::TEST_WRITER_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = temp_base();
+        let folder = base.join("Islora");
         std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("sibling"), "").unwrap();
+        prepare_storage_at(&base).unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let sibling = VerifiedFile::open(&dir, "sibling".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        let primary = VerifiedFile::open(&dir, "config.toml".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(sibling.same_dacl(&primary));
+    }
+
+    #[test]
+    fn current_user_owner_survives_write() {
+        let folder = temp_base();
+        let path = folder.join("config.toml");
+        std::fs::write(&path, "config_version = \"2\"\n").unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        let before = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        config_commit::commit_primary(
+            &dir,
+            &path,
+            "config_version = \"2\"\n# updated\n",
+            Some(read_in(&dir, &path).unwrap().as_bytes()),
+        )
+        .unwrap();
+        let after = VerifiedFile::open(&dir, name(&path).unwrap())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(before.same_owner(&after));
+    }
+
+    #[test]
+    fn interrupted_update_recovers_last_complete_settings() {
+        let folder = temp_base();
         let path = folder.join("config.toml");
         std::fs::write(&path, "original = \"safe\"\n").unwrap();
-        replace(&path, "updated = \"saved\"\n").unwrap();
+        config_commit::replace(&path, "updated = \"saved\"\n").unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "updated = \"saved\"\n"
@@ -431,7 +2417,8 @@ mod tests {
         std::fs::write(path.with_extension("toml.new"), "partial").unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(!is_new_install(&path));
-        recover(&path).unwrap();
+        let dir = ConfigDir::open(&folder).unwrap();
+        config_recovery::recover_locked(&dir).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "original = \"safe\"\n"
@@ -439,6 +2426,5 @@ mod tests {
         std::fs::remove_file(path.with_extension("toml.new")).unwrap();
         std::fs::remove_file(path.with_extension("toml.bak")).unwrap();
         std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir(folder).unwrap();
     }
 }
