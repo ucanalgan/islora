@@ -60,9 +60,17 @@ pub(crate) fn writes_allowed(mode: &RuntimeMode) -> bool {
     }
 }
 
+/// Why the runtime refused a write before anything was written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefusedMode {
+    ReadOnly,
+    Recovery,
+    NotReady,
+}
+
 /// Identifies a write refused by the runtime mode.
 #[derive(Debug)]
-pub(crate) struct ModeRefused;
+pub(crate) struct ModeRefused(pub(crate) RefusedMode);
 
 impl fmt::Display for ModeRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -73,15 +81,16 @@ impl fmt::Display for ModeRefused {
 impl std::error::Error for ModeRefused {}
 
 /// Construct a typed runtime-mode refusal.
-pub(crate) fn mode_refused() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, ModeRefused)
+pub(crate) fn mode_refused(mode: RefusedMode) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, ModeRefused(mode))
 }
 
 /// Recognize a typed runtime-mode refusal.
-pub(crate) fn is_mode_refused(error: &io::Error) -> bool {
+pub(crate) fn refused_mode(error: &io::Error) -> Option<RefusedMode> {
     error
-        .get_ref()
-        .is_some_and(|cause| cause.downcast_ref::<ModeRefused>().is_some())
+        .get_ref()?
+        .downcast_ref::<ModeRefused>()
+        .map(|cause| cause.0)
 }
 
 use std::path::{Path, PathBuf};
@@ -663,11 +672,16 @@ fn locked_update_core<T>(
 }
 
 fn gate(slot: &Mutex<Option<Arc<ConfigSnapshot>>>) -> io::Result<Arc<ConfigSnapshot>> {
-    slot.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone()
-        .filter(|snapshot| snapshot.writes_allowed())
-        .ok_or_else(mode_refused)
+    let snapshot = slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    match snapshot {
+        Some(snapshot) if snapshot.writes_allowed() => Ok(snapshot),
+        Some(snapshot) => Err(mode_refused(match snapshot.mode {
+            RuntimeMode::ReadOnly => RefusedMode::ReadOnly,
+            RuntimeMode::Recovery => RefusedMode::Recovery,
+            _ => RefusedMode::NotReady,
+        })),
+        None => Err(mode_refused(RefusedMode::NotReady)),
+    }
 }
 
 fn finish(
@@ -832,11 +846,32 @@ mod tests {
     }
 
     #[test]
+    fn gate_classifies_refusing_snapshot() {
+        for (mode, ready, expected) in [
+            (RuntimeMode::ReadOnly, true, RefusedMode::ReadOnly),
+            (RuntimeMode::Recovery, true, RefusedMode::Recovery),
+            (RuntimeMode::Recovery, false, RefusedMode::Recovery),
+            (RuntimeMode::Normal, false, RefusedMode::NotReady),
+        ] {
+            let slot = Mutex::new(Some(Arc::new(ConfigSnapshot {
+                mode,
+                storage_ready: ready,
+                ..sample()
+            })));
+            assert_eq!(refused_mode(&gate(&slot).unwrap_err()), Some(expected));
+        }
+        assert_eq!(
+            refused_mode(&gate(&Mutex::new(None)).unwrap_err()),
+            Some(RefusedMode::NotReady)
+        );
+    }
+
+    #[test]
     fn refused_on_empty_slot() {
         let slot = Mutex::new(None);
-        assert!(is_mode_refused(
-            &update_in(&slot, Path::new("unused"), "x", "y").unwrap_err()
-        ));
+        assert!(
+            refused_mode(&update_in(&slot, Path::new("unused"), "x", "y").unwrap_err()).is_some()
+        );
     }
 
     #[test]
@@ -851,7 +886,7 @@ mod tests {
             Ok(())
         })
         .unwrap_err();
-        assert!(is_mode_refused(&err));
+        assert!(refused_mode(&err).is_some());
         assert!(!called.get());
     }
 
@@ -868,9 +903,10 @@ mod tests {
         let slot = Mutex::new(Some(Arc::new(bootstrap_at(&base, false))));
         let bytes = std::fs::read(&path).unwrap();
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-        assert!(is_mode_refused(
-            &update_in(&slot, &path, "x", "y").unwrap_err()
-        ));
+        assert_eq!(
+            refused_mode(&update_in(&slot, &path, "x", "y").unwrap_err()),
+            Some(RefusedMode::ReadOnly)
+        );
         assert_eq!(bytes, std::fs::read(&path).unwrap());
         assert_eq!(
             modified,
@@ -894,7 +930,7 @@ mod tests {
             Ok(())
         })
         .unwrap_err();
-        assert!(is_mode_refused(&err));
+        assert_eq!(refused_mode(&err), Some(RefusedMode::Recovery));
         assert!(!called.get());
     }
 
@@ -1312,9 +1348,7 @@ mod tests {
         let slot = Mutex::new(Some(Arc::new(sample())));
         let path = base.join("Islora/config.toml");
         let before = std::fs::read(&path).unwrap();
-        assert!(is_mode_refused(
-            &update_in(&slot, &path, "new_key", "value").unwrap_err()
-        ));
+        assert!(refused_mode(&update_in(&slot, &path, "new_key", "value").unwrap_err()).is_some());
         assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
@@ -1874,7 +1908,7 @@ mod tests {
             |snapshot, path| {
                 let slot = Mutex::new(Some(Arc::new(snapshot)));
                 let error = update_in(&slot, path, "indicator_style", "edge").unwrap_err();
-                assert!(is_mode_refused(&error));
+                assert!(refused_mode(&error).is_some());
             },
         );
     }
@@ -2296,16 +2330,16 @@ mod tests {
             Some(MigrationReport::Fallback(FallbackReason::Unprepared))
         );
         let slot = Mutex::new(Some(Arc::new(snapshot)));
-        assert!(is_mode_refused(
-            &update_in(&slot, path, "indicator_style", "edge").unwrap_err()
-        ));
+        assert!(
+            refused_mode(&update_in(&slot, path, "indicator_style", "edge").unwrap_err()).is_some()
+        );
         let mut calls = 0;
         let error = update_with_in(&slot, path, |_, _| {
             calls += 1;
             Ok(())
         })
         .unwrap_err();
-        assert!(is_mode_refused(&error));
+        assert!(refused_mode(&error).is_some());
         assert_eq!(calls, 0);
     }
 
@@ -3031,9 +3065,10 @@ mod tests {
         assert_eq!(refreshed.mode(), &RuntimeMode::Normal);
         assert_eq!(refreshed.text(), Some(current.as_str()));
         assert!(!refreshed.writes_allowed());
-        assert!(is_mode_refused(
-            &update_in(&slot, &path, "indicator_style", "edge").unwrap_err()
-        ));
+        assert!(
+            refused_mode(&update_in(&slot, &path, "indicator_style", "edge").unwrap_err())
+                .is_some()
+        );
         assert_acceptance_files(&folder, &expected);
 
         let ReloadOutcome::Repaired(restarted) = reload_in(&slot, &base) else {
@@ -3108,9 +3143,10 @@ mod tests {
         assert_eq!(refreshed.mode(), &RuntimeMode::LegacyCompatible);
         assert_eq!(refreshed.text(), Some(ACCEPTANCE_LEGACY));
         assert!(!refreshed.writes_allowed());
-        assert!(is_mode_refused(
-            &update_in(&slot, &path, "indicator_style", "edge").unwrap_err()
-        ));
+        assert!(
+            refused_mode(&update_in(&slot, &path, "indicator_style", "edge").unwrap_err())
+                .is_some()
+        );
         assert_acceptance_files(&folder, &expected);
         let restarted = bootstrap_at(&base, true);
         assert_acceptance_snapshot(
@@ -3175,16 +3211,17 @@ mod tests {
         assert_eq!(refreshed.mode(), &RuntimeMode::ReadOnly);
         assert_eq!(refreshed.text(), Some(future));
         assert!(!refreshed.writes_allowed());
-        assert!(is_mode_refused(
-            &update_in(&slot, &path, "indicator_style", "edge").unwrap_err()
-        ));
+        assert!(
+            refused_mode(&update_in(&slot, &path, "indicator_style", "edge").unwrap_err())
+                .is_some()
+        );
         let mut calls = 0;
         let error = update_with_in(&slot, &path, |_, _| {
             calls += 1;
             Ok(())
         })
         .unwrap_err();
-        assert!(is_mode_refused(&error));
+        assert!(refused_mode(&error).is_some());
         assert_eq!(calls, 0);
         assert_acceptance_files(&folder, &expected);
         let restarted = bootstrap_at(&base, true);
@@ -3287,9 +3324,7 @@ mod tests {
         );
         assert!(!snapshot.writes_allowed());
         let slot = Mutex::new(Some(Arc::new(snapshot)));
-        assert!(is_mode_refused(
-            &update_in(&slot, &path, "x", "y").unwrap_err()
-        ));
+        assert!(refused_mode(&update_in(&slot, &path, "x", "y").unwrap_err()).is_some());
         assert_eq!(std::fs::read(&path).unwrap(), replacement);
     }
 
@@ -4100,15 +4135,22 @@ mod tests {
 
     #[test]
     fn mode_refused_round_trip() {
-        let error = mode_refused();
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(is_mode_refused(&error));
-        assert!(!is_mode_refused(&io::Error::from(
-            io::ErrorKind::PermissionDenied
-        )));
+        for mode in [
+            RefusedMode::ReadOnly,
+            RefusedMode::Recovery,
+            RefusedMode::NotReady,
+        ] {
+            let error = mode_refused(mode);
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(refused_mode(&error), Some(mode));
+            assert!(!super::super::config_commit::is_primary_changed(&error));
+            assert!(!error.to_string().contains(['/', '\\']));
+        }
+        assert_eq!(
+            refused_mode(&io::Error::from(io::ErrorKind::PermissionDenied)),
+            None
+        );
         let changed = io::Error::other(super::super::config_fs::PrimaryChanged);
-        assert!(!is_mode_refused(&changed));
-        assert!(!super::super::config_commit::is_primary_changed(&error));
-        assert!(!error.to_string().contains(['/', '\\']));
+        assert_eq!(refused_mode(&changed), None);
     }
 }

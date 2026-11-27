@@ -445,8 +445,8 @@ pub(crate) struct SaveFailure {
     pub(crate) restored: bool,
     /// Whether another program changed the primary configuration file.
     pub(crate) conflict: bool,
-    /// The write was refused because settings are read-only in this mode; nothing was written.
-    pub(crate) read_only: bool,
+    /// The write was refused before anything was written, and why.
+    pub(crate) refused: Option<super::config_store::RefusedMode>,
 }
 
 impl SaveFailure {
@@ -455,7 +455,7 @@ impl SaveFailure {
         Self {
             restored,
             conflict: config_commit::is_primary_changed(error),
-            read_only: super::config_store::is_mode_refused(error),
+            refused: super::config_store::refused_mode(error),
         }
     }
 }
@@ -487,11 +487,27 @@ pub fn persist_or_rollback(key: &str, value: &str, rollback: impl FnOnce() -> bo
 
 pub(crate) fn persistence_failure_message(failure: SaveFailure) -> &'static str {
     // A refusal occurs before commit, so it cannot also be a conflict.
-    if failure.read_only {
-        return if failure.restored {
-            "Ayar kaydedilmedi: ayarlar \u{15f}u anda salt okunur (config.toml bu s\u{fc}r\u{fc}mden yeni ya da kurtarma bekliyor). \u{d6}nceki se\u{e7}im geri y\u{fc}klendi."
-        } else {
-            "Ayar kaydedilmedi: ayarlar \u{15f}u anda salt okunur (config.toml bu s\u{fc}r\u{fc}mden yeni ya da kurtarma bekliyor) ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin."
+    if let Some(refused) = failure.refused {
+        use super::config_store::RefusedMode;
+        return match (refused, failure.restored) {
+            (RefusedMode::ReadOnly, true) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait, salt okunur. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi."
+            }
+            (RefusedMode::ReadOnly, false) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait, salt okunur ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin."
+            }
+            (RefusedMode::Recovery, true) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyebilirsiniz."
+            }
+            (RefusedMode::Recovery, false) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin."
+            }
+            (RefusedMode::NotReady, true) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin."
+            }
+            (RefusedMode::NotReady, false) => {
+                "Ayar kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin."
+            }
         };
     }
     match (failure.restored, failure.conflict) {
@@ -691,7 +707,7 @@ pub(crate) mod tests {
             Err(SaveFailure {
                 restored: false,
                 conflict: false,
-                read_only: false,
+                refused: None,
             })
         );
     }
@@ -1416,7 +1432,7 @@ pub(crate) mod tests {
                 SaveFailure {
                     restored: true,
                     conflict: false,
-                    read_only: false,
+                    refused: None,
                 },
                 "Ayar kaydedilemedi. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. config.toml eri\u{15f}imini kontrol edin.",
             ),
@@ -1424,7 +1440,7 @@ pub(crate) mod tests {
                 SaveFailure {
                     restored: false,
                     conflict: false,
-                    read_only: false,
+                    refused: None,
                 },
                 "Ayar kaydedilemedi ve \u{f6}nceki durum geri y\u{fc}klenemedi. De\u{11f}i\u{15f}iklik bu oturumda veya Windows'ta etkin kalm\u{131}\u{15f} olabilir. Ayarlar\u{131} kontrol edin.",
             ),
@@ -1432,7 +1448,7 @@ pub(crate) mod tests {
                 SaveFailure {
                     restored: true,
                     conflict: true,
-                    read_only: false,
+                    refused: None,
                 },
                 "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. Dosyadaki de\u{11f}i\u{15f}ikli\u{11f}i kontrol edip tekrar deneyin.",
             ),
@@ -1440,7 +1456,7 @@ pub(crate) mod tests {
                 SaveFailure {
                     restored: false,
                     conflict: true,
-                    read_only: false,
+                    refused: None,
                 },
                 "Ayar kaydedilemedi: config.toml ba\u{15f}ka bir program taraf\u{131}ndan de\u{11f}i\u{15f}tirildi ve \u{f6}nceki durum geri y\u{fc}klenemedi. De\u{11f}i\u{15f}iklik bu oturumda veya Windows'ta etkin kalm\u{131}\u{15f} olabilir. Ayarlar\u{131} kontrol edin.",
             ),
@@ -1448,41 +1464,77 @@ pub(crate) mod tests {
                 SaveFailure {
                     restored: true,
                     conflict: false,
-                    read_only: true,
+                    refused: Some(super::super::config_store::RefusedMode::ReadOnly),
                 },
-                "Ayar kaydedilmedi: ayarlar \u{15f}u anda salt okunur (config.toml bu s\u{fc}r\u{fc}mden yeni ya da kurtarma bekliyor). \u{d6}nceki se\u{e7}im geri y\u{fc}klendi.",
+                "Ayar kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait, salt okunur. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi.",
             ),
             (
                 SaveFailure {
                     restored: false,
                     conflict: false,
-                    read_only: true,
+                    refused: Some(super::super::config_store::RefusedMode::ReadOnly),
                 },
-                "Ayar kaydedilmedi: ayarlar \u{15f}u anda salt okunur (config.toml bu s\u{fc}r\u{fc}mden yeni ya da kurtarma bekliyor) ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin.",
+                "Ayar kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait, salt okunur ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin.",
             ),
             (
                 SaveFailure {
                     restored: true,
-                    conflict: true,
-                    read_only: true,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::Recovery),
                 },
-                "Ayar kaydedilmedi: ayarlar \u{15f}u anda salt okunur (config.toml bu s\u{fc}r\u{fc}mden yeni ya da kurtarma bekliyor). \u{d6}nceki se\u{e7}im geri y\u{fc}klendi.",
+                "Ayar kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyebilirsiniz.",
+            ),
+            (
+                SaveFailure {
+                    restored: false,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::Recovery),
+                },
+                "Ayar kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin.",
+            ),
+            (
+                SaveFailure {
+                    restored: true,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::NotReady),
+                },
+                "Ayar kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il. \u{d6}nceki se\u{e7}im geri y\u{fc}klendi. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin.",
+            ),
+            (
+                SaveFailure {
+                    restored: false,
+                    conflict: false,
+                    refused: Some(super::super::config_store::RefusedMode::NotReady),
+                },
+                "Ayar kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il ve \u{f6}nceki durum geri y\u{fc}klenemedi. Ayarlar\u{131} kontrol edin.",
             ),
         ] {
-            assert_eq!(persistence_failure_message(failure), expected);
+            let text = persistence_failure_message(failure);
+            assert_eq!(text, expected);
+            if failure.refused.is_some() {
+                assert!(!text.contains("config.toml"));
+                assert!(!text.bytes().any(|b| b.is_ascii_digit()));
+            }
         }
     }
 
     #[test]
-    fn save_failure_from_mode_refused_is_read_only() {
-        let refused = SaveFailure::from_error(&super::super::config_store::mode_refused(), true);
-        assert!(refused.read_only);
-        assert!(!refused.conflict);
+    fn save_failure_from_mode_refused_round_trips() {
+        use super::super::config_store::{RefusedMode, mode_refused};
+        for mode in [
+            RefusedMode::ReadOnly,
+            RefusedMode::Recovery,
+            RefusedMode::NotReady,
+        ] {
+            let failure = SaveFailure::from_error(&mode_refused(mode), true);
+            assert_eq!(failure.refused, Some(mode));
+            assert!(!failure.conflict);
+        }
         let changed = SaveFailure::from_error(
             &io::Error::other(super::super::config_fs::PrimaryChanged),
             true,
         );
-        assert!(!changed.read_only);
+        assert_eq!(changed.refused, None);
         assert!(changed.conflict);
     }
 
@@ -1497,7 +1549,7 @@ pub(crate) mod tests {
             Err(SaveFailure {
                 restored: true,
                 conflict: false,
-                read_only: false,
+                refused: None,
             })
         );
     }
@@ -1527,7 +1579,7 @@ pub(crate) mod tests {
             Err(SaveFailure {
                 restored: true,
                 conflict: true,
-                read_only: false,
+                refused: None,
             })
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
@@ -1559,7 +1611,7 @@ pub(crate) mod tests {
             Err(SaveFailure {
                 restored: true,
                 conflict: false,
-                read_only: false,
+                refused: None,
             })
         );
         assert_eq!(
@@ -1571,7 +1623,7 @@ pub(crate) mod tests {
             Err(SaveFailure {
                 restored: false,
                 conflict: false,
-                read_only: false,
+                refused: None,
             })
         );
     }

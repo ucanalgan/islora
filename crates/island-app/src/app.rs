@@ -3715,8 +3715,18 @@ fn stored_progress_style() -> ProgressStyle {
 }
 
 fn calendar_save_note(error: &std::io::Error) -> &'static str {
-    if config_store::is_mode_refused(error) {
-        "Takvim adresi kaydedilmedi: ayarlar \u{15f}u anda salt okunur (config.toml bu s\u{fc}r\u{fc}mden yeni ya da kurtarma bekliyor)."
+    if let Some(mode) = config_store::refused_mode(error) {
+        match mode {
+            config_store::RefusedMode::ReadOnly => {
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait."
+            }
+            config_store::RefusedMode::Recovery => {
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor."
+            }
+            config_store::RefusedMode::NotReady => {
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin."
+            }
+        }
     } else if crate::platform::config_commit::is_primary_changed(error) {
         "Takvim adresi kaydedilemedi; config.toml baska bir program tarafindan degistirildi"
     } else {
@@ -3764,10 +3774,14 @@ fn start_with_windows_by_default() {
         eprintln!("default Windows startup setting skipped: {error}");
         return;
     }
-    if matches!(&result, Ok(AutostartOutcome::SaveFailed(failure)) if failure.read_only) {
+    if autostart_refusal_is_silent(&result) {
         return;
     }
     report_autostart_result(result);
+}
+
+fn autostart_refusal_is_silent(result: &std::io::Result<AutostartOutcome>) -> bool {
+    matches!(result, Ok(AutostartOutcome::SaveFailed(failure)) if failure.refused.is_some())
 }
 
 #[derive(Debug, PartialEq)]
@@ -4366,7 +4380,7 @@ mod tests {
             AutostartOutcome::SaveFailed(settings::SaveFailure {
                 restored: true,
                 conflict: false,
-                read_only: false,
+                refused: None,
             })
         );
         std::fs::remove_dir_all(base).unwrap();
@@ -4374,10 +4388,25 @@ mod tests {
 
     #[test]
     fn calendar_save_note_distinguishes_conflict() {
-        assert_eq!(
-            calendar_save_note(&config_store::mode_refused()),
-            "Takvim adresi kaydedilmedi: ayarlar \u{15f}u anda salt okunur (config.toml bu s\u{fc}r\u{fc}mden yeni ya da kurtarma bekliyor)."
-        );
+        for (mode, expected) in [
+            (
+                config_store::RefusedMode::ReadOnly,
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} daha yeni bir Islora s\u{fc}r\u{fc}m\u{fc}ne ait.",
+            ),
+            (
+                config_store::RefusedMode::Recovery,
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} onar\u{131}m bekliyor.",
+            ),
+            (
+                config_store::RefusedMode::NotReady,
+                "Takvim adresi kaydedilmedi: ayar dosyas\u{131} \u{15f}u anda haz\u{131}r de\u{11f}il. 'Takvimi ve ayarlar\u{131} yenile' ile yeniden deneyin.",
+            ),
+        ] {
+            let text = calendar_save_note(&config_store::mode_refused(mode));
+            assert_eq!(text, expected);
+            assert!(!text.contains("config.toml"));
+            assert!(!text.bytes().any(|b| b.is_ascii_digit()));
+        }
         let conflict = std::io::Error::other(crate::platform::config_fs::PrimaryChanged);
         assert_eq!(
             calendar_save_note(&conflict),
@@ -4388,6 +4417,25 @@ mod tests {
             calendar_save_note(&ordinary),
             "Takvim adresi kaydedilemedi; dosya erisimini kontrol edin"
         );
+    }
+
+    #[test]
+    fn autostart_each_refusal_is_silent() {
+        for mode in [
+            config_store::RefusedMode::ReadOnly,
+            config_store::RefusedMode::Recovery,
+            config_store::RefusedMode::NotReady,
+        ] {
+            let result = Ok(AutostartOutcome::SaveFailed(settings::SaveFailure {
+                restored: true,
+                conflict: false,
+                refused: Some(mode),
+            }));
+            assert!(autostart_refusal_is_silent(&result));
+        }
+        assert!(!autostart_refusal_is_silent(&Ok(
+            AutostartOutcome::NoChange
+        )));
     }
 
     #[test]
@@ -4415,7 +4463,7 @@ mod tests {
             AutostartOutcome::SaveFailed(settings::SaveFailure {
                 restored: false,
                 conflict: false,
-                read_only: false,
+                refused: None,
             })
         );
     }
@@ -4588,7 +4636,7 @@ mod tests {
             Some(Err(settings::SaveFailure {
                 restored: true,
                 conflict: false,
-                read_only: false,
+                refused: None,
             }))
         );
         assert_eq!(island.start_mode(), previous);
