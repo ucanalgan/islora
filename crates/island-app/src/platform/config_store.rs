@@ -356,7 +356,6 @@ pub(crate) fn bootstrap(migrate: bool) -> Arc<ConfigSnapshot> {
     })
 }
 
-#[allow(dead_code, reason = "accessor is currently unused in production")]
 pub(crate) fn snapshot() -> Option<Arc<ConfigSnapshot>> {
     STORE.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
