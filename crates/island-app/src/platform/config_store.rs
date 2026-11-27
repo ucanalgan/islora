@@ -115,6 +115,17 @@ pub(crate) struct ConfigSnapshot {
 }
 
 // Readers and writers switch to these accessors in 2C-2 S3.
+#[cfg(test)]
+pub(crate) fn test_snapshot(report: Option<MigrationReport>) -> Arc<ConfigSnapshot> {
+    Arc::new(ConfigSnapshot {
+        sequence: 0,
+        text: None,
+        mode: RuntimeMode::Normal,
+        storage_ready: false,
+        migration_report: Arc::new(Mutex::new(report)),
+    })
+}
+
 impl ConfigSnapshot {
     pub(crate) fn take_migration_report(&self) -> Option<MigrationReport> {
         self.migration_report
@@ -453,15 +464,8 @@ fn refresh_in(slot: &Mutex<Option<Arc<ConfigSnapshot>>>, base: &Path) -> Arc<Con
     refresh_folder(slot, Ok(base.join("Islora")))
 }
 
-/// Refresh the installed snapshot; bootstrap must run first.
-// The store is used only on the UI thread, so refreshes cannot overlap.
-// Installs are still ordered by the write sequence.
-pub(crate) fn refresh() -> Arc<ConfigSnapshot> {
-    refresh_folder(&STORE, config_folder())
-}
-
 /// What a Reload did. Every variant carries the snapshot installed afterwards.
-#[allow(dead_code)] // Called from App::reload in 2D-2 S7.
+#[allow(dead_code)] // Production reads only the Repaired snapshot; tests read every variant.
 #[derive(Debug)]
 pub(crate) enum ReloadOutcome {
     /// The ready, non-Recovery primary was refreshed without taking the lock.
@@ -542,7 +546,6 @@ fn reload_in(slot: &Mutex<Option<Arc<ConfigSnapshot>>>, base: &Path) -> ReloadOu
     reload_folder_with(slot, Ok(base.join("Islora")), || {})
 }
 
-#[allow(dead_code)] // Called from App::reload in 2D-2 S7.
 pub(crate) fn reload() -> ReloadOutcome {
     reload_folder(&STORE, config_folder())
 }

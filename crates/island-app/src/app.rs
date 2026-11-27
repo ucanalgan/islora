@@ -623,6 +623,21 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// The migration report the app keeps after a Reload. Only a repairing reload replaces it
+/// (with the fresh report its snapshot carries); a plain refresh or a refused reload keeps it.
+fn report_after_reload(
+    current: Option<MigrationReport>,
+    outcome: &config_store::ReloadOutcome,
+) -> Option<MigrationReport> {
+    match outcome {
+        config_store::ReloadOutcome::Repaired(snapshot) => {
+            snapshot.take_migration_report().or(current)
+        }
+        config_store::ReloadOutcome::Refreshed(_)
+        | config_store::ReloadOutcome::StillRefused(_, _) => current,
+    }
+}
+
 impl App {
     fn now(&self) -> Millis {
         self.started.elapsed().as_millis() as Millis
@@ -1694,7 +1709,8 @@ impl App {
     }
 
     fn reload(&mut self) {
-        config_store::refresh();
+        let outcome = config_store::reload();
+        self.migration_report = report_after_reload(self.migration_report.take(), &outcome);
         apply_settings(&mut self.island);
         self.preferences = stored_preferences();
         self.renderer.set_preferences(self.preferences);
@@ -4275,6 +4291,32 @@ fn calendar_address() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::config_migrate::FallbackReason;
+
+    #[test]
+    fn reload_refresh_or_refusal_keeps_current_report() {
+        let current = Some(MigrationReport::Fallback(FallbackReason::Busy));
+        let refreshed = config_store::ReloadOutcome::Refreshed(config_store::test_snapshot(None));
+        let refused = config_store::ReloadOutcome::StillRefused(
+            config_store::test_snapshot(None),
+            FallbackReason::Busy,
+        );
+        assert_eq!(report_after_reload(current.clone(), &refreshed), current);
+        assert_eq!(report_after_reload(current.clone(), &refused), current);
+    }
+
+    #[test]
+    fn reload_repair_replaces_report_and_keeps_it_if_snapshot_has_none() {
+        let current = Some(MigrationReport::Fallback(FallbackReason::Busy));
+        let repaired = config_store::ReloadOutcome::Repaired(config_store::test_snapshot(Some(
+            MigrationReport::NotNeeded,
+        )));
+        assert_eq!(
+            report_after_reload(current.clone(), &repaired),
+            Some(MigrationReport::NotNeeded)
+        );
+        assert_eq!(report_after_reload(current.clone(), &repaired), current);
+    }
 
     #[test]
     fn autostart_rollback_holds_writer_lock() {
