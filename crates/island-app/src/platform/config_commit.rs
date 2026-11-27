@@ -240,6 +240,110 @@ pub(crate) fn commit_primary_with_hook(
     Ok(())
 }
 
+/// Restore the missing primary configuration from one backup, byte for byte.
+/// The caller holds the WriterLock and has classified the candidate; `expected` is the
+/// fingerprint it observed. The backup is only read: it is never deleted, renamed or
+/// changed, and its attributes stay as they are. The primary is created only if it does
+/// not exist (no-replace rename) and is verified after the rename.
+#[allow(dead_code)] // Called from recover_locked in 2D-2 S5.
+pub(crate) fn restore_primary(
+    dir: &ConfigDir,
+    source_name: &std::ffi::OsStr,
+    expected: island_core::config_state::ChangeFingerprint,
+) -> io::Result<()> {
+    restore_primary_with_hook(
+        dir,
+        source_name,
+        expected,
+        #[cfg(test)]
+        || {},
+    )
+}
+
+fn restore_primary_with_hook(
+    dir: &ConfigDir,
+    source_name: &std::ffi::OsStr,
+    expected: island_core::config_state::ChangeFingerprint,
+    #[cfg(test)] hook: impl FnOnce(),
+) -> io::Result<()> {
+    #[cfg(test)]
+    let after_primary_rename = AFTER_PRIMARY_RENAME.with(|hook| hook.borrow_mut().take());
+    let mut source = VerifiedFile::open_source(dir, source_name).map_err(io::Error::from)?;
+    let bytes = source
+        .read_bounded(island_core::migration::MAX_CONFIG_BYTES)
+        .map_err(io::Error::from)?;
+    if island_core::config_state::ChangeFingerprint::of(&bytes) != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "configuration backup changed before restore",
+        ));
+    }
+    let security = source.security().map_err(io::Error::from)?;
+    let target = std::ffi::OsStr::new(PRIMARY_NAME);
+    let mut draft = Draft::create(dir, target, Some(&security)).map_err(io::Error::from)?;
+    draft.write(&bytes).map_err(io::Error::from)?;
+    verify_draft(&mut draft, &bytes)?;
+    #[cfg(test)]
+    hook();
+    let draft_identity = draft.identity().map_err(io::Error::from)?;
+    source.rewind().map_err(io::Error::from)?;
+    match source.read_bounded(island_core::migration::MAX_CONFIG_BYTES) {
+        Ok(actual) if actual == bytes => {}
+        Ok(_) | Err(super::config_fs::ConfigFsError::TooLarge) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "configuration backup changed during restore",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    draft
+        .rename(
+            dir,
+            target,
+            Some(&security),
+            Some((source, source_name)),
+            false,
+            None,
+        )
+        .map_err(io::Error::from)?;
+    #[cfg(test)]
+    if let Some(hook) = after_primary_rename {
+        hook();
+    }
+    let verified = (|| {
+        let mut file = VerifiedFile::open(dir, target)
+            .map_err(|error| {
+                eprintln!(
+                    "configuration verification open failed: {:?}",
+                    io::Error::from(error).kind()
+                );
+            })
+            .ok()?;
+        let identity = file.identity();
+        let actual = file
+            .read_bounded(island_core::migration::MAX_CONFIG_BYTES)
+            .map_err(|error| {
+                eprintln!(
+                    "configuration verification read failed: {:?}",
+                    io::Error::from(error).kind()
+                );
+            })
+            .ok()?;
+        Some(identity == draft_identity && actual == bytes)
+    })();
+    if verified != Some(true) {
+        return Err(io::Error::other(CommitUnverified));
+    }
+    #[cfg(test)]
+    {
+        let actual = VerifiedFile::open(dir, target).unwrap().security().unwrap();
+        assert!(security.same_dacl(&actual));
+        assert!(security.same_owner(&actual));
+    }
+    Ok(())
+}
+
 /// Writes one protected backup of `text` next to the primary under a core-built unique name.
 /// The file is created exclusively (an existing name is an `AlreadyExists` error, never
 /// overwritten), written through, read back and compared, then marked read-only. Any failure
@@ -338,6 +442,371 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn restore_primary_writes_exact_bytes() {
+        use island_core::config_state::ChangeFingerprint;
+        for bytes in [
+            b"legacy = true\r\nunsupported = 7\r\n".as_slice(),
+            b"config_version = \"2\"\r\nunsupported = 7\r\n".as_slice(),
+            b"\xef\xbb\xbfconfig_version = \"2\"\r\n".as_slice(),
+            b"\xff\xfeinvalid\r\n".as_slice(),
+        ] {
+            let temp = Temp::new();
+            let backup = temp.0.join("config.toml.bak");
+            std::fs::write(&backup, bytes).unwrap();
+            let dir = ConfigDir::open(&temp.0).unwrap();
+            restore_primary(
+                &dir,
+                "config.toml.bak".as_ref(),
+                ChangeFingerprint::of(bytes),
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(temp.0.join(PRIMARY_NAME)).unwrap(), bytes);
+            assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+            assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 2);
+        }
+    }
+
+    struct ReadOnlyGuard(std::path::PathBuf);
+    impl Drop for ReadOnlyGuard {
+        fn drop(&mut self) {
+            if let Ok(metadata) = std::fs::metadata(&self.0) {
+                let mut permissions = metadata.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                permissions.set_readonly(false);
+                let _ = std::fs::set_permissions(&self.0, permissions);
+            }
+        }
+    }
+
+    #[test]
+    fn restore_primary_from_read_only_backup_gives_writable_primary() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        let backup = temp.0.join("config.toml.bak");
+        std::fs::write(&backup, b"backup").unwrap();
+        let _guard = ReadOnlyGuard(backup.clone());
+        let mut permissions = std::fs::metadata(&backup).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&backup, permissions).unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        restore_primary(
+            &dir,
+            "config.toml.bak".as_ref(),
+            ChangeFingerprint::of(b"backup"),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&backup).unwrap(), b"backup");
+        assert!(is_readonly(&backup));
+        assert_eq!(std::fs::read(temp.0.join(PRIMARY_NAME)).unwrap(), b"backup");
+        assert!(!is_readonly(&temp.0.join(PRIMARY_NAME)));
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn restore_primary_never_replaces_existing_primary() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        std::fs::write(temp.0.join("config.toml.bak"), b"backup").unwrap();
+        std::fs::write(temp.0.join(PRIMARY_NAME), b"existing").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let error = restore_primary(
+            &dir,
+            "config.toml.bak".as_ref(),
+            ChangeFingerprint::of(b"backup"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(temp.0.join(PRIMARY_NAME)).unwrap(),
+            b"existing"
+        );
+        assert_eq!(
+            std::fs::read(temp.0.join("config.toml.bak")).unwrap(),
+            b"backup"
+        );
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn restore_primary_refuses_changed_backup() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        std::fs::write(temp.0.join("config.toml.bak"), b"backup").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let error = restore_primary(
+            &dir,
+            "config.toml.bak".as_ref(),
+            ChangeFingerprint::of(b"different"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "configuration backup changed before restore"
+        );
+        assert!(!temp.0.join(PRIMARY_NAME).exists());
+        assert_eq!(
+            std::fs::read(temp.0.join("config.toml.bak")).unwrap(),
+            b"backup"
+        );
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn restore_primary_refuses_backup_changed_in_place() {
+        use island_core::config_state::ChangeFingerprint;
+        use std::io::Write;
+        let temp = Temp::new();
+        let backup = temp.0.join("config.toml.bak");
+        std::fs::write(&backup, b"backup").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let error = restore_primary_with_hook(
+            &dir,
+            "config.toml.bak".as_ref(),
+            ChangeFingerprint::of(b"backup"),
+            || {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&backup)
+                    .unwrap()
+                    .write_all(b"changed")
+                    .unwrap();
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "configuration backup changed during restore"
+        );
+        assert!(!temp.0.join(PRIMARY_NAME).exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"changed");
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn restore_primary_refuses_swapped_source() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        let backup = temp.0.join("config.toml.bak");
+        std::fs::write(&backup, b"backup").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let result = restore_primary_with_hook(
+            &dir,
+            "config.toml.bak".as_ref(),
+            ChangeFingerprint::of(b"backup"),
+            || {
+                std::fs::remove_file(&backup).unwrap();
+                std::fs::write(&backup, b"replacement").unwrap();
+            },
+        );
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "configuration source changed");
+        assert!(!temp.0.join(PRIMARY_NAME).exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"replacement");
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn restore_primary_reports_unverified_primary() {
+        use island_core::config_state::ChangeFingerprint;
+        for replace in [false, true] {
+            let temp = Temp::new();
+            let backup = temp.0.join("config.toml.bak");
+            std::fs::write(&backup, b"backup").unwrap();
+            let primary = temp.0.join(PRIMARY_NAME);
+            let dir = ConfigDir::open(&temp.0).unwrap();
+            AFTER_PRIMARY_RENAME.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    if replace {
+                        std::fs::remove_file(&primary).unwrap();
+                        std::fs::write(&primary, b"backup").unwrap();
+                    } else {
+                        std::fs::write(&primary, b"changed").unwrap();
+                    }
+                }));
+            });
+            let error = restore_primary(
+                &dir,
+                "config.toml.bak".as_ref(),
+                ChangeFingerprint::of(b"backup"),
+            )
+            .unwrap_err();
+            assert!(is_commit_unverified(&error));
+            assert_eq!(
+                std::fs::read(temp.0.join(PRIMARY_NAME)).unwrap(),
+                if replace {
+                    b"backup".as_slice()
+                } else {
+                    b"changed".as_slice()
+                }
+            );
+            assert_eq!(std::fs::read(&backup).unwrap(), b"backup");
+            assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn restore_primary_refuses_oversized_backup() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        let bytes = vec![b'x'; island_core::migration::MAX_CONFIG_BYTES + 1];
+        let backup = temp.0.join("config.toml.bak");
+        std::fs::write(&backup, &bytes).unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let error = restore_primary(
+            &dir,
+            "config.toml.bak".as_ref(),
+            ChangeFingerprint::of(&bytes),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!temp.0.join(PRIMARY_NAME).exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn restore_primary_keeps_source_dacl() {
+        use island_core::config_state::ChangeFingerprint;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+            SetSecurityInfo,
+        };
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        };
+        use windows::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        let temp = Temp::new();
+        let backup = temp.0.join("config.toml.bak");
+        std::fs::write(&backup, b"backup").unwrap();
+        std::fs::write(temp.0.join("sibling"), b"sibling").unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let original = VerifiedFile::open(&dir, "config.toml.bak".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        let file = std::fs::OpenOptions::new()
+            .access_mode((WRITE_DAC | READ_CONTROL).0)
+            .open(&backup)
+            .unwrap();
+        let sddl = format!("D:P(A;;FA;;;{})(A;;FA;;;SY)", original.owner_sid_string());
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: valid SDDL and output pointer; the returned allocation is freed below.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &windows::core::HSTRING::from(sddl),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+        }
+        .unwrap();
+        let mut present = false.into();
+        let mut defaulted = false.into();
+        let mut acl = std::ptr::null_mut();
+        // SAFETY: descriptor is live and output pointers are valid.
+        unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) }
+            .unwrap();
+        // SAFETY: the file handle and ACL are live for this call.
+        let status = unsafe {
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(acl),
+                None,
+            )
+        };
+        // SAFETY: the conversion returned this LocalAlloc allocation once.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        }
+        assert_eq!(status.0, 0);
+        drop(file);
+        let expected = VerifiedFile::open(&dir, "config.toml.bak".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        let sibling = VerifiedFile::open(&dir, "sibling".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(!expected.same_dacl(&sibling));
+        restore_primary(
+            &dir,
+            "config.toml.bak".as_ref(),
+            ChangeFingerprint::of(b"backup"),
+        )
+        .unwrap();
+        let actual = VerifiedFile::open(&dir, PRIMARY_NAME.as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        let backup_after = VerifiedFile::open(&dir, "config.toml.bak".as_ref())
+            .unwrap()
+            .security()
+            .unwrap();
+        assert!(expected.same_dacl(&actual));
+        assert!(expected.same_owner(&actual));
+        assert!(expected.same_dacl(&backup_after));
+        assert!(expected.same_owner(&backup_after));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"backup");
+        assert_eq!(std::fs::read(temp.0.join(PRIMARY_NAME)).unwrap(), b"backup");
+        assert_eq!(std::fs::read(temp.0.join("sibling")).unwrap(), b"sibling");
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn restore_primary_draft_failure_leaves_read_only_backup_intact() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        let backup = temp.0.join("config.toml.bak");
+        std::fs::write(&backup, b"backup").unwrap();
+        let _guard = ReadOnlyGuard(backup.clone());
+        let mut permissions = std::fs::metadata(&backup).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&backup, permissions).unwrap();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        FAIL_VERIFICATION_AT.with(|count| count.set(1));
+        let error = restore_primary(
+            &dir,
+            "config.toml.bak".as_ref(),
+            ChangeFingerprint::of(b"backup"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "configuration draft did not verify");
+        assert!(!temp.0.join(PRIMARY_NAME).exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"backup");
+        assert!(is_readonly(&backup));
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn restore_primary_missing_source() {
+        use island_core::config_state::ChangeFingerprint;
+        let temp = Temp::new();
+        let dir = ConfigDir::open(&temp.0).unwrap();
+        let error = restore_primary(
+            &dir,
+            "config.toml.bak".as_ref(),
+            ChangeFingerprint::of(b"backup"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 0);
     }
 
     fn failure_record() -> island_core::config_state::FailureRecord {
