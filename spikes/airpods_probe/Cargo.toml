@@ -1,0 +1,22 @@
+[package]
+name = "airpods_probe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+island-core = { path = "../../crates/island-core" }
+windows-collections = "0.3"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Enumeration",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_WinRT",
+]

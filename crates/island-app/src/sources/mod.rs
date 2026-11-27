@@ -1,3 +1,4 @@
+pub mod airpods;
 pub mod audio;
 pub mod bluetooth;
 pub mod calendar;

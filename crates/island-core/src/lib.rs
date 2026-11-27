@@ -2,6 +2,7 @@
 //! behaviour can be unit tested with a fake clock.
 
 pub mod activity;
+pub mod airpods;
 pub mod clock_timer;
 pub mod config;
 pub mod config_state;

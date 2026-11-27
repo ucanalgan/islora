@@ -3054,6 +3054,16 @@ impl App {
                 name: name.clone(),
                 percent: 80,
             },
+            Indicator::AirPods {
+                name: "AirPods Pro".into(),
+                left: Some(80),
+                right: Some(90),
+                case: Some(50),
+            },
+            Indicator::AirPodsLow {
+                left: Some(20),
+                right: None,
+            },
             Indicator::BluetoothDisconnected { name: name.clone() },
             Indicator::AudioOutput { name: name.clone() },
             Indicator::Microphone { muted: true },
